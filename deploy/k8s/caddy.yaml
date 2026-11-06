@@ -1,0 +1,82 @@
+# HTTPS entry point. It uses the same Caddyfile as the VM setup and gets its own Let's Encrypt certificate.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: caddy-data
+  namespace: rcc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caddy
+  namespace: rcc
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: caddy
+  template:
+    metadata:
+      labels:
+        app: caddy
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: caddy
+          image: ACR_NAME.azurecr.io/caddy:2-alpine
+          env:
+            - name: RCC_DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: rcc-config
+                  key: RCC_DOMAIN
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: caddyfile
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: caddyfile
+          configMap:
+            name: caddyfile
+        - name: data
+          persistentVolumeClaim:
+            claimName: caddy-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: caddy
+  namespace: rcc
+  annotations:
+    # Live updates can be quiet for a while, so allow longer than Azure's default 4 minutes.
+    service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout: "30"
+spec:
+  type: LoadBalancer
+  # Keeps the visitor's real IP address, which sign-in rate limits and logs rely on.
+  externalTrafficPolicy: Local
+  selector:
+    app: caddy
+  ports:
+    - name: http
+      port: 80
+    - name: https
+      port: 443

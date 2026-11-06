@@ -1,0 +1,20 @@
+stateDiagram-v2
+  direction LR
+  [*] --> Draft: Written by a person,<br/>or drafted by AI
+  Draft --> Reviewed: Admin reviews it
+  Reviewed --> Draft: Any edit
+  Draft --> Archived
+  Reviewed --> Archived
+  Reviewed --> Following: Engineer starts it
+  state Following {
+    direction LR
+    [*] --> Step1
+    Step1 --> Step2: Done or skipped
+    Step2 --> Step3: Done or skipped
+    Step3 --> StepN: Done or skipped
+    StepN --> [*]: Done or skipped
+  }
+  Following --> Recorded: Result, helped or not
+  Following --> Abandoned: Ended early
+  Recorded --> Reviewed: Result counts in its history
+  Abandoned --> Reviewed

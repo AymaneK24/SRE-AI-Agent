@@ -1,0 +1,5 @@
+*
+!app
+!requirements.txt
+!deploy/harden-image.py
+**/__pycache__

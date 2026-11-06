@@ -1,0 +1,43 @@
+erDiagram
+  ORGANIZATIONS ||--o{ USERS : has
+  USERS ||--o{ SESSIONS : "at most 5"
+  USERS ||--o{ CONVERSATIONS : owns
+  CONVERSATIONS ||--o{ MESSAGES : holds
+  CONVERSATIONS ||--o{ LLM_CALLS : "logs prompts in"
+  CONVERSATIONS ||--o{ TOOL_CALLS : "logs queries in"
+  ORGANIZATIONS ||--o{ SOURCES : connects
+  SOURCES ||--o{ PANELS : charts
+  SOURCES ||--o{ EVENTS : records
+  ORGANIZATIONS ||--o{ PROJECTS : groups
+  PROJECTS }o--o{ SOURCES : uses
+  PROJECTS ||--o{ PROJECT_REPORTS : saves
+  ORGANIZATIONS ||--o{ ISSUE_VERDICTS : decides
+  ORGANIZATIONS ||--o{ WORKFLOWS : keeps
+  WORKFLOWS ||--o{ WORKFLOW_RUNS : "followed in"
+  WORKFLOWS ||--o{ WORKFLOW_RECORDS : "results in"
+  ORGANIZATIONS ||--o{ AUDIT_LOG : "hash chain"
+  USERS {
+    string email "signs in, unique"
+    string username "always equals email"
+    string name "required, shown to people"
+    string role "viewer to owner"
+    string pending_email "until confirmed"
+  }
+  CONVERSATIONS {
+    int owner_id "who may read it"
+    string visibility "private or team"
+    string trigger "manual, auto, report"
+  }
+  PROJECT_REPORTS {
+    int shared "viewers can download"
+    text data "fixed snapshot"
+  }
+  WORKFLOW_RUNS {
+    text steps "copy with each step state"
+    string status "running, finished, abandoned"
+    string outcome "helped, partly, did not help"
+  }
+  ISSUE_VERDICTS {
+    string verdict "real, false positive, expected"
+    string decided_by "who decided"
+  }

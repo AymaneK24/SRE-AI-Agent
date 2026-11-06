@@ -1,0 +1,15 @@
+# An internal host name with your company's certificate, from deploy/certs.
+{
+	admin off
+	auto_https disable_redirects
+}
+{$RCC_DOMAIN} {
+	tls /certs/cert.pem /certs/key.pem
+	encode gzip
+	header -Server
+	@internal path /metrics
+	respond @internal 404
+	reverse_proxy console:8000 {
+		flush_interval -1
+	}
+}

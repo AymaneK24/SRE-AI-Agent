@@ -1,0 +1,27 @@
+sequenceDiagram
+  actor P as Engineer
+  participant R as Runner
+  participant C as Live context
+  participant M as AI model
+  participant S as Metric sources
+  participant D as Database
+  P->>R: Asks a question
+  R->>C: Reads alerts, targets, signals, changes
+  R->>D: Finds past work this person may read
+  R->>D: Finds matching reviewed workflows
+  loop Up to the round and token limits
+    R->>D: Logs the exact prompt
+    R->>M: Sends the prompt
+    M-->>R: Answer, or a read-only query
+    opt The model asked for a query
+      R->>S: Runs it, through the outgoing guard
+      S-->>R: Result, credentials removed
+    end
+  end
+  R->>R: Checks cited numbers and queries, and lowers confidence if they fail
+  R->>D: Saves answer, cost, and checks
+  R-->>P: Shows the answer, private to this person
+  opt The person chooses to share
+    P->>D: Share with team
+    Note over D: Engineers can read it.<br/>Viewers get the question and answer only.
+  end

@@ -1,0 +1,19 @@
+sequenceDiagram
+  actor U as Signed-in person
+  participant S as Console
+  participant O as Current email
+  participant N as New email
+  U->>S: New email and current password
+  alt Password wrong or missing
+    S-->>U: Refused, and limited to 5 tries in 15 minutes
+  else Password correct
+    S->>S: Saves it as pending. Sign-in stays on the current email
+    S->>N: Confirmation link, works for 24 hours
+    S->>O: Warning that a change was requested
+    alt New address opens the link
+      N->>S: Confirms
+      S->>S: Email and username change, and every session ends
+    else Nobody opens it
+      S->>S: Nothing changes
+    end
+  end

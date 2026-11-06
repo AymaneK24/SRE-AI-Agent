@@ -1,0 +1,6 @@
+flowchart TB
+  O[Owner] -->|everything an admin has, plus| O1[Security policies<br/>Single sign-on<br/>Log retention]
+  A[Admin] -->|everything an engineer has, plus| A1[Connections and AI settings<br/>Members and invitations<br/>Usage and budgets<br/>Audit trail, alerts sent<br/>Read every investigation<br/>Review workflows, delete projects]
+  E[Engineer] -->|everything a viewer has, plus| E1[Investigate, and own private work<br/>Prompts for own and shared work<br/>Run metric queries, edit panels<br/>Follow and edit workflows<br/>Create reports, record verdicts]
+  V[Viewer] --> V1[Overview: plain status, saved charts<br/>Projects: status, issues, shared reports<br/>Investigations: question and answer only]
+  O --> A --> E --> V

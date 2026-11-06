@@ -1,0 +1,16 @@
+# An IP address or internal name, with no company certificate. Traffic is encrypted,
+# but browsers warn on first visit, because Caddy signs this certificate itself.
+{
+	admin off
+	skip_install_trust
+}
+{$RCC_DOMAIN} {
+	tls internal
+	encode gzip
+	header -Server
+	@internal path /metrics
+	respond @internal 404
+	reverse_proxy console:8000 {
+		flush_interval -1
+	}
+}

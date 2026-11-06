@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.1.post1
+ruff==0.17.3
+aiosmtpd==1.4.6
+moto[server,cloudwatch,logs]==5.2.5
+pypdf==5.9.0

@@ -1,0 +1,72 @@
+# Root Cause Console: the app, PostgreSQL, and Caddy for HTTPS.
+#
+#   sh deploy/setup-env.sh           Asks a few questions and writes .env with new secrets.
+#   docker compose up -d --build     Starts everything.
+#
+# See docs/DEPLOY.md.
+services:
+  console:
+    build: .
+    image: ${RCC_IMAGE:-root-cause-console:latest}
+    env_file: .env
+    environment:
+      RCC_MODE: production
+      RCC_DATABASE_URL: "postgresql://rcc:${POSTGRES_PASSWORD:?Run sh deploy/setup-env.sh first}@postgres:5432/rcc"
+      RCC_TRUST_PROXY: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Not published. Only Caddy reaches it.
+    expose:
+      - "8000"
+    # Lets the console reach Ollama or Prometheus running on this same machine.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - console-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Reached only by the console, because it has no published port.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rcc
+      POSTGRES_DB: rcc
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Run sh deploy/setup-env.sh first}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rcc -d rcc"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      RCC_DOMAIN: "${RCC_DOMAIN:?Run sh deploy/setup-env.sh first}"
+    ports:
+      - "${RCC_HTTP_PORT:-80}:80"
+      - "${RCC_HTTPS_PORT:-443}:443"
+    volumes:
+      - ${RCC_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ./deploy/certs:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - console
+    restart: unless-stopped
+
+volumes:
+  console-data:
+  postgres-data:
+  caddy-data:
+  caddy-config:

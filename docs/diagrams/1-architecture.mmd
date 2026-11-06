@@ -1,0 +1,31 @@
+flowchart LR
+  subgraph People
+    V[Viewer]
+    E[Engineer]
+    A[Admin and owner]
+  end
+  subgraph Customer["Your infrastructure, one company per installation"]
+    C[Caddy<br/>HTTPS]
+    subgraph App["Root Cause Console"]
+      G[Security layer<br/>host, origin, size, headers]
+      API[Roles and access rules]
+      AN[Analysis<br/>incidents and patterns]
+      INV[Investigation runner<br/>read-only tools, answer checks]
+      CE[Context engine<br/>polls every source]
+      NG[Outgoing connections<br/>saved addresses are checked]
+    end
+    DB[(PostgreSQL<br/>encrypted credentials<br/>hash-chained audit log)]
+    SRC[Prometheus, CloudWatch,<br/>Azure Monitor, Loki, Kubernetes]
+    OL[Ollama]
+  end
+  OUT[Only if you set them up:<br/>Claude API<br/>Slack, email, Teams, Google Chat]
+  V & E & A --> C --> G --> API
+  API --> AN
+  API --> INV
+  CE --> AN
+  INV --> NG
+  CE --> NG
+  NG --> SRC
+  NG --> OL
+  NG --> OUT
+  API --> DB

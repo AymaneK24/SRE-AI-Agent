@@ -1,0 +1,21 @@
+flowchart TD
+  A[Source reports a change<br/>alert, target down, signal out of range] --> B[Event recorded, with its source]
+  B --> C{New critical alert, and<br/>automatic investigation on?}
+  C -- Yes, within limits --> D[Chat channels told now.<br/>Email waits, 10 minutes at most,<br/>while the investigation runs]
+  C -- No --> E[Read-only message to all channels<br/>with matching reviewed workflows]
+  D --> Q{Finished in time?}
+  Q -- Yes --> R[One email: findings, evidence charts,<br/>reviewed commands, and a PDF]
+  Q -- No, or it failed --> S[Email with the alert only.<br/>Findings follow if it finishes]
+  B --> F[Occurrence: from a problem's start to its end]
+  F --> G[Incident: problems that start close together]
+  F --> H[Issue: the same problem over time]
+  H --> I{Keeps clearing<br/>within minutes?}
+  I -- Yes --> J[Suggests a possible false alarm]
+  I -- No --> K
+  J --> K[Engineer records a verdict:<br/>real, false alarm, or expected]
+  K --> L[False alarms and expected issues stop<br/>counting towards health and real totals]
+  G --> M[Time to clear, time between incidents,<br/>time with no incident]
+  L --> N[Report: fixed snapshot, then a PDF]
+  M --> N
+  N --> O[AI notes: use calculated statements,<br/>and unsupported numbers are flagged]
+  N --> P[Engineer shares it, and viewers can download it]

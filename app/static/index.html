@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Root Cause Console</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/css/app.css">
+<script src="/js/theme.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#view">Skip to content</a>
+<header class="site-header">
+  <a class="brand" href="#/" aria-label="Root Cause Console, home">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><path d="M3 24l8-4 6 3 7-13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="26" cy="7" r="4" fill="var(--critical)"/></svg>
+    <span>Root Cause</span>
+  </a>
+  <nav class="site-nav" id="site-nav" aria-label="Main"></nav>
+  <div class="site-status">
+    <span class="live-chip" id="live-chip" role="status"></span>
+    <a class="model-chip" id="model-chip" href="#/connections"></a>
+    <div id="account-area" class="account-area"></div>
+    <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch color theme"></button>
+  </div>
+</header>
+<main id="view" tabindex="-1"></main>
+<footer class="site-footer" id="site-footer"></footer>
+<dialog id="dialog"></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/vendor/uPlot.iife.min.js"></script>
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

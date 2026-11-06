@@ -1,0 +1,15 @@
+# A public host name. Caddy gets and renews a Let's Encrypt certificate by itself.
+{
+	admin off
+}
+{$RCC_DOMAIN} {
+	encode gzip
+	header -Server
+	# Don't expose the console's own metrics on the public address.
+	@internal path /metrics
+	respond @internal 404
+	reverse_proxy console:8000 {
+		# Keep live updates and streaming answers flowing as they are produced.
+		flush_interval -1
+	}
+}
