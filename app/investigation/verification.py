@@ -17,6 +17,37 @@ DIAGNOSIS_WORDS = re.compile(
     re.IGNORECASE,
 )
 REQUIRED_SECTIONS = ("Likely root cause", "Evidence", "Competing explanation")
+# Text that only appears when a query failed. Quoted as evidence, it means the model used an error as if it were data.
+ERROR_TEXT_RE = re.compile(r"invalid parameter|parse error|query error|unknown tool|unexpected character|bad_data|invalid arguments", re.IGNORECASE)
+LOG_QUERY_RE = re.compile(r"\|[=~]|!=\s*\"|\|\s*json|\|\s*logfmt|\bwhere\b|\bproject\b|\bsummarize\b")
+
+
+def _problem_terms(problem: dict[str, Any]) -> set[str]:
+    """Words that show an answer talks about this problem: the workload, its pods, the alert, or the target."""
+    detail = problem.get("detail") or {}
+    terms = set()
+    for key in ("workload", "name", "instance", "job"):
+        value = str(detail.get(key) or "").strip()
+        if len(value) >= 3:
+            terms.add(value.lower())
+    for pod in detail.get("pods") or []:
+        terms.add(str(pod).lower())
+    if problem.get("kind") == "signal" and detail.get("title"):
+        terms.add(str(detail["title"]).lower())
+    return terms
+
+
+def missed_problems(answer: str, problems: list[dict[str, Any]]) -> list[str]:
+    """Problems the console sees that the answer never names. Only critical and warning problems count."""
+    lowered = answer.lower()
+    missed = []
+    for problem in problems:
+        if problem.get("severity") not in {"critical", "warning"}:
+            continue
+        terms = _problem_terms(problem)
+        if terms and not any(term in lowered for term in terms):
+            missed.append(problem["title"])
+    return missed
 
 
 def expects_diagnosis(prompt: str, answer: str) -> bool:
@@ -118,6 +149,8 @@ def cited_queries(text: str) -> list[str]:
     output = []
     for code in INLINE_CODE_RE.findall(text):
         code = code.strip()
+        if LOG_QUERY_RE.search(code):
+            continue  # A log query can't be checked against a metric source.
         if ("(" in code or "{" in code or "|" in code or "_" in code) and len(code) > 2 and code not in output:
             output.append(code)
     return output[:8]
@@ -126,7 +159,8 @@ def cited_queries(text: str) -> list[str]:
 QueryRunner = Callable[[str], Awaitable[dict[str, Any]]]
 
 
-async def verify_answer(prompt: str, answer: str, evidence_texts: list[str], run_query: QueryRunner | None) -> dict[str, Any]:
+async def verify_answer(prompt: str, answer: str, evidence_texts: list[str], run_query: QueryRunner | None,
+                        problems: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if not expects_diagnosis(prompt, answer):
         return {"kind": "direct", "confidence_final": None}
     sections = _sections(answer)
@@ -158,6 +192,12 @@ async def verify_answer(prompt: str, answer: str, evidence_texts: list[str], run
         reasons.append(f"{len(numbers['unmatched'])} of {numbers['checked']} cited numbers don't match the data.")
     if queries["invalid"]:
         reasons.append(f"{len(queries['invalid'])} cited queries failed when run.")
+    if ERROR_TEXT_RE.search(evidence):
+        reasons.append("The evidence quotes a failed query's error message as if it were data.")
+    missed = missed_problems(answer, problems or [])
+    if missed:
+        shown = "; ".join(missed[:3]) + (f"; and {len(missed) - 3} more" if len(missed) > 3 else "")
+        reasons.append(f"The answer doesn't address what the console sees as broken right now: {shown}.")
     final = stated
     if stated in {"High", "Medium"} and reasons:
         final = "Low"
@@ -166,4 +206,5 @@ async def verify_answer(prompt: str, answer: str, evidence_texts: list[str], run
     return {
         "kind": "diagnosis", "confidence_stated": stated, "confidence_final": final, "lowered": final != stated and stated is not None,
         "reasons": reasons, "numbers": numbers, "queries": queries, "has_competing_explanation": has_competing,
+        "missed_problems": missed,
     }

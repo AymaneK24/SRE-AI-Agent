@@ -231,13 +231,25 @@ async def delete_source(source_id: int, user: Admin, ctx: Ctx) -> Response:
 
 
 # Log and Kubernetes connections ---------------------------------------------
+PEM_RE = re.compile(r"^\s*(-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+$")
+SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
 def clean_integration_config(kind: str, config: dict[str, Any]) -> dict[str, Any]:
+    in_cluster = kind == "kubernetes" and bool(config.get("in_cluster"))
     url = str(config.get("url", "")).strip().rstrip("/")
-    if not re.fullmatch(r"https?://[^\s/@]+(:\d+)?(/[^\s]*)?", url):
+    if not in_cluster and not re.fullmatch(r"https?://[^\s/@]+(:\d+)?(/[^\s]*)?", url):
         raise _bad("Enter an address such as https://loki.example.com:3100.")
     if kind == "loki":
         return {"url": url, "selector": str(config.get("selector", "")).strip()[:300], "tenant": str(config.get("tenant", "")).strip()[:100]}
-    return {"url": url, "namespace": str(config.get("namespace", "")).strip()[:100], "verify_tls": bool(config.get("verify_tls", True))}
+    ca_cert = str(config.get("ca_cert", "")).strip()
+    if ca_cert and (len(ca_cert) > 20000 or not PEM_RE.match(ca_cert)):
+        raise _bad("Paste the CA certificate in PEM form, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----.")
+    server_name = str(config.get("tls_server_name", "")).strip()
+    if server_name and not SERVER_NAME_RE.match(server_name):
+        raise _bad("Enter the TLS server name as a host name, such as kubernetes.docker.internal.")
+    return {"url": "" if in_cluster else url, "namespace": str(config.get("namespace", "")).strip()[:100],
+            "verify_tls": bool(config.get("verify_tls", True)), "ca_cert": ca_cert, "tls_server_name": server_name, "in_cluster": in_cluster}
 
 
 def public_integration(row: dict[str, Any]) -> dict[str, Any]:
@@ -259,7 +271,8 @@ async def test_integration(body: IntegrationTestBody, user: Admin, ctx: Ctx) -> 
     client = None
     try:
         config = clean_integration_config(body.kind, body.config)
-        await check_url(config["url"], ctx.config.target_policy)
+        if config["url"]:
+            await check_url(config["url"], ctx.config.target_policy)
         client = build_integration({"kind": body.kind, "config": config, "secret_enc": ctx.box.encrypt_json(secrets)}, ctx.box, ctx.config)
         return JSONResponse(await client.test())
     except (SourceError, BlockedTarget) as error:
@@ -273,16 +286,21 @@ async def test_integration(body: IntegrationTestBody, user: Admin, ctx: Ctx) -> 
 async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
     config = clean_integration_config(body.kind, body.config)
     try:
-        await check_url(config["url"], ctx.config.target_policy)
+        if config["url"]:
+            await check_url(config["url"], ctx.config.target_policy)
     except BlockedTarget as error:
         raise HTTPException(422, str(error)) from error
     now = utcnow()
+    # Saving again without retyping the token keeps the saved one.
+    saved = await ctx.db.one("SELECT secret_enc FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
+    secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
     await ctx.db.execute("DELETE FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
     new_id = await ctx.db.insert(
         "INSERT INTO integrations(org_id, kind, name, config, secret_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json({k: v for k, v in body.secrets.items() if v}), now, now),
+        (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json(secrets), now, now),
     )
     await ctx.db.audit(user.org_id, "integration_saved", f"integration:{new_id}", {"kind": body.kind}, actor=user.actor)
+    await (await ctx.engines.get(user.org_id)).integrations_changed()
     return public_integration(await ctx.db.one("SELECT * FROM integrations WHERE id = ?", (new_id,)))
 
 
@@ -290,6 +308,7 @@ async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> di
 async def delete_integration(integration_id: int, user: Admin, ctx: Ctx) -> Response:
     await ctx.db.execute("DELETE FROM integrations WHERE id = ? AND org_id = ?", (integration_id, user.org_id))
     await ctx.db.audit(user.org_id, "integration_deleted", f"integration:{integration_id}", {}, actor=user.actor)
+    await (await ctx.engines.get(user.org_id)).integrations_changed()
     return Response(status_code=204)
 
 

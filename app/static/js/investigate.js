@@ -495,15 +495,16 @@ export function mount(container, params) {
     const scroll = rail.scrollTop;
     clear(rail,
       h('div', { class: 'rail-head' }, h('h2', {}, 'Live context')),
-      h('p', { class: 'small muted' }, health.status === 'not_configured' ? 'No metric source connected.' : `Version ${context.version}, updated ${timeAgo(context.as_of)}${context.sources?.length ? ` from ${context.sources.map((item) => item.name).join(', ')}` : ''}.`),
+      h('p', { class: 'small muted' }, health.status === 'not_configured' ? 'Nothing connected yet.' : `Version ${context.version}, updated ${timeAgo(context.as_of)}${context.sources?.length ? ` from ${context.sources.map((item) => item.name).join(', ')}` : ''}.`),
       stale ? h('p', { class: 'stale-banner small', style: 'margin:10px 0 0' }, `A source isn't answering. The model will be told this data is from ${timeAgo(health.last_ok)}.`) : null,
-      health.status === 'not_configured' ? h('p', { class: 'setup-banner small' }, can('admin') ? h('a', { href: '#/connections' }, 'Connect a metric source') : 'Ask an admin to connect a metric source', ' so the model has data to work with.') : null,
+      health.status === 'not_configured' ? h('p', { class: 'setup-banner small' }, can('admin') ? h('a', { href: '#/connections' }, 'Add a connection') : 'Ask an admin to add a connection', ' so the model has data to work with.') : null,
+      railGroup(`Problems right now (${(context.problems || []).length})`, (context.problems || []).slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, item.title), h('small', {}, item.detail?.diagnosis?.cause || item.kind)))),
       railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name), h('small', {}, alert.summary || labelText(alert.labels))))),
       railGroup(`Down targets (${down.length})`, down.map((target) => h('div', { class: 'rail-item' }, h('b', {}, target.instance), h('small', {}, `Job ${target.job}`)))),
       railGroup(`Out-of-range signals (${anomalies.length})`, anomalies.slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, `${item.title}: ${formatValue(item.value, item.unit)}`), h('small', {}, labelText(item.labels))))),
       railGroup('Recorded changes', (context.changes || []).slice(0, 5).map((change) => h('div', { class: 'rail-item' }, change.title, h('small', {}, `${change.origin}, ${timeAgo(change.ts)}`)))),
       railGroup('State changes', events.map((event) => h('div', { class: 'rail-item' }, event.title, h('small', {}, timeAgo(event.ts))))),
-      h('p', { class: 'small muted', style: 'margin-top:16px' }, `Not available to the model: ${[...(context.coverage?.missing || []), context.coverage?.has_logs ? null : 'logs', 'traces', context.coverage?.has_kubernetes ? null : 'the Kubernetes API'].filter(Boolean).join(', ')}.`),
+      h('p', { class: 'small muted', style: 'margin-top:16px' }, `Not available to the model: ${[...(context.coverage?.missing || []), context.coverage?.has_metrics === false ? 'metrics' : null, context.coverage?.has_logs ? null : 'logs', 'traces', context.coverage?.has_kubernetes ? null : 'the Kubernetes API'].filter(Boolean).join(', ')}.`),
       h('div', { class: 'form-actions' }, h('button', { class: 'button compact', type: 'button', onClick: showExact }, 'Show exact text sent')));
     rail.scrollTop = scroll;
   }

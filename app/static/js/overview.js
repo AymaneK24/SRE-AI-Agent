@@ -146,10 +146,15 @@ export function mount(container) {
     const targets = context.targets || {};
     const anomalyCount = (context.anomalies || []).length;
     if (!configured) {
-      clear(heroCopy, 'Connect Prometheus, CloudWatch, or Azure Monitor. This console then keeps ', h('b', {}, 'a live picture of your targets, alerts, and signals'), ' and gives it to the AI model whenever you ask it to investigate.');
-      clear(heroActions, can('admin') ? h('a', { class: 'button primary large', href: '#/connections' }, 'Connect a metric source') : h('span', { class: 'muted' }, 'Ask an admin to connect a metric source.'));
+      clear(heroCopy, 'Connect Prometheus, CloudWatch, Azure Monitor, Loki, or a Kubernetes cluster. Any one is enough. This console then keeps ', h('b', {}, 'a live picture of what is running and what is broken'), ' and gives it to the AI model whenever you ask it to investigate.');
+      clear(heroActions, can('admin') ? h('a', { class: 'button primary large', href: '#/connections' }, 'Add a connection') : h('span', { class: 'muted' }, 'Ask an admin to add a connection.'));
     } else if (context.as_of) {
-      if (can('engineer')) {
+      const watched = [...(context.sources || []).map((item) => item.name), ...Object.values(context.integrations || {}).map((item) => item.name)].filter(Boolean);
+      const k8sCount = (context.problems || []).filter((item) => item.kind === 'k8s').length;
+      if (!context.coverage?.has_metrics) {
+        clear(heroCopy, 'Watching ', h('b', {}, watched.join(', ') || 'your connections'), `. Updated ${timeAgo(context.as_of)}`,
+          k8sCount ? [', with ', h('b', {}, plural(k8sCount, 'Kubernetes problem', 'Kubernetes problems')), '.'] : '.');
+      } else if (can('engineer')) {
         clear(heroCopy, 'Watching ', h('b', {}, plural(targets.total || 0, 'target', 'targets')), ' on ', h('b', {}, (context.sources || []).map((item) => item.name).join(', ') || 'your sources'),
           '. Live context version ', h('b', {}, context.version), ` updated ${timeAgo(context.as_of)} and holds `,
           h('b', {}, plural(context.coverage?.signal_count || 0, 'signal', 'signals')), anomalyCount ? `, with ${plural(anomalyCount, 'signal', 'signals')} out of range.` : '.');
@@ -218,6 +223,14 @@ export function mount(container) {
         h('span', { class: 'row-side' }, investigateLink(`Why is target ${target.instance} in job ${target.job} down?`, 'alert=targetdown')),
         h('span', { class: 'row-detail' }, `Job ${target.job}. `, target.error || 'No error was reported.')));
     }
+    for (const item of (context.problems || []).filter((problem) => problem.kind === 'k8s')) {
+      const detail = item.detail || {};
+      const why = detail.diagnosis?.cause || (detail.pods?.length ? `Pods: ${detail.pods.slice(0, 3).join(', ')}` : '');
+      rows.push(h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
+        h('span', { class: 'row-title' }, item.title),
+        h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, null)),
+        h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem')));
+    }
     for (const rule of context.rules?.failing || []) {
       rows.push(h('li', { class: 'row' }, icon('warning'),
         h('span', { class: 'row-title' }, `Rule failing: ${rule.name}`), h('span', {}),
@@ -232,7 +245,7 @@ export function mount(container) {
         h('span', { class: 'row-detail' }, can('engineer') ? labelText(item.labels) : 'Out of range', usual, limit)));
     }
     if (rows.length) clear(attention, h('ul', { class: 'rows scroll-rows' }, rows));
-    else clear(attention, h('p', { class: 'empty' }, context.as_of ? 'No alerts, down targets, failing rules, or unusual signals.' : 'Nothing to show until a metric source is connected.'));
+    else clear(attention, h('p', { class: 'empty' }, context.as_of ? 'No alerts, down targets, failing workloads, failing rules, or unusual signals.' : 'Nothing to show until something is connected.'));
   }
 
   function renderChanges(events) {

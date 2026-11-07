@@ -188,7 +188,8 @@ class InvestigationManager:
 
         has_source = bool(engine.states)
         try:
-            return await verify_answer(prompt, answer, [run.rendered, *run.tool_results], run_query if has_source else None)
+            problems = (run.sent_context or {}).get("problems", [])
+            return await verify_answer(prompt, answer, [run.rendered, *run.tool_results], run_query if has_source else None, problems)
         except Exception:
             log.exception("answer check failed")
             return {"kind": "error", "confidence_final": None}
@@ -200,7 +201,7 @@ class InvestigationManager:
         engine = await self.engines.get(org_id)
         tools_runner = ToolRunner(engine, self.db, self.box, self.config, run.owner_id)
         tool_definitions = await tools_runner.definitions()
-        use_tools = selection.use_tools and bool(engine.states)
+        use_tools = selection.use_tools and engine.has_connections
         spend = await spend_settings(self.db, org_id)
         prices = spend["prices"]
         token_limit = spend["max_tokens_per_investigation"]

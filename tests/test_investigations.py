@@ -69,7 +69,7 @@ def test_headline_reports_problems_first():
     assert "firing" in headline_for("ok", {"down": 0, "total": 1}, {"firing": [{}]}, [])["text"]
     assert headline_for("ok", {"down": 0, "total": 3}, {"firing": []}, [])["tone"] == "ok"
     assert "out of date" in headline_for("unreachable", {}, {}, [])["text"]
-    assert "source" in headline_for("partial", {"down": 0}, {"firing": []}, [], ["aws"])["text"]
+    assert "connection" in headline_for("partial", {"down": 0}, {"firing": []}, [], ["aws"])["text"]
 
 
 def test_render_keeps_alerts_when_budget_is_small():

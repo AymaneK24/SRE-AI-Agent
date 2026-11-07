@@ -273,7 +273,22 @@ export function mount(container) {
       const extra = h('input', { class: 'input', value: row?.config[extraKey] || '', spellcheck: 'false' });
       const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: row?.has_secret ? 'Saved. Enter a new one to replace it.' : 'Optional' });
       const result = h('div');
-      const body = () => ({ kind: integrationKind, name: title, config: { url: url.value.trim(), [extraKey]: extra.value.trim() }, secrets: { token: token.value } });
+      const kube = integrationKind === 'kubernetes';
+      const cfg = row?.config || {};
+      const inCluster = h('input', { type: 'checkbox', checked: Boolean(cfg.in_cluster) });
+      const verify = h('input', { type: 'checkbox', checked: cfg.verify_tls !== false });
+      const serverName = h('input', { class: 'input', value: cfg.tls_server_name || '', spellcheck: 'false', placeholder: 'Optional, such as kubernetes.docker.internal' });
+      const caCert = h('textarea', { class: 'input query-input', rows: 4, spellcheck: 'false', placeholder: '-----BEGIN CERTIFICATE-----' });
+      caCert.value = cfg.ca_cert || '';
+      const kubeFields = kube ? [
+        h('label', { class: 'check' }, inCluster, 'The console runs inside this cluster. Use its own service account, with no address or token.'),
+        field('CA certificate', caCert, 'The cluster’s CA, in PEM form. In a kubeconfig it’s certificate-authority-data, base64-decoded.', ''),
+        field('TLS server name', serverName, 'Use when you connect through another address than the one on the certificate, such as host.docker.internal.', ''),
+        h('label', { class: 'check' }, verify, 'Verify the certificate. Only turn this off on a test cluster.'),
+      ] : [];
+      const body = () => ({ kind: integrationKind, name: title, config: kube
+        ? { url: url.value.trim(), [extraKey]: extra.value.trim(), in_cluster: inCluster.checked, verify_tls: verify.checked, tls_server_name: serverName.value.trim(), ca_cert: caCert.value.trim() }
+        : { url: url.value.trim(), [extraKey]: extra.value.trim() }, secrets: { token: token.value } });
       return h('form', { 'aria-label': title, onSubmit: async (event) => {
         event.preventDefault();
         try {
@@ -283,7 +298,7 @@ export function mount(container) {
         } catch (error) { showResult(result, false, error.message); }
       } },
       h('h3', { style: 'margin-bottom:10px' }, title, ' ', row ? statusBadge('active') : null),
-      h('div', { class: 'stack' }, field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', '')),
+      h('div', { class: 'stack' }, field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', ''), ...kubeFields),
       result,
       editable ? h('div', { class: 'form-actions' },
         h('button', { class: 'button primary compact', type: 'submit' }, 'Save'),
