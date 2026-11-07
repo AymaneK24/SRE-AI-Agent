@@ -5,7 +5,9 @@ import { api, can, clear, confirmDialog, dialogHead, formatValue, h, labelText, 
 let remembered = null;
 
 function queryFromArgs(args) {
-  return args && (args.query || args.contains || args.text || args.resource) || '';
+  if (!args) return '';
+  if (args.pod || args.name) return `${args.namespace ? `${args.namespace}/` : ''}${args.pod || args.name}${args.previous ? ', crashed container' : ''}`;
+  return args.query || args.contains || args.text || args.resource || '';
 }
 
 function toolLabel(name) {
@@ -15,6 +17,8 @@ function toolLabel(name) {
     list_metrics: 'Searched metric names',
     query_logs: 'Searched logs',
     get_kubernetes_state: 'Read Kubernetes state',
+    get_pod_logs: 'Read pod logs',
+    describe_object: 'Described',
     get_recent_changes: 'Read recent changes',
     search_past_investigations: 'Searched past investigations',
   }[name] || name;

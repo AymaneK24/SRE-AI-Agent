@@ -256,6 +256,15 @@ def public_integration(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in {**row, "config": json.loads(row["config"]), "has_secret": bool(row["secret_enc"]), "enabled": bool(row["enabled"])}.items() if key != "secret_enc"}
 
 
+@router.get("/k8s/namespaces")
+async def k8s_namespaces(user: Engineer, ctx: Ctx) -> dict[str, Any]:
+    """Namespaces seen in the cluster's last snapshot, for choosing what a project covers."""
+    engine = await ctx.engines.get(user.org_id)
+    snapshot = engine.k8s_snapshot or {}
+    names = {pod["namespace"] for pod in snapshot.get("pods", [])} | {row["namespace"] for row in snapshot.get("deployments", [])}
+    return {"connected": "kubernetes" in engine.integration_kinds, "namespaces": sorted(name for name in names if name)}
+
+
 @router.get("/integrations")
 async def list_integrations(user: Admin, ctx: Ctx) -> list[dict[str, Any]]:
     rows = await ctx.db.all("SELECT * FROM integrations WHERE org_id = ? ORDER BY id", (user.org_id,))

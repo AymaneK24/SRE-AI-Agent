@@ -35,6 +35,7 @@ export function mount(container) {
   const heroActions = h('div', { class: 'hero-actions' });
   const heroLabel = h('p', { class: 'hero-chart-title' });
   const heroChartHost = h('div');
+  const clusterHost = h('div', { class: 'cluster-panel' });
   const staleBanner = h('div', { hidden: true });
   const attention = h('div');
   const changes = h('div');
@@ -49,7 +50,7 @@ export function mount(container) {
     staleBanner,
     h('section', { class: `hero${can('engineer') ? '' : ' hero-solo'}`, 'aria-labelledby': 'hero-title' },
       h('div', {}, heroTitle, heroCopy, heroActions),
-      can('engineer') ? h('div', {}, heroLabel, heroChartHost) : null),
+      h('div', {}, can('engineer') ? [heroLabel, heroChartHost] : null, clusterHost)),
     goldenSection,
     h('section', { class: 'section status-grid' },
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Needs attention')), attention),
@@ -75,6 +76,8 @@ export function mount(container) {
   function renderGolden(context) {
     // Golden signals come from metrics. With only logs or a cluster connected, four "No data" tiles would only add noise.
     goldenSection.hidden = context.coverage?.has_metrics === false;
+    const panels = container.querySelector('[aria-label="Metric panels"]');
+    if (panels) panels.hidden = context.coverage?.has_metrics === false;
     const signals = (context.signals || []).filter((signal) => signal.golden && signalValue(signal) !== null);
     clear(golden, GOLDEN.map(([id, label, hint]) => {
       const worst = signals.filter((signal) => signal.golden === id)
@@ -185,6 +188,7 @@ export function mount(container) {
     renderChanges(context.events || []);
     renderJobs(targets.jobs || []);
 
+    renderCluster(context);
     const signal = configured && can('engineer') ? chooseHeroSignal(context) : null;
     const key = signal ? `${signal.query}|${signal.limit}` : '';
     if (key !== heroKey) {
@@ -203,6 +207,39 @@ export function mount(container) {
     } else if (heroChart) {
       fetchHero(heroChart.signal);
     }
+  }
+
+  // Without metrics there's no chart for the right side, so it shows the cluster and logs instead.
+  function renderCluster(context) {
+    const kube = context.integrations?.kubernetes;
+    const counts = kube?.counts || context.cluster_counts;
+    const loki = context.integrations?.loki;
+    const show = context.coverage?.has_metrics === false && (counts || loki);
+    clusterHost.hidden = !show;
+    if (!show) { clear(clusterHost); return; }
+    const parts = [];
+    if (counts) {
+      parts.push(h('p', { class: 'hero-chart-title' }, h('b', {}, kube?.name || 'Kubernetes'), counts.namespaces ? `, ${plural(counts.namespaces, 'namespace', 'namespaces')}` : ''),
+        h('div', { class: 'stat-row cluster-stats' },
+          h('div', { class: `stat${counts.pods_running < counts.pods ? ' is-bad' : ''}` }, h('b', {}, `${counts.pods_running} / ${counts.pods}`), h('span', {}, 'Pods running and ready')),
+          h('div', { class: 'stat' }, h('b', {}, `${counts.deployments_available} / ${counts.deployments}`), h('span', {}, 'Deployments fully available')),
+          counts.nodes ? h('div', { class: 'stat' }, h('b', {}, `${counts.nodes_ready} / ${counts.nodes}`), h('span', {}, 'Nodes ready')) : null,
+          h('div', { class: 'stat' }, h('b', {}, String(counts.restarts)), h('span', {}, 'Container restarts'))));
+    }
+    if (can('engineer') && kube?.warning_events?.length) {
+      parts.push(h('p', { class: 'hero-chart-title cluster-subhead' }, h('b', {}, 'Latest warnings')),
+        h('ul', { class: 'rows' }, kube.warning_events.slice(0, 4).map((event) => h('li', { class: 'row' }, icon('warning'),
+          h('span', { class: 'row-title' }, `${event.reason}: ${event.object}`), h('span', { class: 'row-side' }, event.last_seen ? timeAgo(event.last_seen) : ''),
+          h('span', { class: 'row-detail' }, event.message)))));
+    }
+    if (can('engineer') && loki?.status === 'ok') {
+      const rows = (loki.error_lines || []).slice(0, 4);
+      parts.push(h('p', { class: 'hero-chart-title cluster-subhead' }, h('b', {}, 'Error-like log lines'), ', last 5 minutes'),
+        rows.length ? h('ul', { class: 'rows' }, rows.map((row) => h('li', { class: 'row' }, icon(row.errors_5m > 0 ? 'warning' : 'ok'),
+          h('span', { class: 'row-title' }, row.job), h('span', { class: 'row-side' }, `${Math.round(row.errors_5m)} lines`))))
+          : h('p', { class: 'small muted' }, 'None.'));
+    }
+    clear(clusterHost, parts);
   }
 
   function investigateLink(prompt, workflowQuery) {

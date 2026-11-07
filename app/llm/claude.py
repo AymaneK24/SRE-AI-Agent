@@ -37,7 +37,7 @@ class ClaudeProvider:
     async def close(self) -> None:
         await self._client.aclose()
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
         converted: list[dict[str, Any]] = []
         for message in messages:
             if message["role"] == "tool":
@@ -73,6 +73,8 @@ class ClaudeProvider:
         }
         if tools:
             request["tools"] = tools
+            if not allow_tools:
+                request["tool_choice"] = {"type": "none"}
         return request
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[TextDelta | ToolCall | Finished]:

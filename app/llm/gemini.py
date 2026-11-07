@@ -19,6 +19,8 @@ from .base import Finished, ProviderError, TextDelta, ToolCall
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# Models that can't hold a text conversation with tools: they control a computer, speak, draw, or embed.
+NOT_FOR_CHAT = ("computer-use", "tts", "image", "embedding", "live", "native-audio", "robotics", "aqa", "learnlm")
 # Keys the generateContent schema format doesn't accept in function parameters.
 UNSUPPORTED_SCHEMA_KEYS = {"additionalProperties", "$schema", "default", "examples"}
 
@@ -58,7 +60,7 @@ class GeminiProvider:
     async def close(self) -> None:
         await self._client.aclose()
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
         names: dict[str, str] = {}
         for message in messages:
@@ -93,6 +95,8 @@ class GeminiProvider:
         if tools:
             request["tools"] = [{"functionDeclarations": [
                 {"name": tool["name"], "description": tool["description"], "parameters": _schema(tool["input_schema"])} for tool in tools]}]
+            if not allow_tools:
+                request["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
         return request
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[TextDelta | ToolCall | Finished]:
@@ -179,7 +183,7 @@ class GeminiProvider:
                 if "generateContent" not in item.get("supportedGenerationMethods", []):
                     continue
                 model_id = str(item.get("name", "")).removeprefix("models/")
-                if not model_id.startswith("gemini"):
+                if not model_id.startswith("gemini") or any(word in model_id for word in NOT_FOR_CHAT):
                     continue
                 models.append({"id": model_id, "label": item.get("displayName") or model_id, "detail": ""})
             token = data.get("nextPageToken", "")

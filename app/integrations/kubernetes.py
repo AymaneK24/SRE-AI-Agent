@@ -97,6 +97,7 @@ def summarize_pod(pod: dict[str, Any]) -> dict[str, Any]:
         "unschedulable": scheduled.get("status") == "False", "schedule_message": (scheduled.get("message") or "")[:300],
         "ready": ready.get("status") == "True", "ready_since": ready.get("lastTransitionTime", ""),
         "restarts": sum(item["restarts"] for item in containers),
+        "labels": dict(meta.get("labels") or {}),
     }
 
 
@@ -242,6 +243,25 @@ class KubernetesClient:
         lines_out = [line[:MAX_LOG_LINE_CHARS] for line in response.text.splitlines() if line.strip()]
         return {"lines": lines_out[-MAX_LOG_LINES:]}
 
+    async def services(self, namespace: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
+        """Services and the pods their selector reaches. A Service that reaches no ready pod refuses connections."""
+        items = await self._list("services", namespace=namespace)
+        pods = await self.pods(namespace)
+        rows = []
+        for item in items[:limit]:
+            meta, spec = item.get("metadata", {}), item.get("spec", {})
+            selector = spec.get("selector") or {}
+            matching = [pod for pod in pods if pod["namespace"] == meta.get("namespace") and selector
+                        and all(pod["labels"].get(key) == value for key, value in selector.items())]
+            rows.append({
+                "namespace": meta.get("namespace", ""), "name": meta.get("name", ""), "type": spec.get("type", ""),
+                "selector": selector, "ports": [f"{port.get('port')}/{port.get('protocol', 'TCP')}" for port in spec.get("ports", []) or []],
+                "matching_pods": len(matching), "ready_pods": sum(1 for pod in matching if pod["ready"]),
+                "note": "" if not selector else "No pod matches this selector, so connections to it are refused." if not matching
+                else "No matching pod is ready." if not any(pod["ready"] for pod in matching) else "",
+            })
+        return rows
+
     async def object_events(self, namespace: str, name: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = [summarize_event(item) for item in await self._list("events", namespace=namespace, params={"fieldSelector": f"involvedObject.name={name}"})]
         rows.sort(key=lambda row: str(row["last_seen"]), reverse=True)
@@ -287,6 +307,14 @@ def summary_from_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
             unhealthy.append({"namespace": pod["namespace"], "pod": pod["name"], "phase": pod["phase"], "restarts": pod["restarts"], "reasons": reasons})
     unhealthy.sort(key=lambda row: -row["restarts"])
     below = [{**row, "deployment": row["name"]} for row in snap["deployments"] if row["ready"] < row["desired"]][:10]
+    pods, deployments, nodes = snap["pods"], snap["deployments"], snap["nodes"]
+    counts = {
+        "namespaces": len({pod["namespace"] for pod in pods} | {row["namespace"] for row in deployments}),
+        "pods": len(pods), "pods_running": sum(1 for pod in pods if pod["phase"] == "Running" and pod["ready"]),
+        "pods_unhealthy": len(unhealthy), "restarts": sum(pod["restarts"] for pod in pods),
+        "deployments": len(deployments), "deployments_available": sum(1 for row in deployments if row["ready"] >= row["desired"]),
+        "nodes": len(nodes), "nodes_ready": sum(1 for node in nodes if node["ready"]),
+    }
     return {"unhealthy_pods": unhealthy[:10], "warning_events": snap["events"][:10], "deployments_below_desired": below,
-            "nodes_not_ready": [node for node in snap["nodes"] if not node["ready"] or node["pressure"]][:10],
-            "forbidden": snap["forbidden"]}
+            "nodes_not_ready": [node for node in nodes if not node["ready"] or node["pressure"]][:10],
+            "forbidden": snap["forbidden"], "counts": counts}

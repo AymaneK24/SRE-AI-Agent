@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from .. import ai_settings
 from ..access import mask_addresses
@@ -45,10 +45,23 @@ Rules:
 - Keep it under 250 words, with no introduction or sign-off."""
 
 
+NAMESPACE_RE = re.compile(r"^(\*|[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)$")
+
+
+def _clean_namespaces(values: list[str]) -> list[str]:
+    cleaned = sorted({value.strip() for value in values if value.strip()})
+    for value in cleaned:
+        if not NAMESPACE_RE.match(value):
+            raise ValueError(f"{value[:60]} isn't a Kubernetes namespace name.")
+    return ["*"] if "*" in cleaned else cleaned
+
+
 class ProjectBody(BaseModel):
     name: Label = Field(max_length=120)
     description: str = Field(default="", max_length=1000)
     source_ids: list[int] = Field(default_factory=list, max_length=200)
+    # Kubernetes namespaces this project covers. "*" covers every namespace the cluster connection can see.
+    namespaces: Annotated[list[str], AfterValidator(_clean_namespaces)] = Field(default_factory=list, max_length=100)
 
 
 class ReportBody(BaseModel):
@@ -75,6 +88,34 @@ async def _own(ctx: AppContext, org_id: int, project_id: int) -> dict[str, Any]:
 async def _source_ids(ctx: AppContext, project_id: int) -> list[int]:
     rows = await ctx.db.all("SELECT source_id FROM project_sources WHERE project_id = ? ORDER BY source_id", (project_id,))
     return [row["source_id"] for row in rows]
+
+
+async def _namespaces(ctx: AppContext, project_id: int) -> list[str]:
+    rows = await ctx.db.all("SELECT namespace FROM project_namespaces WHERE project_id = ? ORDER BY namespace", (project_id,))
+    return [row["namespace"] for row in rows]
+
+
+async def _set_namespaces(ctx: AppContext, project_id: int, namespaces: list[str]) -> None:
+    await ctx.db.execute("DELETE FROM project_namespaces WHERE project_id = ?", (project_id,))
+    for namespace in namespaces:
+        await ctx.db.execute("INSERT INTO project_namespaces(project_id, namespace) VALUES (?, ?)", (project_id, namespace))
+
+
+def _in_namespaces(namespace: str, namespaces: list[str]) -> bool:
+    return "*" in namespaces or namespace in namespaces
+
+
+async def _live_k8s(ctx: AppContext, org_id: int, namespaces: list[str]) -> dict[str, Any] | None:
+    """The cluster part of a project: its problems now, inside the project's namespaces."""
+    if not namespaces:
+        return None
+    engine = await ctx.engines.get(org_id)
+    kube = engine.integration_summary.get("kubernetes")
+    if not kube:
+        return {"status": "not_connected", "problems": [], "namespaces": namespaces}
+    problems = [{"title": item["title"], "severity": item["severity"], "cause": (item.get("diagnosis") or {}).get("cause", "")}
+                for item in engine.k8s_problems if item["namespace"] and _in_namespaces(item["namespace"], namespaces)]
+    return {"status": kube.get("status", "waiting"), "name": kube.get("name"), "problems": problems, "namespaces": namespaces}
 
 
 async def _set_sources(ctx: AppContext, org_id: int, project_id: int, source_ids: list[int]) -> None:
@@ -113,9 +154,15 @@ async def _live_sources(ctx: AppContext, org_id: int, source_ids: list[int]) -> 
     return sources
 
 
-def _health(sources: list[dict[str, Any]], summary: dict[str, Any]) -> str:
-    if not sources:
+def _health(sources: list[dict[str, Any]], summary: dict[str, Any], kubernetes: dict[str, Any] | None = None) -> str:
+    if not sources and not kubernetes:
         return "no_sources"
+    if kubernetes and any(item["severity"] == "critical" for item in kubernetes["problems"]):
+        return "problems"
+    if kubernetes and kubernetes["problems"] and not sources:
+        return "attention"
+    if not sources:
+        return "healthy" if kubernetes and kubernetes["status"] == "ok" else "waiting"
     if any(item["status"] == "unreachable" for item in sources) or any(item["alerts"] or item["targets_down"] for item in sources):
         return "problems"
     if any(item["signals_out_of_range"] for item in sources) or summary["active_real_issues"]:
@@ -130,19 +177,37 @@ async def _verdicts(ctx: AppContext, org_id: int) -> dict[str, dict[str, Any]]:
     return {row["issue_key"]: row for row in rows}
 
 
-async def _analysis(ctx: AppContext, org_id: int, source_ids: list[int], days: int) -> dict[str, Any]:
+def _scope_filter(source_ids: list[int], namespaces: list[str]) -> tuple[str, list[Any]]:
+    """The events that belong to a project: from its metric sources, or Kubernetes events in its namespaces."""
+    parts: list[str] = []
+    values: list[Any] = []
+    if source_ids:
+        parts.append(f"source_id IN ({','.join('?' for _ in source_ids)})")
+        values += source_ids
+    if "*" in namespaces:
+        parts.append("fingerprint LIKE ?")
+        values.append("k8s:%")
+    else:
+        for namespace in namespaces:
+            parts.append("fingerprint LIKE ?")
+            values.append(f"k8s:{namespace}/%")
+    return "(" + " OR ".join(parts) + ")", values
+
+
+async def _analysis(ctx: AppContext, org_id: int, source_ids: list[int], days: int, namespaces: list[str] | None = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
-    if not source_ids:
+    namespaces = namespaces or []
+    if not source_ids and not namespaces:
         return apply_verdicts(analyze([], [], start, now), {})
-    marks = ",".join("?" for _ in source_ids)
+    scope, values = _scope_filter(source_ids, namespaces)
     # Earlier events are needed so a problem that began before the period is still paired with its end.
     # They also let this period be compared with the one before it.
     lookback = (start - timedelta(days=max(days, 30))).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     events = await ctx.db.all(
-        f"SELECT id, ts, kind, severity, fingerprint, title, detail, source_id FROM events WHERE org_id = ? AND source_id IN ({marks}) AND ts >= ? ORDER BY ts, id LIMIT 200000",  # noqa: S608
-        (org_id, *source_ids, lookback))
-    first = await ctx.db.one(f"SELECT MIN(ts) AS ts FROM events WHERE org_id = ? AND source_id IN ({marks})", (org_id, *source_ids))  # noqa: S608
+        f"SELECT id, ts, kind, severity, fingerprint, title, detail, source_id FROM events WHERE org_id = ? AND {scope} AND ts >= ? ORDER BY ts, id LIMIT 200000",  # noqa: S608
+        (org_id, *values, lookback))
+    first = await ctx.db.one(f"SELECT MIN(ts) AS ts FROM events WHERE org_id = ? AND {scope}", (org_id, *values))  # noqa: S608
     started = start.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     changes = await ctx.db.all("SELECT ts, title FROM change_events WHERE org_id = ? AND ts >= ? ORDER BY ts LIMIT 5000", (org_id, started))
     return apply_verdicts(analyze(events, changes, start, now, first["ts"] if first else None), await _verdicts(ctx, org_id))
@@ -172,11 +237,13 @@ async def _workflows(ctx: AppContext, org_id: int, issues: list[dict[str, Any]])
 
 async def _view(ctx: AppContext, org_id: int, project: dict[str, Any], days: int) -> dict[str, Any]:
     source_ids = await _source_ids(ctx, project["id"])
+    namespaces = await _namespaces(ctx, project["id"])
     sources = await _live_sources(ctx, org_id, source_ids)
-    analysis = await _analysis(ctx, org_id, source_ids, days)
+    kubernetes = await _live_k8s(ctx, org_id, namespaces)
+    analysis = await _analysis(ctx, org_id, source_ids, days, namespaces)
     return {
-        "project": {"id": project["id"], "name": project["name"], "description": project["description"], "source_ids": source_ids},
-        "health": _health(sources, analysis["summary"]), "sources": sources, **analysis,
+        "project": {"id": project["id"], "name": project["name"], "description": project["description"], "source_ids": source_ids, "namespaces": namespaces},
+        "health": _health(sources, analysis["summary"], kubernetes), "sources": sources, "kubernetes": kubernetes, **analysis,
         "root_causes": await _root_causes(ctx, org_id, analysis["issues"], analysis["period"]["start"]),
         "workflows": await _workflows(ctx, org_id, analysis["issues"]),
     }
@@ -191,6 +258,8 @@ def _for_viewer(view: dict[str, Any]) -> dict[str, Any]:
         "project": {key: view["project"][key] for key in ("id", "name", "description")}, "health": view["health"], "period": view["period"],
         "summary": view["summary"], "reliability": view["reliability"], "trend": view["trend"], "daily": view["daily"], "patterns": [{"title": item["title"], "detail": mask_addresses(item["detail"])} for item in view["patterns"]],
         "sources": [{key: source[key] for key in keep} for source in view["sources"]],
+        "kubernetes": {"status": view["kubernetes"]["status"], "problems": [{"title": mask_addresses(item["title"]), "severity": item["severity"]} for item in view["kubernetes"]["problems"]]}
+        if view.get("kubernetes") else None,
         "issues": [{**{key: issue[key] for key in issue_keys}, "title": mask_addresses(issue["title"])} for issue in view["issues"]],
         "incidents": [{**{key: item[key] for key in incident_keys}, "issues": [mask_addresses(title) for title in item["issues"]]} for item in view["incidents"]],
         "root_causes": [{"title": item["title"], "note": item["note"]} for item in view["root_causes"]], "workflows": [],
@@ -205,7 +274,8 @@ async def list_projects(user: User, ctx: Ctx) -> list[dict[str, Any]]:
         view = await _view(ctx, user.org_id, row, 30)
         if not user.can("engineer"):
             view = _for_viewer(view)
-        result.append({**view["project"], "health": view["health"], "sources": view["sources"], "summary": view["summary"], "reliability": view["reliability"]})
+        result.append({**view["project"], "health": view["health"], "sources": view["sources"], "kubernetes": view.get("kubernetes"),
+                       "summary": view["summary"], "reliability": view["reliability"]})
     return result
 
 
@@ -215,6 +285,7 @@ async def create_project(body: ProjectBody, user: Engineer, ctx: Ctx) -> dict[st
     project_id = await ctx.db.insert("INSERT INTO projects(org_id, name, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                                      (user.org_id, body.name.strip(), body.description.strip(), user.actor, now, now))
     await _set_sources(ctx, user.org_id, project_id, body.source_ids)
+    await _set_namespaces(ctx, project_id, body.namespaces)
     await ctx.db.audit(user.org_id, "project_created", f"project:{project_id}", {"name": body.name.strip()}, actor=user.actor)
     return {"id": project_id}
 
@@ -229,6 +300,7 @@ async def get_project(project_id: int, user: User, ctx: Ctx, days: int = Query(d
 async def update_project(project_id: int, body: ProjectBody, user: Engineer, ctx: Ctx) -> dict[str, Any]:
     await _own(ctx, user.org_id, project_id)
     await _set_sources(ctx, user.org_id, project_id, body.source_ids)
+    await _set_namespaces(ctx, project_id, body.namespaces)
     await ctx.db.execute("UPDATE projects SET name = ?, description = ?, updated_at = ? WHERE id = ? AND org_id = ?",
                          (body.name.strip(), body.description.strip(), utcnow(), project_id, user.org_id))
     await ctx.db.audit(user.org_id, "project_updated", f"project:{project_id}", {"name": body.name.strip()}, actor=user.actor)

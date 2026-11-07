@@ -20,7 +20,7 @@ from ..db import Database, sha256_text, utcnow
 from ..llm.base import Finished, ProviderError, TextDelta, ToolCall, ToolsUnsupported
 from ..secrets_store import SecretBox
 from ..workflows import matching_workflows
-from .prompts import build_system, compact_tools
+from .prompts import FALLBACK_MARK, build_system, compact_tools, fallback_answer
 from .tools import ToolRunner, related_investigations
 from .verification import expects_diagnosis, missing_sections, verify_answer
 
@@ -29,6 +29,15 @@ log = logging.getLogger("rcc.investigation")
 MODEL_CALLS = Counter("rcc_model_calls_total", "Model calls by provider and result", ["provider", "status"])
 RUN_RETENTION_S = 300
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_:-]{3,}")
+
+
+MAX_TOOL_CALLS = 10
+MAX_CALLS_PER_ROUND = 4
+
+
+def _skipped(call: ToolCall, text: str) -> dict[str, Any]:
+    """A tool result that runs nothing, so the model still gets one answer per call it made."""
+    return {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": text, "is_error": True}
 
 
 class Run:
@@ -223,6 +232,8 @@ class InvestigationManager:
             await run.emit("workflows", items=[{"id": item["id"], "name": item["name"], "risk": item["risk"], "status": item["status"]} for item in workflows])
         messages = await self._history(conversation_id, selection.history_chars)
         repaired = False
+        tool_calls_made = 0
+        seen_calls: dict[str, int] = {}
 
         for round_number in range(1, max_rounds + 2):
             context = engine.context
@@ -241,10 +252,18 @@ class InvestigationManager:
                 notice = "This investigation reached its token limit, so the model was asked to finish now."
                 notices.append(notice)
                 await run.emit("notice", text=notice)
-            last_round = round_number >= max_rounds or over_tokens
-            tools = tool_definitions if use_tools and not last_round else None
+            out_of_calls = tool_calls_made >= MAX_TOOL_CALLS
+            if out_of_calls and use_tools and not any("queries allowed" in item for item in notices):
+                notice = f"The model used the {MAX_TOOL_CALLS} queries allowed in one investigation, so it was asked to answer now."
+                notices.append(notice)
+                await run.emit("notice", text=notice)
+            last_round = round_number >= max_rounds or over_tokens or out_of_calls
+            # On the last round the tools stay declared, so earlier calls in the history remain valid, but the
+            # model is told it may not call them. Some models ignore a missing tool list and call tools anyway.
+            tools = tool_definitions if use_tools else None
             system = build_system(run.rendered, past, changes, use_tools, last_round and use_tools, workflows, selection.compact)
-            outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, tools, context, answer_parts, prices, actor)
+            outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, tools, context, answer_parts, prices, actor,
+                                                allow_tools=not last_round)
             if outcome is None:  # The model can't use tools, so ask again without them.
                 use_tools = False
                 notice = f"{selection.model} can't run queries, so it answered from the live context only."
@@ -264,6 +283,19 @@ class InvestigationManager:
                 notice = "The model declined to continue this request."
                 notices.append(notice)
                 await run.emit("notice", text=notice)
+            if tool_calls and last_round:
+                # The model asked for more data when it had to answer. Never end without an answer.
+                if not "".join(answer_parts).strip():
+                    answer_parts.clear()
+                    answer_parts.append(fallback_answer(context))
+                    await run.emit("text_reset")
+                    await run.emit("text", text=answer_parts[0])
+                notice = "The model kept asking for more data instead of answering, so this answer was written by the console from its own checks."
+                if not "".join(answer_parts).startswith(FALLBACK_MARK):
+                    notice = "The model asked for more data after its answer. The answer it gave is shown."
+                notices.append(notice)
+                await run.emit("notice", text=notice)
+                return
             if not tool_calls:
                 answer = "".join(answer_parts)
                 missing = missing_sections(answer)
@@ -284,15 +316,31 @@ class InvestigationManager:
                 "tool_calls": [{"id": call.id, "name": call.name, "arguments": call.arguments} for call in tool_calls],
                 "assistant_blocks": finished.assistant_blocks or None,
             })
-            for call in tool_calls:
-                messages.append(await self._run_tool(run, tools_runner, call, conversation_id, message_id, call_id))
-        raise ProviderError("The model kept requesting queries and didn't produce an answer.")
+            for index, call in enumerate(tool_calls):
+                key = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
+                if index >= MAX_CALLS_PER_ROUND:
+                    messages.append(_skipped(call, f"Skipped: at most {MAX_CALLS_PER_ROUND} queries run per round. Ask again only if you still need it."))
+                elif key in seen_calls:
+                    messages.append(_skipped(call, f"You already ran this exact query in round {seen_calls[key]}. Its result is above, so use it instead of asking again."))
+                else:
+                    seen_calls[key] = round_number
+                    tool_calls_made += 1
+                    messages.append(await self._run_tool(run, tools_runner, call, conversation_id, message_id, call_id))
+        # Reached only if a provider returns nothing usable on every round. Still give the person an answer.
+        answer_parts.clear()
+        answer_parts.append(fallback_answer(engine.context))
+        await run.emit("text_reset")
+        await run.emit("text", text=answer_parts[0])
+        notice = "The model didn't produce an answer, so this answer was written by the console from its own checks."
+        notices.append(notice)
+        await run.emit("notice", text=notice)
 
     async def _send(self, run: Run, message_id: int, round_number: int, selection: Selection, system: str, messages: list[dict[str, Any]],
-                    tools: list[dict[str, Any]] | None, context: dict[str, Any], answer_parts: list[str], prices: dict[str, Any], actor: str) -> tuple[Any, int]:
+                    tools: list[dict[str, Any]] | None, context: dict[str, Any], answer_parts: list[str], prices: dict[str, Any], actor: str,
+                    allow_tools: bool = True) -> tuple[Any, int]:
         provider = selection.provider
         engine = await self.engines.get(run.org_id)
-        request = provider.build_request(selection.model, system, messages, tools)
+        request = provider.build_request(selection.model, system, messages, tools, allow_tools)
         snapshot_id = await engine.save_snapshot(context, "sent_to_model")
         request_json = json.dumps(request, ensure_ascii=False)
         request_hash = sha256_text(request_json)

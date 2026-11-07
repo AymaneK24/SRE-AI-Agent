@@ -147,7 +147,7 @@ kind: ClusterRole
 metadata: { name: rcc-reader }
 rules:
   - apiGroups: [""]
-    resources: [pods, pods/log, events, nodes]
+    resources: [pods, pods/log, events, nodes, services]
     verbs: [get, list]
   - apiGroups: [apps]
     resources: [deployments]
@@ -164,7 +164,7 @@ subjects: [{ kind: ServiceAccount, name: rcc-reader, namespace: monitoring }]
 kubectl -n monitoring create token rcc-reader --duration=720h
 ```
 
-Leaving out `nodes` is fine: node problems then aren't watched, and the console says so. Leaving out `pods/log` means no crash logs in investigations.
+Leaving out `nodes` is fine: node problems then aren't watched, and the console says so. Leaving out `pods/log` means no crash logs in investigations. `services` lets an investigation check whether a Service reaches any ready pod, which explains most "connection refused" errors.
 
 **Connecting to the cluster:**
 

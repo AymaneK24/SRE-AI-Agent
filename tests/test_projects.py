@@ -247,7 +247,8 @@ def test_pdf_handles_empty_data_and_hostile_text():
 def _old_sqlite_schema(version):
     """The tables as version 2 or 3 of the app created them."""
     from app import schema
-    old = schema.sqlite_statements().replace(schema.V4_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V5_TABLES.format(**schema.SQLITE_TYPES), "")
+    old = (schema.sqlite_statements().replace(schema.V4_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V5_TABLES.format(**schema.SQLITE_TYPES), "")
+           .replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), ""))
     for new, previous in (("  username TEXT NOT NULL UNIQUE,\n  email TEXT NOT NULL UNIQUE,\n  name TEXT NOT NULL,\n  pending_email TEXT,\n", "  username TEXT UNIQUE,\n  email TEXT UNIQUE,\n  name TEXT NOT NULL DEFAULT '',\n"),
                           ("  owner_id BIGINT,\n  visibility TEXT NOT NULL DEFAULT 'private',\n  shared_by TEXT NOT NULL DEFAULT '',\n  shared_at TEXT,\n", "")):
         assert new in old
@@ -294,3 +295,20 @@ def test_upgrading_keeps_existing_data(tmp_path, version):
 def test_public_address_is_accepted_automatically():
     config = Config(public_url="http://10.1.2.3:8000", allowed_hosts=["localhost"])
     assert "10.1.2.3" in config.accepted_hosts and json.dumps(config.accepted_hosts)
+
+
+def test_upgrading_from_version_5_adds_project_namespaces(tmp_path):
+    from app import schema
+    path = tmp_path / "console.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(schema.sqlite_statements().replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), ""))
+    conn.execute("INSERT INTO organizations(name, slug, contact_email, policies, created_at) VALUES ('Kept', 'kept', '', '{}', 'now')")
+    conn.execute("INSERT INTO projects(org_id, name, created_at, updated_at) VALUES (1, 'Payments', 'now', 'now')")
+    conn.execute("PRAGMA user_version=5")
+    conn.commit()
+    conn.close()
+    db = Database(path, "")
+    assert db._all("SELECT name FROM projects")[0]["name"] == "Payments"
+    assert db._all("SELECT count(*) AS n FROM project_namespaces")[0]["n"] == 0
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 6
+    db.close()

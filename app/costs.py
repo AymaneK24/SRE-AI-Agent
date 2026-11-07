@@ -19,8 +19,22 @@ DEFAULT_PRICES: dict[str, dict[str, float]] = {
     "claude-opus-5-5": {"input": 4.0, "output": 20.0},
     "claude-sonnet-5-5": {"input": 2.0, "output": 10.0},
     "claude-haiku-5-5": {"input": 0.10, "output": 0.50},
+    # Google's paid-tier text prices, from https://ai.google.dev/gemini-api/docs/pricing as read on 2026-11-07.
+    # Output includes thinking tokens, which this console counts as output.
+    "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    "gemini-3.1-flash-lite": {"input": 0.25, "output": 1.50},
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
-HAIKU_LONG_PROMPT = {"model": "claude-haiku-5-5", "over": 100_000, "input": 0.50, "output": 2.50}
+# Prompts longer than "over" tokens are billed at a higher rate for these models.
+LONG_PROMPT: dict[str, dict[str, float]] = {
+    "claude-haiku-5-5": {"over": 100_000, "input": 0.50, "output": 2.50},
+    "gemini-3.1-pro-preview": {"over": 200_000, "input": 4.00, "output": 18.00},
+    "gemini-2.5-pro": {"over": 200_000, "input": 2.50, "output": 15.00},
+}
 
 
 def compute_cost(provider: str, model: str, input_tokens: int | None, output_tokens: int | None, prices: dict[str, Any]) -> float | None:
@@ -30,8 +44,9 @@ def compute_cost(provider: str, model: str, input_tokens: int | None, output_tok
     price = prices.get(model) or DEFAULT_PRICES.get(model)
     if not price or input_tokens is None:
         return None
-    if model == HAIKU_LONG_PROMPT["model"] and model not in prices and input_tokens > HAIKU_LONG_PROMPT["over"]:
-        price = HAIKU_LONG_PROMPT
+    long_prompt = LONG_PROMPT.get(model)
+    if long_prompt and model not in prices and input_tokens > long_prompt["over"]:
+        price = long_prompt
     return (input_tokens * float(price["input"]) + (output_tokens or 0) * float(price["output"])) / 1_000_000
 
 
@@ -65,6 +80,10 @@ async def usage_summary(db: Database, org_id: int) -> dict[str, Any]:
         "SELECT count(*) AS n, COALESCE(AVG(m.cost_usd), 0) AS avg_cost, COALESCE(AVG(m.duration_ms), 0) AS avg_ms FROM messages m JOIN conversations c ON c.id = m.conversation_id "
         "WHERE c.org_id = ? AND m.role = 'assistant' AND m.status = 'complete' AND m.created_at >= ?", (org_id, start))
     spent = sum(float(row["cost_usd"]) for row in rows)
+    for row in rows:
+        # A model with no known price shows as unknown, not as free.
+        if row["provider"] != "ollama" and int(row["unpriced_calls"] or 0) > 0 and float(row["cost_usd"]) == 0:
+            row["cost_usd"] = None
     now = datetime.now(timezone.utc)
     days = calendar.monthrange(now.year, now.month)[1]
     elapsed = max((now - now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 86400, 1.0)

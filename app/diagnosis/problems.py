@@ -13,6 +13,10 @@ from ..integrations.kubernetes import parse_time
 PENDING_GRACE_S = 120
 NOT_READY_GRACE_S = 120
 OOM_RECENT_S = 900
+# A crash loop shows CrashLoopBackOff while it waits, then Running for a few seconds after each restart.
+# A container that keeps exiting is still crash-looping while it briefly runs.
+CRASHLOOP_RESTARTS = 3
+CRASHLOOP_RECENT_S = 600
 IMAGE_REASONS = {"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "ErrImageNeverPull"}
 CONFIG_REASONS = {"CreateContainerConfigError", "CreateContainerError", "RunContainerError"}
 SEVERITY_RANK = {"critical": 2, "warning": 1, "info": 0}
@@ -44,6 +48,9 @@ def _pod_problem(pod: dict[str, Any], now: datetime) -> tuple[str, str, dict[str
         if container["state"] == "waiting" and container["reason"] in CONFIG_REASONS:
             return "config_error", "critical", facts
         if container["state"] == "waiting" and container["reason"] == "CrashLoopBackOff":
+            return "crashloop", "critical", facts
+        if (container["restarts"] >= CRASHLOOP_RESTARTS and container["last_reason"] not in {"", "Completed"}
+                and _age_s(container["last_finished"], now) <= CRASHLOOP_RECENT_S):
             return "crashloop", "critical", facts
     for container in pod["containers"]:
         if container["last_reason"] == "OOMKilled" and _age_s(container["last_finished"], now) <= OOM_RECENT_S:
