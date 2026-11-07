@@ -280,7 +280,7 @@ export function mount(container) {
         h('div', { class: `stat${errors ? ' is-bad' : ''}` }, h('b', {}, Math.round(errors).toLocaleString()), h('span', {}, 'Error-like lines'))),
       h('p', { class: 'hero-chart-title cluster-subhead' }, h('b', {}, 'Streams with the most errors')),
       streams.length ? h('ul', { class: 'rows' }, streams.slice(0, 5).map((row) => h('li', { class: 'row' }, icon(row.errors_5m > 0 ? 'warning' : 'ok'),
-        h('span', { class: 'row-title' }, row.job), h('span', { class: 'row-side' }, `${Math.round(row.errors_5m)} errors in ${Math.round(row.lines_5m)} lines`))))
+        h('span', { class: 'row-title' }, streamName(row.job)), h('span', { class: 'row-side' }, `${Math.round(row.errors_5m)} errors in ${Math.round(row.lines_5m)} lines`))))
         : h('p', { class: 'small muted' }, 'No stream wrote anything in the last 5 minutes.'));
   }
 
@@ -291,6 +291,11 @@ export function mount(container) {
     const query = new URLSearchParams({ text: detail.workload });
     if (PROBLEM_SIGNALS[detail.problem]) query.set('signal', PROBLEM_SIGNALS[detail.problem]);
     return query.toString();
+  }
+
+  // Promtail names a stream namespace/app; pods without an app label end up as "namespace/".
+  function streamName(job) {
+    return job.endsWith('/') ? `${job.slice(0, -1)} (pods without an app label)` : job;
   }
 
   function investigateLink(prompt, workflowQuery) {
@@ -378,7 +383,7 @@ export function mount(container) {
       const streams = loki.streams || [];
       parts.push(h('h3', { class: 'watched-head' }, `Log streams (${streams.length})`, h('span', { class: 'small muted' }, ` read by ${loki.name || 'Loki'}`)),
         streams.length ? table([['Stream'], ['Lines in 5 min', true], ['Error-like lines', true]], streams.slice(0, 50).map((row) => h('tr', {},
-          h('td', { class: 'cell-title' }, row.job), h('td', { class: 'num' }, Math.round(row.lines_5m).toLocaleString()),
+          h('td', { class: 'cell-title' }, streamName(row.job)), h('td', { class: 'num' }, Math.round(row.lines_5m).toLocaleString()),
           h('td', { class: 'num' }, row.errors_5m ? h('span', { class: 'badge warning' }, Math.round(row.errors_5m).toLocaleString()) : '0'))))
           : h('p', { class: 'empty' }, 'No stream wrote anything in the last 5 minutes.'));
     }
