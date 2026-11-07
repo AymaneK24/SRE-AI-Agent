@@ -33,6 +33,7 @@ The server enforces this on every request. Hiding something on a page is never t
 | Logs | Hidden | Own and shared investigations and prompts, and state changes | All, plus alerts sent and the audit trail | Same as admin |
 | Connections, AI settings | Hidden | Hidden. Can choose a model, without seeing its address | Full | Full |
 | Organization | Hidden | Hidden | Usage and members | Also security policies and single sign-on |
+| Docs (/docs) | Yes | Yes | Yes | Yes |
 | Your account | Yes | Yes | Yes | Yes |
 
 **Why admins can read every investigation:** someone has to be able to oversee what's sent to an AI model, and the audit trail needs a person who can check it. If your organization wants this narrower, give fewer people the admin role.

@@ -18,6 +18,10 @@ The script asks a few questions, then writes `.env` with new secrets and prints 
 
 See [docs/DEPLOY.md](docs/DEPLOY.md) for certificates, Kubernetes, and servers with no internet access.
 
+## Documentation
+
+The full documentation is built into the console at **/docs** (the **Docs** link in the header), for anyone signed in: how to use each page, every connection (including Loki selectors and Kubernetes access), AI models and how to measure their accuracy, deployment on localhost, an Azure VM, or AKS, configuration, roles, single sign-on, security, and troubleshooting. The pages are Markdown files in `app/docs`.
+
 ## What's included
 
 | Area           | What you get                                                                                                                                                                                   |
