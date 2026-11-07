@@ -100,9 +100,9 @@ function renderLiveChip() {
   let text = 'Connecting';
   if (!live.connected && context) { tone = 'critical'; text = 'Connection lost'; }
   else if (status === 'ok') { tone = 'ok'; text = 'Live'; }
-  else if (status === 'partial') { tone = 'warning'; text = 'Some sources down'; }
-  else if (status === 'unreachable') { tone = 'critical'; text = 'Sources not answering'; }
-  else if (status === 'not_configured') { text = 'No source connected'; }
+  else if (status === 'partial') { tone = 'warning'; text = 'Some connections down'; }
+  else if (status === 'unreachable') { tone = 'critical'; text = 'Connections not answering'; }
+  else if (status === 'not_configured') { text = 'Nothing connected'; }
   clear(chip, h('span', { class: `dot ${tone}` }), text);
 }
 
