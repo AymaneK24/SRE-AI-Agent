@@ -1,6 +1,7 @@
 """Read-only queries against Grafana Loki."""
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -10,10 +11,25 @@ from ..net_guard import TargetPolicy, check_url, guarded_transport
 from ..sources.base import SourceError
 
 
+# A matcher Loki accepts on its own: = or =~ with a value that can't be empty.
+_POSITIVE = re.compile(r'[A-Za-z_]\w*\s*(=|=~)\s*"(?!(\.\*)?")[^"]*"')
+
+
+def usable_selector(selector: str) -> str:
+    """Loki refuses a selector made only of != or !~ matchers, so add one that matches every stream."""
+    selector = selector.strip()
+    if not selector:
+        return '{job=~".+"}'
+    if selector.startswith("{") and not _POSITIVE.search(selector.split("}", 1)[0]):
+        inner = selector[1:].lstrip()
+        return '{job=~".+"' + (", " + inner if not inner.startswith("}") else inner)
+    return selector
+
+
 class LokiClient:
     def __init__(self, config: dict[str, Any], secrets: dict[str, Any], allow_private: TargetPolicy | bool) -> None:
         self.url = config.get("url", "").rstrip("/")
-        self.selector = config.get("selector") or '{job=~".+"}'
+        self.selector = usable_selector(config.get("selector") or "")
         self.allow_private = allow_private
         headers = {"Authorization": f"Bearer {secrets['token']}"} if secrets.get("token") else {}
         if config.get("tenant"):

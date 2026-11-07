@@ -499,3 +499,12 @@ async def test_runbook_library(console, kube_only):
     assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
     kept = {item["id"]: item for item in (await client.get("/api/workflows")).json()}
     assert kept[runbook["id"]]["project_id"] is None, "deleting a project keeps its runbooks"
+
+
+def test_loki_selector_with_only_negative_matchers_is_made_usable():
+    from app.integrations.loki import usable_selector
+    assert usable_selector("") == '{job=~".+"}'
+    assert usable_selector('{namespace!="kube-system"}') == '{job=~".+", namespace!="kube-system"}'
+    assert usable_selector('{app=~".*"}') == '{job=~".+", app=~".*"}'
+    assert usable_selector('{namespace=~".+", namespace!="kube-system"}') == '{namespace=~".+", namespace!="kube-system"}'
+    assert usable_selector('{job="api"} |= "x"') == '{job="api"} |= "x"'
