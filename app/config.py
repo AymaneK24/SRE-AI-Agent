@@ -60,6 +60,8 @@ class Config:
 
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     anthropic_base_url: str = field(default_factory=lambda: _env("RCC_ANTHROPIC_URL", "https://api.anthropic.com"))
+    gemini_api_key: str = field(default_factory=lambda: _env("RCC_GEMINI_API_KEY") or _env("GEMINI_API_KEY"))
+    gemini_base_url: str = field(default_factory=lambda: _env("RCC_GEMINI_URL", "https://generativelanguage.googleapis.com"))
     default_ollama_url: str = field(default_factory=lambda: _env("RCC_OLLAMA_URL", "http://localhost:11434"))
     aws_endpoint_url: str = field(default_factory=lambda: _env("RCC_AWS_ENDPOINT_URL"))
     azure_management_url: str = field(default_factory=lambda: _env("RCC_AZURE_MANAGEMENT_URL", "https://management.azure.com"))

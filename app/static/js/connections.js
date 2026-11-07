@@ -341,13 +341,23 @@ export function mount(container) {
     const ai = await refreshAi();
     if (disposed) return;
     if (!editable) {
-      clear(aiHost, h('p', { class: 'body-text' }, `This organization uses ${ai.provider === 'claude' ? 'Claude' : 'Ollama'}. An admin can change this.`));
+      clear(aiHost, h('p', { class: 'body-text' }, `This organization uses ${{ claude: 'Claude', gemini: 'Gemini' }[ai.provider] || 'Ollama'}. An admin can change this.`));
       return;
     }
     const providerOllama = h('input', { type: 'radio', name: 'ai-provider', value: 'ollama', checked: ai.provider === 'ollama' });
     const providerClaude = h('input', { type: 'radio', name: 'ai-provider', value: 'claude', checked: ai.provider === 'claude' });
+    const providerGemini = h('input', { type: 'radio', name: 'ai-provider', value: 'gemini', checked: ai.provider === 'gemini' });
     const ollamaHost = h('div');
     const claudeHost = h('div');
+    const geminiHost = h('div');
+    const gem = ai.gemini || { model: '', max_tokens: 8192, use_tools: true, consent: false, strict_answers: true, key_source: 'none' };
+    const geminiKey = h('input', { class: 'input', type: 'password', autocomplete: 'off', placeholder: gem.key_source === 'saved' ? 'Saved. Enter a new key to replace it.' : gem.key_source === 'environment' ? 'Set by RCC_GEMINI_API_KEY' : 'AIza...', disabled: gem.key_source === 'environment' });
+    const geminiModel = h('select', { class: 'input' });
+    const geminiStatus = h('small', {});
+    const geminiTokens = h('input', { class: 'input', type: 'number', min: 256, max: 65536, step: 256, value: gem.max_tokens });
+    const geminiTools = h('input', { type: 'checkbox', checked: gem.use_tools });
+    const geminiStrict = h('input', { type: 'checkbox', checked: gem.strict_answers });
+    const geminiConsent = h('input', { type: 'checkbox', checked: gem.consent });
     const result = h('div');
     const ollamaUrl = h('input', { class: 'input', value: ai.ollama.url, spellcheck: 'false' });
     const ollamaModel = h('select', { class: 'input' });
@@ -384,34 +394,46 @@ export function mount(container) {
       else if (data.models.length && !data.ok) { claudeModel.prepend(h('option', { value: current }, current)); claudeModel.value = current; }
       claudeStatus.textContent = data.ok ? `Your key can use ${data.models.length} ${data.models.length === 1 ? 'model' : 'models'}.` : data.error;
     }
-    async function saveKey() {
-      const value = claudeKey.value.trim();
-      if (!value) { claudeStatus.textContent = 'Enter an API key first.'; return; }
+    async function loadGemini() {
+      geminiStatus.textContent = 'Loading models';
+      const data = await api('/api/ai/providers/gemini/models');
+      const current = geminiModel.value || gem.model;
+      clear(geminiModel, data.models.length ? data.models.map((item) => h('option', { value: item.id }, item.label)) : h('option', { value: current }, current || 'No models yet'));
+      if (data.models.some((item) => item.id === current)) geminiModel.value = current;
+      geminiStatus.textContent = data.ok ? `Your key can use ${data.models.length} Gemini ${data.models.length === 1 ? 'model' : 'models'}.` : data.error;
+    }
+    const keyActions = { claude: [claudeKey, claudeStatus, loadClaude], gemini: [geminiKey, geminiStatus, loadGemini] };
+    async function saveKey(name) {
+      const [input, status, reload] = keyActions[name];
+      const value = input.value.trim();
+      if (!value) { status.textContent = 'Enter an API key first.'; return; }
       try {
-        await api('/api/ai/claude-key', { method: 'PUT', body: { api_key: value } });
-        claudeKey.value = '';
-        claudeKey.placeholder = 'Saved. Enter a new key to replace it.';
+        await api(`/api/ai/${name}-key`, { method: 'PUT', body: { api_key: value } });
+        input.value = '';
+        input.placeholder = 'Saved. Enter a new key to replace it.';
         toast('API key saved');
         await refreshAi();
-        await loadClaude();
-      } catch (error) { claudeStatus.textContent = error.message; }
+        await reload();
+      } catch (error) { status.textContent = error.message; }
     }
-    async function removeKey() {
-      await api('/api/ai/claude-key', { method: 'DELETE' });
+    async function removeKey(name) {
+      await api(`/api/ai/${name}-key`, { method: 'DELETE' });
       toast('API key removed');
       renderAi();
     }
-    const toggleProviders = () => { ollamaHost.hidden = !providerOllama.checked; claudeHost.hidden = !providerClaude.checked; };
+    const toggleProviders = () => { ollamaHost.hidden = !providerOllama.checked; claudeHost.hidden = !providerClaude.checked; geminiHost.hidden = !providerGemini.checked; };
     providerOllama.addEventListener('change', toggleProviders);
     providerClaude.addEventListener('change', toggleProviders);
+    providerGemini.addEventListener('change', toggleProviders);
     async function save(event) {
       event.preventDefault();
       clear(result);
       try {
         await api('/api/ai/settings', { method: 'PUT', body: {
-          provider: providerClaude.checked ? 'claude' : 'ollama', max_rounds: Number(maxRounds.value),
+          provider: providerClaude.checked ? 'claude' : providerGemini.checked ? 'gemini' : 'ollama', max_rounds: Number(maxRounds.value),
           ollama: { url: ollamaUrl.value.trim(), model: ollamaModel.value, num_ctx: Number(numCtx.value), use_tools: ollamaTools.checked, strict_answers: ollamaStrict.checked, small_model: smallModel.value },
           claude: { model: claudeModel.value || ai.claude.model, max_tokens: Number(maxTokens.value), use_tools: claudeTools.checked, consent: consent.checked, strict_answers: claudeStrict.checked },
+          gemini: { model: geminiModel.value || gem.model, max_tokens: Number(geminiTokens.value), use_tools: geminiTools.checked, consent: geminiConsent.checked, strict_answers: geminiStrict.checked },
         } });
         await refreshAi();
         showResult(result, true, 'AI model settings saved.');
@@ -431,21 +453,33 @@ export function mount(container) {
       h('label', { class: 'field span-3' }, h('span', {}, 'API key'), claudeKey, h('small', {}, 'Encrypted before it is stored and never shown again.')),
       h('label', { class: 'field span-3' }, h('span', {}, 'Model'), claudeModel, claudeStatus),
       ai.claude.key_source === 'environment' ? null : h('div', { class: 'span-6', style: 'display:flex;gap:8px;flex-wrap:wrap' },
-        h('button', { class: 'button compact', type: 'button', onClick: saveKey }, 'Save key'),
-        ai.claude.key_source === 'saved' ? h('button', { class: 'button compact', type: 'button', onClick: removeKey }, 'Remove key') : null),
+        h('button', { class: 'button compact', type: 'button', onClick: () => saveKey('claude') }, 'Save key'),
+        ai.claude.key_source === 'saved' ? h('button', { class: 'button compact', type: 'button', onClick: () => removeKey('claude') }, 'Remove key') : null),
       field('Longest answer (tokens)', maxTokens, null, 'span-3'),
       h('div', { class: 'stack span-3', style: 'align-self:center' }, h('label', { class: 'check' }, claudeTools, 'Let the model run queries'), h('label', { class: 'check' }, claudeStrict, 'Ask again if an answer is incomplete')),
       h('label', { class: 'check span-6' }, consent, 'Allow sending prompts and live context, including host and service names, to Anthropic')));
+    clear(geminiHost, h('div', { class: 'form-grid' },
+      h('p', { class: 'body-text small span-6' }, 'This uses a Gemini API key from ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener noreferrer' }, 'Google AI Studio'), '. Each request carries the whole conversation, so the console doesn’t rely on Google storing anything between requests. Google’s API terms decide what Google keeps of what it receives.'),
+      h('label', { class: 'field span-3' }, h('span', {}, 'API key'), geminiKey, h('small', {}, 'Encrypted before it is stored and never shown again.')),
+      h('label', { class: 'field span-3' }, h('span', {}, 'Model'), geminiModel, geminiStatus),
+      gem.key_source === 'environment' ? null : h('div', { class: 'span-6', style: 'display:flex;gap:8px;flex-wrap:wrap' },
+        h('button', { class: 'button compact', type: 'button', onClick: () => saveKey('gemini') }, 'Save key'),
+        gem.key_source === 'saved' ? h('button', { class: 'button compact', type: 'button', onClick: () => removeKey('gemini') }, 'Remove key') : null),
+      field('Longest answer (tokens)', geminiTokens, null, 'span-3'),
+      h('div', { class: 'stack span-3', style: 'align-self:center' }, h('label', { class: 'check' }, geminiTools, 'Let the model run queries'), h('label', { class: 'check' }, geminiStrict, 'Ask again if an answer is incomplete')),
+      h('label', { class: 'check span-6' }, geminiConsent, 'Allow sending prompts and live context, including host and service names, to Google')));
     clear(aiHost, h('form', { onSubmit: save, 'aria-label': 'AI model settings' },
       h('div', { class: 'provider-grid' },
         h('label', { class: 'provider-option' }, providerOllama, h('b', {}, 'Ollama'), h('span', {}, 'Runs on your own server. Your data stays there, and speed depends on your hardware.')),
-        h('label', { class: 'provider-option' }, providerClaude, h('b', {}, 'Claude'), h('span', {}, 'Runs at Anthropic over the internet. Needs an API key and sends your context there.'))),
-      ollamaHost, claudeHost,
+        h('label', { class: 'provider-option' }, providerClaude, h('b', {}, 'Claude'), h('span', {}, 'Runs at Anthropic over the internet. Needs an API key and sends your context there.')),
+        h('label', { class: 'provider-option' }, providerGemini, h('b', {}, 'Gemini'), h('span', {}, 'Runs at Google over the internet. Needs an API key and sends your context there.'))),
+      ollamaHost, claudeHost, geminiHost,
       h('div', { class: 'form-grid', style: 'margin-top:14px' }, field('Most model rounds per prompt', maxRounds, 'Limits how many times a model can run queries and continue.', 'span-3')),
       result, h('div', { class: 'form-actions' }, h('button', { class: 'button primary', type: 'submit' }, 'Save AI settings'))));
     toggleProviders();
     loadOllama().catch((error) => { ollamaStatus.textContent = error.message; });
     loadClaude().catch((error) => { claudeStatus.textContent = error.message; });
+    loadGemini().catch((error) => { geminiStatus.textContent = error.message; });
   }
 
   renderCollectors().catch(() => {});

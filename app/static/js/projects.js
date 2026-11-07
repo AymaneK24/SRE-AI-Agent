@@ -223,7 +223,7 @@ export function mount(container, params) {
         can('engineer') ? h('div', { class: 'form-actions', style: 'margin-top:0' },
           h('button', { class: 'button primary', type: 'button', onClick: generate }, 'Generate report'),
           h('label', { class: 'check' }, includeAi, 'Include AI notes'),
-          live.ai ? h('span', { class: 'small muted' }, `Uses ${live.ai.provider === 'claude' ? live.ai.claude.model : live.ai.ollama.model || 'no model yet'}.`) : null) : null,
+          live.ai ? h('span', { class: 'small muted' }, `Uses ${live.ai[live.ai.provider]?.model || 'no model yet'}.`) : null) : null,
         reportStatus,
         reports.length ? h('div', { style: 'margin-top:12px' }, tableOf([['Generated'], ['Period', true], ['Problems', true], can('engineer') ? ['AI notes'] : null, can('engineer') ? ['Viewers'] : null, ['']].filter(Boolean),
           reports.map((report) => h('tr', {},

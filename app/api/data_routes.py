@@ -429,7 +429,7 @@ async def refresh_context(user: Engineer, ctx: Ctx) -> dict[str, Any]:
 
 
 @router.get("/context/prompt-preview")
-async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude"] | None = None) -> dict[str, Any]:
+async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None) -> dict[str, Any]:
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
     name = provider or settings["provider"]
     chars = int(settings["ollama"]["num_ctx"]) * 2 if name == "ollama" else 60000

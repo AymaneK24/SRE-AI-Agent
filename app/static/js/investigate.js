@@ -30,7 +30,7 @@ export function mount(container, params) {
   let activeRunId = null;
   let streamAbort = null;
   let tickTimer = null;
-  let modelOptions = { ollama: [], claude: [] };
+  let modelOptions = { ollama: [], claude: [], gemini: [] };
   let disposed = false;
 
   const titleHost = h('div');
@@ -77,19 +77,22 @@ export function mount(container, params) {
 
   function renderComposerNote() {
     const { provider } = selectedParts();
-    composerNote.hidden = provider !== 'claude';
-    composerNote.textContent = provider === 'claude' ? 'Your prompt and the live context, including host and service names, go to Anthropic.' : '';
+    const company = { claude: 'Anthropic', gemini: 'Google' }[provider];
+    composerNote.hidden = !company;
+    composerNote.textContent = company ? `Your prompt and the live context, including host and service names, go to ${company}.` : '';
   }
 
   async function loadModels() {
     const ai = live.ai || await refreshAi();
-    const [ollama, claude] = await Promise.all([
+    const [ollama, claude, gemini] = await Promise.all([
       api('/api/ai/providers/ollama/models').catch(() => ({ models: [] })),
       api('/api/ai/providers/claude/models').catch(() => ({ models: [] })),
+      api('/api/ai/providers/gemini/models').catch(() => ({ models: [] })),
     ]);
     if (disposed) return;
-    modelOptions = { ollama: ollama.models || [], claude: claude.models || [] };
+    modelOptions = { ollama: ollama.models || [], claude: claude.models || [], gemini: gemini.models || [] };
     const claudeReady = ai.claude.key_configured && ai.claude.consent;
+    const geminiReady = Boolean(ai.gemini?.key_configured && ai.gemini?.consent);
     const options = [];
     const ollamaIds = modelOptions.ollama.map((item) => item.id);
     if (ai.ollama.model && !ollamaIds.includes(ai.ollama.model)) modelOptions.ollama.unshift({ id: ai.ollama.model, label: ai.ollama.model });
@@ -101,6 +104,11 @@ export function mount(container, params) {
     if (ai.claude.model && !claudeIds.includes(ai.claude.model)) modelOptions.claude.unshift({ id: ai.claude.model, label: ai.claude.model });
     options.push(h('optgroup', { label: claudeReady ? 'Claude, over the internet' : can('admin') ? 'Claude: set up in Connections' : 'Claude: not set up' },
       modelOptions.claude.map((item) => h('option', { value: `claude::${item.id}`, disabled: !claudeReady }, item.label))));
+    if (ai.gemini?.model && !modelOptions.gemini.some((item) => item.id === ai.gemini.model)) modelOptions.gemini.unshift({ id: ai.gemini.model, label: ai.gemini.model });
+    if (modelOptions.gemini.length || geminiReady) {
+      options.push(h('optgroup', { label: geminiReady ? 'Gemini, over the internet' : can('admin') ? 'Gemini: set up in Connections' : 'Gemini: not set up' },
+        modelOptions.gemini.map((item) => h('option', { value: `gemini::${item.id}`, disabled: !geminiReady }, item.label))));
+    }
     clear(modelSelect, options);
     const preferred = remembered || `${ai.provider}::${ai[ai.provider].model}`;
     modelSelect.value = preferred;

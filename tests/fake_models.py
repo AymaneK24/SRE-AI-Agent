@@ -60,6 +60,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}, 401)
                 return
             self._json({"data": [{"id": "claude-test-1", "display_name": "Claude Test 1", "type": "model"}], "has_more": False})
+        elif self.path.startswith("/v1beta/models"):
+            if self.headers.get("x-goog-api-key") != "gemini-test-key":
+                self._json({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}, 400)
+                return
+            self._json({"models": [
+                {"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                {"name": "models/text-embedding-005", "displayName": "Embedding", "supportedGenerationMethods": ["embedContent"]},
+            ]})
         elif self.path == "/_received":
             self._json(received)
         else:
@@ -72,6 +80,8 @@ class Handler(BaseHTTPRequestHandler):
             self._ollama(body)
         elif self.path == "/v1/messages":
             self._claude(body)
+        elif self.path.startswith("/v1beta/models/") and ":streamGenerateContent" in self.path:
+            self._gemini(body)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -99,6 +109,40 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(0.01)
         self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "prompt_eval_count": 900, "eval_count": 120}) + "\n").encode())
+
+    def _gemini(self, body):
+        """generateContent streaming, as documented: SSE `data:` chunks of candidates[0].content.parts, then usage.
+        Like Gemini 3, a function call carries a thought signature, and a request that drops it is refused."""
+        if self.headers.get("x-goog-api-key") != "gemini-test-key":
+            self._json({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}, 400)
+            return
+        if "alt=sse" not in self.path or "store" in body or "systemInstruction" not in body:
+            self._json({"error": {"code": 400, "message": "bad request shape"}}, 400)
+            return
+        contents = body["contents"]
+        answered = any("functionResponse" in part for item in contents for part in item["parts"])
+        for item in contents:
+            for part in item["parts"]:
+                if item["role"] == "model" and "functionCall" in part and part.get("thoughtSignature") != "sig-abc":
+                    self._json({"error": {"code": 400, "message": "Function call is missing a thought_signature in functionCall parts."}}, 400)
+                    return
+        self._start_stream("text/event-stream")
+
+        def send(chunk):
+            self.wfile.write(f"data: {json.dumps(chunk)}\r\n\r\n".encode())
+            self.wfile.flush()
+
+        if body.get("tools") and not answered:
+            send({"candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "run_instant_query", "args": {"query": "up"}}, "thoughtSignature": "sig-abc"}]}, "index": 0}]})
+            send({"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+                  "usageMetadata": {"promptTokenCount": 640, "candidatesTokenCount": 12, "thoughtsTokenCount": 30}})
+            return
+        words = re.findall(r"\S+\s*", scripted_answer(body["systemInstruction"]["parts"][0]["text"]))
+        for index in range(0, len(words), 8):
+            send({"candidates": [{"content": {"role": "model", "parts": [{"text": "".join(words[index:index + 8])}]}, "index": 0}]})
+        send({"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+              "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 140}})
 
     def _replay(self, body, system, used_tool):
         """Two behaviours seen on Nov 6: a careless small model that queries the wrong system and ignores the crash,
