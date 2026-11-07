@@ -156,6 +156,12 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .cluster-stats { margin-top: 10px; }
 .cluster-stats .stat.is-bad b { color: var(--critical); }
 .cluster-subhead { margin-top: 22px; }
+.hero-switch { margin-bottom: 14px; }
+.watched-head { margin: 22px 0 8px; font-size: 16px; font-weight: 600; }
+.watched-head:first-child { margin-top: 0; }
+.workflow-filters { margin: 4px 0 16px; gap: 10px; }
+.workflow-filters input[type=search] { flex: 1 1 320px; max-width: 520px; }
+.workflow-filters select { flex: 0 1 220px; }
 
 /* Buttons */
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 18px; background: transparent; border: 1px solid var(--muted); border-radius: 999px; font-weight: 500; text-decoration: none; white-space: nowrap; }
