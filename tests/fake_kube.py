@@ -134,11 +134,23 @@ class FakeKube(BaseHTTPRequestHandler):
                 self._send(404, {"message": "not found"})
 
 
+class _TLSServer(ThreadingHTTPServer):
+    """Does the TLS handshake in each request's own thread. In the accept loop, a client that gives up mid-handshake
+    would block the loop, and then shutdown() would wait forever."""
+    tls: ssl.SSLContext
+
+    def get_request(self):
+        sock, address = self.socket.accept()
+        return self.tls.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), address
+
+
 def serve(tls: ssl.SSLContext | None = None) -> tuple[ThreadingHTTPServer, str]:
     FakeKube.state = ClusterState()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeKube)
     if tls:
-        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        server = _TLSServer(("127.0.0.1", 0), FakeKube)
+        server.tls = tls
+    else:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeKube)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     scheme = "https" if tls else "http"
     return server, f"{scheme}://127.0.0.1:{server.server_address[1]}"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +22,7 @@ def defaults(config: Config) -> dict[str, Any]:
     return {
         "provider": "ollama",
         "max_rounds": 6,
-        "ollama": {"url": config.default_ollama_url, "model": "", "num_ctx": 8192, "use_tools": False, "strict_answers": False},
+        "ollama": {"url": config.default_ollama_url, "model": "", "num_ctx": 8192, "use_tools": False, "strict_answers": False, "small_model": "auto"},
         "claude": {"model": "claude-sonnet-5-5", "max_tokens": 4096, "use_tools": True, "consent": False, "strict_answers": True},
     }
 
@@ -55,6 +56,19 @@ class Selection:
     context_chars: int
     history_chars: int
     repair: bool = False
+    compact: bool = False
+
+
+SMALL_MODEL_RE = re.compile(r"[:_\-](\d+(?:\.\d+)?)b\b")
+
+
+def is_small_model(name: str) -> bool:
+    """Models of about 8 billion parameters or fewer, judged from the size in their name, such as qwen2.5:3b."""
+    lowered = name.lower()
+    if any(word in lowered for word in (":mini", "-mini", ":tiny", "-tiny")):
+        return True
+    match = SMALL_MODEL_RE.search(lowered)
+    return bool(match) and float(match.group(1)) <= 8
 
 
 async def build_provider(db: Database, org_id: int, box: SecretBox, config: Config, name: str | None = None) -> tuple[Provider, dict[str, Any]]:
@@ -99,4 +113,6 @@ async def select(db: Database, org_id: int, box: SecretBox, config: Config, prov
     else:
         context_chars, history_chars = 60000, 60000
     tools = section.get("use_tools", False) if use_tools is None else use_tools
-    return Selection(provider, chosen, bool(tools), context_chars, history_chars, bool(section.get("strict_answers", False)))
+    mode = section.get("small_model", "auto")
+    compact = provider.name == "ollama" and (mode == "on" or (mode == "auto" and is_small_model(chosen)))
+    return Selection(provider, chosen, bool(tools), context_chars, history_chars, bool(section.get("strict_answers", False)), compact)

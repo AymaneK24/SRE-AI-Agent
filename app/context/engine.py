@@ -21,6 +21,7 @@ from ..broker import Broker
 from ..config import Config
 from ..db import Database, sha256_text, utcnow
 from ..diagnosis.problems import SEVERITY_RANK, find_problems
+from ..diagnosis.rules import diagnose
 from ..integrations.kubernetes import KubernetesClient, summary_from_snapshot
 from ..integrations.loki import LokiClient
 from ..net_guard import BlockedTarget
@@ -35,7 +36,11 @@ BASELINE_EVERY_S = 300
 METRICS_EVERY_S = 300
 SNAPSHOT_EVERY_S = 600
 INTEGRATION_EVERY_S = 30
+CRASH_LOG_PROBLEMS = 3
+CRASH_LOG_LINES = 30
+CRASH_LOG_CHARS = 1000
 NO_SOURCE_POLL_S = 30
+STOP_TIMEOUT_S = 10
 CHANGES_EVERY_S = 120
 MAX_SERIES_PER_SIGNAL = 10
 ANOMALY_Z = 4.0
@@ -111,6 +116,7 @@ class ContextEngine:
         self.integration_kinds: set[str] = set()
         self.k8s_snapshot: dict[str, Any] | None = None
         self.k8s_problems: list[dict[str, Any]] = []
+        self._crash_logs: dict[str, dict[str, Any]] = {}
         self._integrations_at = 0.0
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -125,6 +131,7 @@ class ContextEngine:
         self._seeded: set[int] = set()
         self._seed_deadlines: dict[int, float] = {}
         self._last_ok_mono: float | None = None
+        self._stopping = False
 
     # Lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -132,12 +139,18 @@ class ContextEngine:
         self._task = asyncio.create_task(self._loop(), name=f"context-engine-{self.org_id}")
 
     async def stop(self) -> None:
+        # The flag and the wake-up end the loop even if a cancellation is lost. That happens when it arrives at the
+        # same moment as the loop's own wait timeout, or inside a client library that manages cancellation itself.
+        self._stopping = True
+        self._wake.set()
         if self._task:
             self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._task, timeout=STOP_TIMEOUT_S)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+            except Exception:  # A failed last poll must not stop the shutdown.
+                log.exception("context engine ended with an error")
         await self._close_sources()
 
     async def _close_sources(self) -> None:
@@ -201,7 +214,7 @@ class ContextEngine:
         self.recent_events.clear()
 
     async def _loop(self) -> None:
-        while True:
+        while not self._stopping:
             delay = float(NO_SOURCE_POLL_S)
             if self.has_connections:
                 await self.poll()
@@ -211,10 +224,14 @@ class ContextEngine:
                 if self.source_errors:
                     self.context = self._empty_context("unreachable")
                 self.broker.publish({"type": "context", "data": self.public_context()})
+            if self._stopping:
+                return
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=delay)
             except asyncio.TimeoutError:
-                pass
+                task = asyncio.current_task()
+                if task and task.cancelling():
+                    raise asyncio.CancelledError from None
             self._wake.clear()
 
     def _empty_context(self, status: str) -> dict[str, Any]:
@@ -410,8 +427,38 @@ class ContextEngine:
         self.integration_summary = summary
 
     async def _enrich_k8s_problems(self, client: Any) -> None:
-        """Hook for diagnoses and crash logs. Kept separate so a failure here never hides the problems themselves."""
-        return None
+        """Add the crashed container's last lines and a rule-based diagnosis to the worst problems.
+
+        Logs are read again only when a pod restarts, so a crash loop costs one log call per restart, not per poll.
+        A failure here never hides the problems themselves.
+        """
+        events = (self.k8s_snapshot or {}).get("events", [])
+        wanted: dict[str, dict[str, Any]] = {}
+        for problem in self.k8s_problems:
+            logs = None
+            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and len(wanted) < CRASH_LOG_PROBLEMS:
+                pod = problem["pods"][0]
+                container = problem["facts"].get("container", "")
+                previous = problem["problem"] != "not_ready"
+                key = f"{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
+                logs = self._crash_logs.get(key)
+                if logs is None:
+                    try:
+                        result = await client.pod_logs(problem["namespace"], pod, container, previous, CRASH_LOG_LINES)
+                        lines = [scrub(line) for line in result.get("lines", [])]
+                        while lines and sum(len(line) for line in lines) > CRASH_LOG_CHARS:
+                            lines.pop(0)
+                        logs = {"pod": pod, "which": "the crashed container" if previous else "the running container",
+                                "lines": lines, "note": result.get("note", "")}
+                    except SourceError as error:
+                        logs = {"pod": pod, "lines": [], "note": f"Couldn't read the logs: {error.message}"}
+                wanted[key] = logs
+                problem["logs"] = logs
+            try:
+                problem["diagnosis"] = diagnose(problem, (logs or {}).get("lines"), events)
+            except Exception:  # A rule that trips on odd data must not stop the poll.
+                log.exception("diagnosis failed for %s", problem["fingerprint"])
+        self._crash_logs = wanted
 
     def _integration_ok(self, kind: str) -> bool:
         return self.integration_summary.get(kind, {}).get("status") == "ok"
@@ -584,9 +631,11 @@ class ContextEngine:
                 "clear": f"Target back up: {target['instance']} ({target['job']})", "detail": target,
             }
         for problem in self.k8s_problems:
+            detail = {key: value for key, value in problem.items() if key not in {"title", "clear"}}
+            if problem.get("diagnosis"):
+                detail["summary"] = problem["diagnosis"]["cause"]
             current[problem["fingerprint"]] = {
-                "kind": "k8s", "severity": problem["severity"], "title": problem["title"], "clear": problem["clear"],
-                "detail": {key: value for key, value in problem.items() if key not in {"title", "clear"}},
+                "kind": "k8s", "severity": problem["severity"], "title": problem["title"], "clear": problem["clear"], "detail": detail,
             }
         for anomaly in anomalies:
             wording = "over its limit" if anomaly["kind"] == "over_limit" else "unusual for this server"
@@ -614,7 +663,9 @@ class ContextEngine:
             if fingerprint not in self._active:
                 self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id")}
                 title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
-                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, item["detail"], item["detail"].get("source_id"), notify=not first_poll)
+                # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
+                detail = {key: value for key, value in item["detail"].items() if key != "logs"}
+                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"), notify=not first_poll)
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.

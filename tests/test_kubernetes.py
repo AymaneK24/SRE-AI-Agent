@@ -244,3 +244,109 @@ async def test_answer_that_ignores_the_crash_is_flagged():
              "## Evidence\n- `{namespace=\"shop\"} |= \"ERROR\"` shows connection refused.\n## Competing explanation\nA bad image.")
     result = await verify_answer("what is wrong", found, ["postgres:5432"], None, problems)
     assert result["missed_problems"] == [] and result["confidence_final"] == "High", "a log query isn't run as PromQL"
+
+
+# Diagnoses and crash logs ------------------------------------------------------------
+def _problem(item, **extra):
+    from app.diagnosis.problems import find_problems as find
+
+    problems = find(snapshot([item]))
+    assert problems, "expected a problem"
+    return {**problems[0], **extra}
+
+
+def test_diagnoses_name_the_cause_with_evidence():
+    from app.diagnosis.rules import diagnose
+
+    crash = _problem(pod("shop", "payment-5b5568b987-1", "payment", waiting="CrashLoopBackOff", last_reason="Error", exit_code=1, restarts=12, ready=False))
+    result = diagnose(crash, ["2026-11-07T00:17:40Z payment starting", "2026-11-07T00:17:41Z ERROR: connection refused postgres:5432"])
+    assert result["cause"] == "The application exits on start with an error: ERROR: connection refused postgres:5432"
+    assert result["confidence"] == "high" and "last exit code 1: a general error in the application" in result["evidence"]
+    assert "kubectl -n shop logs deployment/payment --previous --tail=100" in result["commands"]
+
+    oom = _problem(pod("a", "cache-5b5568b987-1", "cache", waiting="CrashLoopBackOff", last_reason="OOMKilled", exit_code=137, limits={"memory": "512Mi"}))
+    assert diagnose(oom)["cause"] == "The container runs out of memory at its 512Mi limit and is killed (OOMKilled)."
+
+    probe = _problem(pod("a", "api-5b5568b987-1", "api", waiting="CrashLoopBackOff", last_reason="Error", exit_code=137))
+    events = [{"namespace": "a", "name": "api-5b5568b987-1", "reason": "Unhealthy", "message": "Liveness probe failed: HTTP probe failed with statuscode: 500"}]
+    assert "liveness probe" in diagnose(probe, [], events)["cause"]
+
+    missing = _problem(pod("a", "web-5b5568b987-1", "web", waiting="CreateContainerConfigError", ready=False))
+    missing["facts"]["message"] = 'secret "db-password" not found'
+    assert diagnose(missing)["cause"] == "The pod refers to a Secret named db-password that doesn't exist in this namespace."
+
+    pull = _problem(pod("a", "web-5b5568b987-1", "web", waiting="ImagePullBackOff", ready=False, image="shop/web:9.9"))
+    pull["facts"]["message"] = "Back-off pulling image: manifest unknown"
+    assert "doesn't exist in the registry" in diagnose(pull)["cause"]
+
+    pending = _problem(pod("a", "big-5b5568b987-1", "big", phase="Pending", ready=False, unschedulable="0/3 nodes are available: 3 Insufficient memory."))
+    assert diagnose(pending)["cause"] == "No node can take the pod: not enough free memory."
+
+
+async def test_crash_logs_and_diagnosis_reach_the_context_once_per_restart(console, kube_only):
+    client, org_id, engine = kube_only
+    problem = engine.context["problems"][0]
+    assert problem["detail"]["diagnosis"]["cause"].endswith("connection refused postgres:5432")
+    assert any("connection refused postgres:5432" in line for line in problem["detail"]["logs"]["lines"])
+    text = render_context(engine.context)
+    assert "Diagnosis (computed from cluster state, not by a model)" in text and "<untrusted_logs>" in text
+    assert text.index("connection refused postgres:5432") < text.index("KUBERNETES DETAIL")
+    engine._integrations_at = 0
+    await engine.refresh_now()
+    assert FakeKube.state.log_requests == ["shop/payment-5b5568b987-h5zzq:previous"], "logs are read again only after a restart"
+    detail = (await console.ctx.db.one("SELECT detail FROM events WHERE org_id = ?", (org_id,)))["detail"]
+    assert "connection refused" in detail and "untrusted" not in detail and '"logs"' not in detail, "events keep the diagnosis, not the log lines"
+
+
+def test_small_model_mode():
+    from app.ai_settings import is_small_model
+    from app.investigation.prompts import build_system, compact_tools
+    from app.investigation.tools import TOOL_DEFINITIONS
+
+    assert is_small_model("qwen2.5:3b") and is_small_model("llama3.1:8b") and is_small_model("phi3:mini")
+    assert not is_small_model("qwen2.5:14b") and not is_small_model("llama3.2:latest") and not is_small_model("claude-sonnet-5-5")
+    assert [tool["name"] for tool in compact_tools(TOOL_DEFINITIONS)] == ["get_pod_logs", "describe_object", "query_logs", "run_instant_query"]
+    compact = build_system("ctx", [], [], True, False, compact=True)
+    assert len(compact) < len(build_system("ctx", [], [], True, False)) and "## Likely root cause" in compact
+
+
+# The Nov 6 test, replayed ------------------------------------------------------------
+async def _set_model(client, url, model):
+    settings = (await client.get("/api/ai/settings")).json()
+    settings["ollama"].update(url=url, model=model, use_tools=True)
+    for key in ("key_source", "key_configured"):
+        settings["claude"].pop(key, None)
+    response = await client.put("/api/ai/settings", json={k: settings[k] for k in ("provider", "max_rounds", "ollama", "claude")})
+    assert response.status_code == 200, response.text
+
+
+async def _investigate(client, prompt):
+    import json
+
+    conversation = (await client.post("/api/conversations", json={})).json()
+    run = await client.post(f"/api/conversations/{conversation['id']}/messages", json={"prompt": prompt})
+    assert run.status_code == 202, run.text
+    async with client.stream("GET", f"/api/runs/{run.json()['run_id']}/stream") as response:
+        [line async for line in response.aiter_lines()]
+    detail = (await client.get(f"/api/conversations/{conversation['id']}")).json()
+    message = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
+    calls = (await client.get("/api/llm-calls")).json()
+    first = (await client.get(f"/api/llm-calls/{calls[-1]['id']}")).json()
+    return message, json.loads(message["verification"]), json.dumps(first["request"])
+
+
+async def test_replay_of_the_nov_6_investigation(console, kube_only, fake_models):
+    """Loki-free cluster with a crash-looping payment app and no Prometheus, as on Nov 6."""
+    client, org_id, engine = kube_only
+    await _set_model(client, fake_models, "careless:3b")
+    message, verification, request = await _investigate(client, "what is wrong with my app?")
+    assert message["status"] == "complete"
+    assert "connection refused postgres:5432" in request and "PROBLEMS RIGHT NOW (1)" in request, "the crash log went to the model"
+    assert "You are a site reliability engineer. Find why" in request, "a 3B model gets the short prompt"
+    tool_calls = await console.ctx.db.all("SELECT name, ok, result FROM tool_calls WHERE org_id = ?", (org_id,))
+    assert tool_calls[0]["name"] == "query_logs" or "get_pod_logs" in tool_calls[0]["result"], "a wrong guess is pointed to the right tool"
+    assert any("doesn't address" in reason for reason in verification["reasons"]), "an answer that ignores the crash is flagged"
+
+    await _set_model(client, fake_models, "careful:7b")
+    message, verification, request = await _investigate(client, "what is wrong with my app?")
+    assert "postgres:5432" in message["content"] and verification["confidence_final"] == "High" and verification["missed_problems"] == []

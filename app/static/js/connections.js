@@ -355,6 +355,9 @@ export function mount(container) {
     const numCtx = h('input', { class: 'input', type: 'number', min: 2048, max: 1048576, step: 1024, value: ai.ollama.num_ctx });
     const ollamaTools = h('input', { type: 'checkbox', checked: ai.ollama.use_tools });
     const ollamaStrict = h('input', { type: 'checkbox', checked: ai.ollama.strict_answers });
+    const smallModel = h('select', { class: 'input' },
+      h('option', { value: 'auto' }, 'Automatic, from the size in the model’s name'), h('option', { value: 'on' }, 'Always'), h('option', { value: 'off' }, 'Never'));
+    smallModel.value = ai.ollama.small_model || 'auto';
     const claudeKey = h('input', { class: 'input', type: 'password', autocomplete: 'off', placeholder: ai.claude.key_source === 'saved' ? 'Saved. Enter a new key to replace it.' : ai.claude.key_source === 'environment' ? 'Set by ANTHROPIC_API_KEY' : 'sk-ant-...', disabled: ai.claude.key_source === 'environment' });
     const claudeModel = h('select', { class: 'input' });
     const claudeStatus = h('small', {});
@@ -407,7 +410,7 @@ export function mount(container) {
       try {
         await api('/api/ai/settings', { method: 'PUT', body: {
           provider: providerClaude.checked ? 'claude' : 'ollama', max_rounds: Number(maxRounds.value),
-          ollama: { url: ollamaUrl.value.trim(), model: ollamaModel.value, num_ctx: Number(numCtx.value), use_tools: ollamaTools.checked, strict_answers: ollamaStrict.checked },
+          ollama: { url: ollamaUrl.value.trim(), model: ollamaModel.value, num_ctx: Number(numCtx.value), use_tools: ollamaTools.checked, strict_answers: ollamaStrict.checked, small_model: smallModel.value },
           claude: { model: claudeModel.value || ai.claude.model, max_tokens: Number(maxTokens.value), use_tools: claudeTools.checked, consent: consent.checked, strict_answers: claudeStrict.checked },
         } });
         await refreshAi();
@@ -418,6 +421,7 @@ export function mount(container) {
       field('Ollama address', ollamaUrl, 'Inside Docker, use http://host.docker.internal:11434 or the host’s IP address.', 'span-3'),
       h('label', { class: 'field span-3' }, h('span', {}, 'Model'), ollamaModel, ollamaStatus),
       field('Model memory (tokens)', numCtx, 'Larger values fit more context but use more RAM.', 'span-3'),
+      field('Small-model mode', smallModel, 'For models of about 8B or fewer: a shorter prompt, the 4 most useful tools, and the computed diagnosis as the starting point.', 'span-3'),
       h('div', { class: 'stack span-3', style: 'align-self:center' },
         h('label', { class: 'check' }, ollamaTools, 'Let the model run queries. Small models are often unreliable at this.'),
         h('label', { class: 'check' }, ollamaStrict, 'Ask again if an answer is incomplete. On a CPU, this can take a while.')),

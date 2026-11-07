@@ -20,7 +20,7 @@ from ..db import Database, sha256_text, utcnow
 from ..llm.base import Finished, ProviderError, TextDelta, ToolCall, ToolsUnsupported
 from ..secrets_store import SecretBox
 from ..workflows import matching_workflows
-from .prompts import build_system
+from .prompts import build_system, compact_tools
 from .tools import ToolRunner, related_investigations
 from .verification import expects_diagnosis, missing_sections, verify_answer
 
@@ -201,6 +201,8 @@ class InvestigationManager:
         engine = await self.engines.get(org_id)
         tools_runner = ToolRunner(engine, self.db, self.box, self.config, run.owner_id)
         tool_definitions = await tools_runner.definitions()
+        if selection.compact:
+            tool_definitions = compact_tools(tool_definitions)
         use_tools = selection.use_tools and engine.has_connections
         spend = await spend_settings(self.db, org_id)
         prices = spend["prices"]
@@ -241,14 +243,14 @@ class InvestigationManager:
                 await run.emit("notice", text=notice)
             last_round = round_number >= max_rounds or over_tokens
             tools = tool_definitions if use_tools and not last_round else None
-            system = build_system(run.rendered, past, changes, use_tools, last_round and use_tools, workflows)
+            system = build_system(run.rendered, past, changes, use_tools, last_round and use_tools, workflows, selection.compact)
             outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, tools, context, answer_parts, prices, actor)
             if outcome is None:  # The model can't use tools, so ask again without them.
                 use_tools = False
                 notice = f"{selection.model} can't run queries, so it answered from the live context only."
                 notices.append(notice)
                 await run.emit("notice", text=notice)
-                system = build_system(run.rendered, past, changes, False, False, workflows)
+                system = build_system(run.rendered, past, changes, False, False, workflows, selection.compact)
                 outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, None, context, answer_parts, prices, actor)
                 if outcome is None:
                     raise ProviderError("The model rejected the request.")

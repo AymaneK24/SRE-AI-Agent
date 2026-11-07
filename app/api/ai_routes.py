@@ -29,6 +29,7 @@ class OllamaSettings(BaseModel):
     num_ctx: int = Field(default=8192, ge=2048, le=1048576)
     use_tools: bool = False
     strict_answers: bool = False
+    small_model: Literal["auto", "on", "off"] = "auto"
 
 
 class ClaudeSettings(BaseModel):

@@ -435,8 +435,11 @@ async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", 
     chars = int(settings["ollama"]["num_ctx"]) * 2 if name == "ollama" else 60000
     engine = await ctx.engines.get(user.org_id)
     rendered = render_context(engine.context, chars)
+    section = settings[name]
+    mode = section.get("small_model", "auto")
+    compact = name == "ollama" and (mode == "on" or (mode == "auto" and ai_settings.is_small_model(section.get("model", ""))))
     return {"version": engine.context.get("version"), "as_of": engine.context.get("as_of"), "provider": name, "max_chars": chars,
-            "text": build_system(rendered, [], [], settings[name]["use_tools"], False)}
+            "text": build_system(rendered, [], [], section["use_tools"], False, None, compact)}
 
 
 @router.get("/stream")

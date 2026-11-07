@@ -85,6 +85,9 @@ class Handler(BaseHTTPRequestHandler):
         self._start_stream("application/x-ndjson")
         system = body["messages"][0]["content"]
         used_tool = any(message["role"] == "tool" for message in body["messages"])
+        if body["model"].startswith(("careless", "careful")):
+            self._replay(body, system, used_tool)
+            return
         if body.get("tools") and not used_tool:
             chunk = {"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
                 "name": "run_range_query", "arguments": {"query": "sum(rate(http_requests_total[5m]))", "minutes": 10}}}]}, "done": False}
@@ -96,6 +99,40 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(0.01)
         self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "prompt_eval_count": 900, "eval_count": 120}) + "\n").encode())
+
+    def _replay(self, body, system, used_tool):
+        """Two behaviours seen on Nov 6: a careless small model that queries the wrong system and ignores the crash,
+        and a careful one that reads the crashed container's logs."""
+        def done():
+            self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+                                          "prompt_eval_count": 800, "eval_count": 60}) + "\n").encode())
+        if body.get("tools") and not used_tool:
+            names = {tool["function"]["name"] for tool in body["tools"]}
+            if body["model"].startswith("careless"):
+                name, arguments = ("run_instant_query", {"query": "kubernetes.pods{last_healthy_time≠''} | summarize count()"})
+                if name not in names:
+                    name = "query_logs"
+            else:
+                name, arguments = "get_pod_logs", {"namespace": "shop", "pod": "payment", "previous": True}
+            chunk = {"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": arguments}}]}, "done": False}
+            self.wfile.write((json.dumps(chunk) + "\n").encode())
+            done()
+            return
+        tool_text = " ".join(message.get("content", "") for message in body["messages"] if message["role"] == "tool")
+        if body["model"].startswith("careless"):
+            answer = ("## Summary\nThere are no recent changes or anomalies that indicate a problem.\n\n## Likely root cause\nUnknown.\nConfidence: Unknown\n\n"
+                      "## Evidence\n- No recent errors in logs (Query: `invalid parameter \"query\"`).\n\n## Competing explanation\nUnknown.\n\n"
+                      "## Next checks\n- Run a log query.\n\n## Suggested remediation\n- Check disk health with `df -h`.")
+        else:
+            seen = "connection refused postgres:5432" in tool_text and "connection refused postgres:5432" in system
+            answer = ("## Summary\nThe payment deployment crashes on start because it can't reach postgres.\n\n"
+                      f"## Likely root cause\npayment exits with code 1: ERROR: connection refused postgres:5432.\nConfidence: {'High' if seen else 'Low'}\n\n"
+                      "## Evidence\n- The crashed container's last line: connection refused postgres:5432.\n- 12 restarts, exit code 1.\n\n"
+                      "## Competing explanation\nA bad image, ruled out because the app starts and logs before failing.\n\n"
+                      "## Next checks\n- `kubectl -n shop get svc postgres`\n\n## Suggested remediation\n- Start postgres or fix its address. Risk: low.")
+        for word in re.findall(r"\S+\s*", answer):
+            self.wfile.write((json.dumps({"message": {"role": "assistant", "content": word}, "done": False}) + "\n").encode())
+        done()
 
     def _claude(self, body):
         if self.headers.get("x-api-key") != "sk-ant-test-valid-key" or self.headers.get("anthropic-version") != "2023-06-01":
