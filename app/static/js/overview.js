@@ -40,6 +40,7 @@ export function mount(container) {
   const changes = h('div');
   const jobs = h('div');
   const golden = h('div', { class: 'golden-grid' });
+  const goldenSection = h('section', { class: 'section', 'aria-labelledby': 'golden-title' }, h('div', { class: 'section-head' }, h('h2', { id: 'golden-title' }, 'Golden signals')), golden);
   const panelGrid = h('div', { class: 'panels' });
   const rangeControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Time range' });
   const refreshControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Refresh interval' });
@@ -49,7 +50,7 @@ export function mount(container) {
     h('section', { class: `hero${can('engineer') ? '' : ' hero-solo'}`, 'aria-labelledby': 'hero-title' },
       h('div', {}, heroTitle, heroCopy, heroActions),
       can('engineer') ? h('div', {}, heroLabel, heroChartHost) : null),
-    h('section', { class: 'section', 'aria-labelledby': 'golden-title' }, h('div', { class: 'section-head' }, h('h2', { id: 'golden-title' }, 'Golden signals')), golden),
+    goldenSection,
     h('section', { class: 'section status-grid' },
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Needs attention')), attention),
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'What changed')), changes)),
@@ -72,6 +73,8 @@ export function mount(container) {
   }
 
   function renderGolden(context) {
+    // Golden signals come from metrics. With only logs or a cluster connected, four "No data" tiles would only add noise.
+    goldenSection.hidden = context.coverage?.has_metrics === false;
     const signals = (context.signals || []).filter((signal) => signal.golden && signalValue(signal) !== null);
     clear(golden, GOLDEN.map(([id, label, hint]) => {
       const worst = signals.filter((signal) => signal.golden === id)

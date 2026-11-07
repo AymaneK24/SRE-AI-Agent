@@ -17,11 +17,11 @@ The script asks a few questions, writes `.env` with new secrets, and prints your
 
 Open the address it printed, and sign in with your email and that password. You must choose a new password. Then:
 
-1. **Connections:** add your metric sources and choose an AI model.
+1. **Connections:** add what you have: metric sources, Loki, a Kubernetes cluster. Any one of them is enough. Then choose an AI model.
 2. **Projects:** group sources by system.
 3. **Organization > Members:** invite your team.
 
-**The AI model must be reachable too.** Use an Ollama server on your network, or allow outbound access to `api.anthropic.com` for Claude. Inside Docker, use `host.docker.internal` for something on the same machine, not `localhost`.
+**The AI model must be reachable too.** Use an Ollama server on your network, or allow outbound access to `api.anthropic.com` for Claude or `generativelanguage.googleapis.com` for Gemini. Inside Docker, use `host.docker.internal` for something on the same machine, not `localhost`.
 
 ## Choose a certificate
 
@@ -131,7 +131,46 @@ curl -X POST "$RCC_CHANGES_URL" -H 'Content-Type: application/json' \
 | Azure Monitor | The **Monitoring Reader** role, plus **Log Analytics Reader** for logs |
 | Amazon Managed Prometheus | `aps:QueryMetrics`, `aps:GetSeries`, `aps:GetLabels`, and `aps:GetMetricMetadata` |
 | Google Managed Prometheus | **Monitoring Viewer** |
-| Kubernetes | A ServiceAccount token with a role limited to `get`, `list`, and `watch`. Don't include Secrets |
+| Kubernetes | A ServiceAccount token with the read-only role below. It never needs Secrets |
+
+### A read-only Kubernetes account
+
+The console reads pods and their logs, events, deployments, and nodes. It never reads Secrets or ConfigMap contents, and it has no code that writes to the cluster.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: rcc-reader, namespace: monitoring }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: rcc-reader }
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, nodes]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: rcc-reader }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rcc-reader }
+subjects: [{ kind: ServiceAccount, name: rcc-reader, namespace: monitoring }]
+```
+
+```bash
+kubectl -n monitoring create token rcc-reader --duration=720h
+```
+
+Leaving out `nodes` is fine: node problems then aren't watched, and the console says so. Leaving out `pods/log` means no crash logs in investigations.
+
+**Connecting to the cluster:**
+
+- **Console inside the cluster:** tick *The console runs inside this cluster*. It uses its own mounted service account, so there's no address or token to enter. Bind the role above to that service account.
+- **Console outside the cluster:** enter the API address and the token, and paste the cluster's CA certificate. In a kubeconfig it's `certificate-authority-data`, base64-decoded: `kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d`.
+- **Docker Desktop:** the API certificate names `kubernetes.docker.internal`, but a container reaches the host as `host.docker.internal`. Use `https://host.docker.internal:6443` as the address, paste the CA as above, and set **TLS server name** to `kubernetes.docker.internal`.
 
 ## What has and hasn't been tested
 
@@ -139,4 +178,4 @@ curl -X POST "$RCC_CHANGES_URL" -H 'Content-Type: application/json' \
 
 **Not tested:** the real `python:3.12-slim`, `postgres`, and `caddy` images, the full Compose stack running together, a Kubernetes cluster, Let's Encrypt, a company certificate, the no-internet steps, and real Gmail or Slack delivery. Do a trial install first.
 
-CloudWatch was tested with the real AWS SDK against a simulator. Azure Monitor, managed Prometheus sign-in, Kubernetes, and single sign-on were tested against fake servers. Try each with a real account first.
+CloudWatch was tested with the real AWS SDK against a simulator. Azure Monitor, managed Prometheus sign-in, Kubernetes (including a private CA and TLS server name), Gemini, and single sign-on were tested against fake servers that follow each API's documented format. Try each with a real account first.

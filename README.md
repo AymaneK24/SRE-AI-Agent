@@ -20,19 +20,19 @@ See [docs/DEPLOY.md](docs/DEPLOY.md) for certificates, Kubernetes, and servers w
 
 ## What's included
 
-| Area           | What you get                                                                                                                                                                       |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Golden signals | Latency, traffic, errors, and saturation at a glance, including Spring, NGINX ingress, JVM, container, database, and queue metrics when they exist                                 |
-| Metric sources | Prometheus, including Amazon, Azure, and Google managed sign-in, Amazon CloudWatch, and Azure Monitor                                                                              |
-| More evidence  | Loki logs, read-only Kubernetes state, deployment events by webhook, and Alertmanager alerts                                                                                       |
-| AI models      | Ollama on your own server, or Claude with an API key                                                                                                                               |
-| Answer checks  | Cited numbers are compared with your data, cited queries are run, a competing explanation is required, and "unknown" is accepted                                                   |
-| Cost           | Tokens, cost, and time per investigation, a monthly budget, and a token limit per investigation                                                                                    |
-| Workflows      | Built-in remediation guides shown as a pipeline, followed and checked off one step at a time, with AI drafts that need review. Nothing runs them                                   |
-| Alerts         | Read-only messages through Slack, email, including Gmail, Google Chat, and Teams                                                                                                   |
-| Teams          | Accounts by email invitation with email sign-in, four roles, private investigations you can choose to share, single sign-on (OIDC), security policies, and an exportable audit log |
-| Projects       | Groups of sources with live status, incidents, recurring issues, false-alarm verdicts, patterns, and PDF reports with AI notes                                                     |
-| Database       | SQLite for one machine, or PostgreSQL                                                                                                                                              |
+| Area           | What you get                                                                                                                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Golden signals | Latency, traffic, errors, and saturation at a glance, including Spring, NGINX ingress, JVM, container, database, and queue metrics when they exist                                             |
+| Metric sources | Prometheus, including Amazon, Azure, and Google managed sign-in, Amazon CloudWatch, and Azure Monitor                                                                                          |
+| More evidence  | Loki logs, read-only Kubernetes state with crash logs and diagnoses of known failures, deployment events by webhook, and Alertmanager alerts. Logs or a cluster work without any metric source |
+| AI models      | Ollama on your own server, or Claude or Gemini with an API key                                                                                                                                 |
+| Answer checks  | Cited numbers are compared with your data, cited queries are run, a competing explanation is required, and "unknown" is accepted                                                               |
+| Cost           | Tokens, cost, and time per investigation, a monthly budget, and a token limit per investigation                                                                                                |
+| Workflows      | Built-in remediation guides shown as a pipeline, followed and checked off one step at a time, with AI drafts that need review. Nothing runs them                                               |
+| Alerts         | Read-only messages through Slack, email, including Gmail, Google Chat, and Teams                                                                                                               |
+| Teams          | Accounts by email invitation with email sign-in, four roles, private investigations you can choose to share, single sign-on (OIDC), security policies, and an exportable audit log             |
+| Projects       | Groups of sources with live status, incidents, recurring issues, false-alarm verdicts, patterns, and PDF reports with AI notes                                                                 |
+| Database       | SQLite for one machine, or PostgreSQL                                                                                                                                                          |
 
 ## Roles
 

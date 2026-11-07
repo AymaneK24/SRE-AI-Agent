@@ -26,7 +26,7 @@ Email the contact address on the deployment's site, or the repository owner. Inc
 
 **Browser.** Strict Content-Security-Policy with no inline scripts or styles, HSTS over HTTPS, Host and Origin checks, JSON-only write requests with repeated keys refused, a request size limit, security headers on every error, and sanitized model output. Names and labels refuse markup, control characters, and a leading spreadsheet formula character.
 
-**AI data.** Claude stays off until an admin allows sending data to Anthropic, and an owner can block it by policy. Obvious secrets are removed by pattern matching, which can miss some. Telemetry is marked as untrusted data, but **prompt injection can't be fully prevented**, so a log line could mislead a model. Because models have only read-only tools, the damage is limited to a wrong answer.
+**AI data.** Claude and Gemini stay off until an admin allows sending data to Anthropic or Google, and an owner can block it by policy. Obvious secrets are removed by pattern matching, which can miss some. Telemetry is marked as untrusted data, but **prompt injection can't be fully prevented**, so a log line could mislead a model. Because models have only read-only tools, the damage is limited to a wrong answer.
 
 **Audit.** Security-relevant actions go into a per-organization hash chain, which anyone with the admin role can verify and export. Someone with database write access could rewrite the whole chain, so export it to a separate system.
 
