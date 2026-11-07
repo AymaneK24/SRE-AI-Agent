@@ -27,11 +27,14 @@ Open the address it printed, and sign in with your email and that password. You 
 
 The script asks which one fits your network:
 
-| Choice | Use it when | What you do |
-|---|---|---|
-| Let's Encrypt | The server has a public host name | Open ports 80 and 443 to the internet |
-| Your company's certificate | You have an internal host name and a company certificate authority | Put `cert.pem` and `key.pem` in `deploy/certs` |
-| Made by this server | You only have an IP address, or are trying it out | Accept the browser warning on first visit. Traffic is encrypted, but browsers can't confirm whose server it is |
+We recommend a private server, reached over VPN or your company network, with one of the first three choices.
+
+| Choice | Server | Use it when | What you do |
+|---|---|---|---|
+| 1. Your company's certificate (recommended) | Private | You have an internal host name and a company certificate authority | Put `cert.pem` and `key.pem` in `deploy/certs` |
+| 2. Made by this server | Private | You only have an IP address, or are trying it out | Accept the browser warning on first visit, or install Caddy's root certificate on each device |
+| 3. Let's Encrypt through Azure DNS | Private | You want a certificate browsers trust, with nothing open to the internet | Build `deploy/caddy-dns`, and give the VM's identity DNS Zone Contributor on a public Azure DNS zone |
+| 4. Let's Encrypt over the internet | Public | People must reach the console from anywhere | Open ports 80 and 443 to the internet |
 
 To change later, edit `RCC_CADDYFILE` in `.env`, then run `docker compose up -d`.
 

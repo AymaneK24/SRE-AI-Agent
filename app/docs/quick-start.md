@@ -22,7 +22,7 @@ Answer the questions:
 | Question | Answer for a local trial |
 |---|---|
 | Address people will use | `localhost` |
-| Which HTTPS certificate | `3`, made by this server |
+| Which HTTPS certificate | `2`, made by this server |
 | HTTPS port | `443`, or `8443` if something already uses 443 |
 | Email server | Leave empty |
 

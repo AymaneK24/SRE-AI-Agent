@@ -2,12 +2,14 @@
 
 Run the console in Azure Kubernetes Service, with the files in `deploy/k8s`: the console, PostgreSQL, and Caddy for HTTPS. The console can then also watch the cluster it runs in, with no token to manage.
 
+> **Security:** We recommend a **private** console: Caddy on an internal load balancer (the default in `caddy.yaml`), reached over your VPN or ExpressRoute, with a company certificate. A public load balancer is an option for consoles people must reach from anywhere, described in [A public console](#a-public-console).
+
 > **Note:** The Kubernetes files were checked for validity, but haven't been run on a real AKS cluster yet. Do a trial install in a test cluster first.
 
 ## Architecture
 
 ```
-Internet or VNet ──> Azure Load Balancer ──> caddy (443) ──> console (8000) ──> postgres (5432)
+VPN or VNet ──> internal Azure Load Balancer ──> caddy (443) ──> console (8000) ──> postgres (5432)
                                                                  │
                                                                  └──> Prometheus, Loki, the API server, AI model
 ```
@@ -66,18 +68,18 @@ grep RCC_ADMIN_PASSWORD rcc-secrets.env     # your first password
 
 Store `rcc-secrets.env` in your vault, then delete it from disk: `shred -u rcc-secrets.env`.
 
-Choose the Caddyfile for your certificate (see [Certificates](/docs/certificates)):
+Choose the certificate (see [Certificates](/docs/certificates)). For a private console, use your company's certificate:
 
 ```bash
-kubectl -n rcc create configmap caddyfile --from-file=Caddyfile=deploy/Caddyfile            # Let's Encrypt
-# or: --from-file=Caddyfile=deploy/Caddyfile.selfsigned
-```
-
-For a company certificate, put it in a TLS Secret, mount it at `/certs` in `caddy.yaml`, and use `deploy/Caddyfile.internal`:
-
-```bash
+# 1. Your company's certificate (recommended). caddy.yaml mounts this Secret at /certs.
 kubectl -n rcc create secret tls rcc-tls --cert=cert.pem --key=key.pem
+kubectl -n rcc create configmap caddyfile --from-file=Caddyfile=deploy/Caddyfile.internal
+
+# 2. Or a certificate Caddy makes itself, for a trial
+kubectl -n rcc create configmap caddyfile --from-file=Caddyfile=deploy/Caddyfile.selfsigned
 ```
+
+For a certificate every browser trusts on a private console, use [cert-manager with Azure DNS](#trusted-certificates-with-cert-manager), which writes the same `rcc-tls` Secret.
 
 ### Secrets from Azure Key Vault (recommended)
 
@@ -101,21 +103,38 @@ kubectl apply -f deploy/k8s/caddy.yaml
 kubectl -n rcc get svc caddy -w        # wait for EXTERNAL-IP
 ```
 
-Point your DNS name at the external IP:
+The `EXTERNAL-IP` is a private address in the cluster's VNet. Give it an internal DNS name, in an Azure Private DNS zone linked to the VNets your people come from, or in your company DNS:
 
 ```bash
-az network dns record-set a add-record -g DNS_RG -z company.com -n rcc -a EXTERNAL_IP
+az network private-dns record-set a add-record -g $RG -z company.internal -n rcc -a EXTERNAL_IP
 ```
 
-Caddy gets its Let's Encrypt certificate once the name resolves: `kubectl -n rcc logs deploy/caddy | grep -i certificate`.
+Make sure that address is reachable from your VPN or ExpressRoute, and that the cluster subnet's NSG allows 443 from those ranges only.
 
-### An internal address only
+### Trusted certificates with cert-manager
 
-To keep the console off the internet, make Caddy's load balancer internal, and use a company or self-made certificate (Let's Encrypt needs to reach port 80):
+cert-manager can get a Let's Encrypt certificate through the **DNS-01** challenge in Azure DNS, so nothing on the internet connects to the cluster. It writes the certificate to the `rcc-tls` Secret, which Caddy reads with `deploy/Caddyfile.internal`.
 
-```bash
-kubectl -n rcc annotate svc caddy service.beta.kubernetes.io/azure-load-balancer-internal="true" --overwrite
-```
+1. Install cert-manager, and give it a workload identity with **DNS Zone Contributor** on a dedicated public zone, such as `rcc.company.com`, as in [the VM guide](/docs/deploy-azure-vm#let-s-encrypt-through-azure-dns). Follow cert-manager's *AzureDNS* guide for the workload identity setup.
+2. Create a `ClusterIssuer` with the `azureDNS` solver for that zone, and a `Certificate` named `rcc-tls` in the `rcc` namespace for `rcc.company.com`.
+3. Resolve `rcc.company.com` privately, with a private DNS zone of the same name pointing at Caddy's internal address.
+
+Caddy reads the certificate files when it starts. cert-manager renews 30 days before expiry, so restart Caddy after renewals, for example weekly with a CronJob, or automatically with a tool such as Stakater Reloader: `kubectl -n rcc rollout restart deployment/caddy`.
+
+### A public console
+
+Only when people must reach it from anywhere:
+
+1. Remove the internal annotation, so the load balancer gets a public IP:
+
+   ```bash
+   kubectl -n rcc annotate svc caddy service.beta.kubernetes.io/azure-load-balancer-internal-
+   kubectl -n rcc get svc caddy -w
+   ```
+
+2. Point a public DNS name at it: `az network dns record-set a add-record -g DNS_RG -z company.com -n rcc -a EXTERNAL_IP`.
+3. Use Let's Encrypt over the internet: `kubectl -n rcc create configmap caddyfile --from-file=Caddyfile=deploy/Caddyfile -o yaml --dry-run=client | kubectl apply -f -`, then `kubectl -n rcc rollout restart deployment/caddy`. Ports 80 and 443 must be open to the internet.
+4. Turn on [single sign-on](/docs/single-sign-on) and **Require single sign-on for everyone**, and consider Azure Application Gateway with WAF or Azure Front Door in front.
 
 ## 4. Watch this cluster
 
@@ -173,5 +192,7 @@ kubectl -n rcc rollout status deployment/console
 - The console runs as a non-root user (10001) with a read-only root filesystem, no Linux capabilities, and `RuntimeDefault` seccomp. Keep these settings.
 - Pull images only from your ACR, and scan them: Microsoft Defender for Containers, or `trivy image`.
 - Keep `RCC_SECRET_KEY` in Key Vault, not in Git or a pipeline file.
-- Use the NetworkPolicy file, and an internal load balancer if people reach the console over VPN.
+- Keep Caddy's load balancer internal, and use the NetworkPolicy file.
+- Prefer a **private AKS cluster** (`--enable-private-cluster`), or at least `--api-server-authorized-ip-ranges`, so the Kubernetes API isn't open to the internet.
+- Route the cluster's outbound traffic through Azure Firewall (`--outbound-type userDefinedRouting`) to allow only the destinations the console needs.
 - Give the `rcc-reader` role only the resources listed in [Kubernetes](/docs/kubernetes#what-it-reads).

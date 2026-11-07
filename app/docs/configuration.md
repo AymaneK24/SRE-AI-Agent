@@ -12,7 +12,9 @@ Everything else, such as connections, AI models, alert channels, roles, and poli
 | `RCC_PUBLIC_URL` | `http://localhost:8000` | The full address people use. Links in emails use it. Must be `https://` in production mode |
 | `RCC_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Host names the console answers to, separated by commas. The public address's host is always added. Requests for any other host get `400` |
 | `RCC_HTTPS_PORT`, `RCC_HTTP_PORT` | `443`, `80` | Ports Caddy publishes |
-| `RCC_CADDYFILE` | `./deploy/Caddyfile` | Which certificate setup. See [Certificates](/docs/certificates) |
+| `RCC_CADDYFILE` | `./deploy/Caddyfile.selfsigned` | Which certificate setup: `Caddyfile.internal` (company certificate, recommended), `Caddyfile.selfsigned`, `Caddyfile.azure-dns` (Let's Encrypt through Azure DNS), or `Caddyfile` (Let's Encrypt over the internet). See [Certificates](/docs/certificates) |
+| `RCC_CADDY_IMAGE` | `caddy:2-alpine` | The Caddy image. `rcc-caddy-dns:2`, built from `deploy/caddy-dns`, for `Caddyfile.azure-dns` |
+| `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP_NAME` | None | Only for `Caddyfile.azure-dns`: where the public DNS zone is. Caddy signs in with the VM's managed identity |
 | `RCC_TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers. The Compose and Kubernetes files set it to `true`, because Caddy is in front. Never set it when the console is reached directly |
 | `RCC_HOST`, `RCC_PORT` | `0.0.0.0`, `8000` in the image | Where the app listens inside its container |
 

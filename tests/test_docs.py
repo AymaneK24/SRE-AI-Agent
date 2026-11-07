@@ -89,3 +89,23 @@ async def test_loki_tenant_is_checked_before_it_becomes_a_header(console):
     saved = await client.post("/api/integrations", json=body)
     assert saved.status_code in (200, 201), saved.text
     assert saved.json()["config"]["tenant"] == "team-a"
+
+
+def test_deployment_files_default_to_a_private_server():
+    import pathlib
+    import subprocess
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text())
+    caddy_volumes = compose["services"]["caddy"]["volumes"]
+    assert any("RCC_CADDYFILE:-./deploy/Caddyfile.selfsigned}" in volume for volume in caddy_volumes), \
+        "a missing RCC_CADDYFILE must not fall back to Let's Encrypt over the internet"
+    assert "ports" not in compose["services"]["console"] and "ports" not in compose["services"]["postgres"]
+
+    service = [doc for doc in yaml.safe_load_all((root / "deploy/k8s/caddy.yaml").read_text()) if doc and doc["kind"] == "Service"][0]
+    assert service["metadata"]["annotations"]["service.beta.kubernetes.io/azure-load-balancer-internal"] == "true"
+
+    assert (root / "deploy/Caddyfile.azure-dns").read_text().count("dns azure") == 1
+    assert subprocess.run(["sh", "-n", str(root / "deploy/setup-env.sh")]).returncode == 0
