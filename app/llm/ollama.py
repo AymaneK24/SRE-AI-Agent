@@ -38,7 +38,7 @@ class OllamaProvider:
             hint = "This app is in a container, so use http://host.docker.internal:11434 or the host's IP address."
         return ProviderError(f"Could not reach Ollama at {self.base_url}. {hint}")
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
         converted: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for message in messages:
             if message["role"] == "tool":
@@ -59,7 +59,7 @@ class OllamaProvider:
             "stream": True,
             "options": {"num_ctx": self.num_ctx},
         }
-        if tools:
+        if tools and allow_tools:
             request["tools"] = [
                 {"type": "function", "function": {
                     "name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"],

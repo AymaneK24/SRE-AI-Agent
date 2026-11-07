@@ -1,4 +1,5 @@
 """Kubernetes and logs as first-class connections: problems, events, context, tools, and answer checks."""
+import json
 import datetime as dt
 import ssl
 
@@ -192,7 +193,10 @@ async def test_cluster_alone_gives_a_full_context(console, kube_only):
     assert viewer["problems"][0]["kind"] == "k8s"
 
 
-async def test_cluster_problems_start_and_clear_as_events(console, kube_only):
+async def test_cluster_problems_start_and_clear_as_events(console, kube_only, monkeypatch):
+    import app.context.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
     client, org_id, engine = kube_only
     FakeKube.state.heal()
     engine._integrations_at = 0
@@ -350,3 +354,94 @@ async def test_replay_of_the_nov_6_investigation(console, kube_only, fake_models
     await _set_model(client, fake_models, "careful:7b")
     message, verification, request = await _investigate(client, "what is wrong with my app?")
     assert "postgres:5432" in message["content"] and verification["confidence_final"] == "High" and verification["missed_problems"] == []
+
+
+# Nov 7 fixes ------------------------------------------------------------------------
+def test_a_crash_loop_stays_one_problem_while_the_pod_briefly_runs():
+    """Between back-offs the container runs for a few seconds. That is still the same crash loop."""
+    waiting = pod("shop", "payment-5b5568b987-1", "payment", waiting="CrashLoopBackOff", last_reason="Error", exit_code=1, restarts=31, ready=False)
+    running = pod("shop", "payment-5b5568b987-1", "payment", last_reason="Error", exit_code=1, restarts=32, ready=False)
+    assert [p["fingerprint"] for p in find_problems(snapshot([waiting]))] == [p["fingerprint"] for p in find_problems(snapshot([running]))]
+    fresh = pod("shop", "web-5b5568b987-1", "web", last_reason="Error", exit_code=1, restarts=1)
+    assert find_problems(snapshot([fresh])) == [], "one restart isn't a crash loop"
+
+
+async def test_a_problem_must_stay_gone_before_it_clears(console, kube_only, monkeypatch):
+    import app.context.engine as engine_module
+
+    client, org_id, engine = kube_only
+    FakeKube.state.heal()
+    engine._integrations_at = 0
+    await engine.refresh_now()
+    kinds = [row["kind"] for row in await console.ctx.db.all("SELECT kind FROM events WHERE org_id = ?", (org_id,))]
+    assert kinds == ["k8s_started"], "a few healthy seconds don't resolve it"
+    monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
+    engine._integrations_at = 0
+    await engine.refresh_now()
+    kinds = [row["kind"] for row in await console.ctx.db.all("SELECT kind FROM events WHERE org_id = ? ORDER BY id", (org_id,))]
+    assert kinds == ["k8s_started", "k8s_cleared"]
+
+
+async def test_services_show_whether_they_reach_pods(console, kube_only):
+    client, org_id, engine = kube_only
+    runner = ToolRunner(engine, console.ctx.db, console.ctx.box, console.ctx.config)
+    ok, text = await runner.run("get_kubernetes_state", {"resource": "services", "namespace": "shop"})
+    assert ok and "No pod matches this selector" in text, "postgres has no pods, which explains connection refused"
+    assert '"matching_pods": 1' in text
+
+
+async def test_an_investigation_always_ends_with_an_answer(console, kube_only, fake_models):
+    """A model that keeps asking for tools, even when it is told to answer, still produces an answer."""
+    client, org_id, engine = kube_only
+    await _set_model(client, fake_models, "stubborn:14b")
+    message, verification, request = await _investigate(client, "why is payment down?")
+    assert message["status"] == "complete"
+    assert message["content"].startswith("## Summary\nThe AI model didn't give an answer")
+    assert "connection refused postgres:5432" in message["content"] and "Confidence: Medium" in message["content"]
+    calls = await console.ctx.db.all("SELECT name, arguments, ok FROM tool_calls WHERE org_id = ?", (org_id,))
+    assert len(calls) <= 10, "a whole investigation runs at most 10 queries"
+    assert len({row["arguments"] for row in calls}) == len(calls), "the same query is never run twice"
+    assert any("written by the console" in note for note in json.loads(message["notices"] or "[]"))
+
+
+def test_final_round_forbids_tools_for_every_provider():
+    from app.llm.claude import ClaudeProvider
+    from app.llm.gemini import GeminiProvider
+    from app.llm.ollama import OllamaProvider
+    from app.investigation.tools import TOOL_DEFINITIONS
+
+    messages = [{"role": "user", "content": "why?"}]
+    claude = ClaudeProvider("k").build_request("m", "s", messages, TOOL_DEFINITIONS, allow_tools=False)
+    assert claude["tool_choice"] == {"type": "none"} and claude["tools"]
+    gemini = GeminiProvider("k").build_request("m", "s", messages, TOOL_DEFINITIONS, allow_tools=False)
+    assert gemini["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}} and gemini["tools"]
+    ollama = OllamaProvider("http://127.0.0.1:1").build_request("m", "s", messages, TOOL_DEFINITIONS, allow_tools=False)
+    assert "tools" not in ollama
+
+
+def test_gemini_prices_and_model_filter():
+    from app.costs import compute_cost
+
+    assert compute_cost("gemini", "gemini-3-flash-preview", 1_000_000, 1_000_000, {}) == 3.5
+    assert compute_cost("gemini", "gemini-2.5-pro", 300_000, 0, {}) == 0.75, "long prompts use the higher rate"
+    assert compute_cost("gemini", "gemini-unknown", 10, 10, {}) is None
+
+
+async def test_projects_can_cover_kubernetes_namespaces(console, kube_only):
+    client, org_id, engine = kube_only
+    namespaces = (await client.get("/api/k8s/namespaces")).json()
+    assert namespaces == {"connected": True, "namespaces": ["shop"]}
+    bad = await client.post("/api/projects", json={"name": "Bad", "namespaces": ["Not A Namespace"]})
+    assert bad.status_code == 422
+    created = await client.post("/api/projects", json={"name": "Shop", "namespaces": ["shop"]})
+    assert created.status_code == 201, created.text
+    view = (await client.get(f"/api/projects/{created.json()['id']}")).json()
+    assert view["health"] == "problems" and view["kubernetes"]["problems"][0]["title"].startswith("Deployment shop/payment crash-looping")
+    assert view["kubernetes"]["problems"][0]["cause"].endswith("connection refused postgres:5432")
+    assert view["summary"]["active"] == 1, "Kubernetes events in the namespace count as the project's issues"
+    other = await client.post("/api/projects", json={"name": "Other", "namespaces": ["billing"]})
+    assert (await client.get(f"/api/projects/{other.json()['id']}")).json()["kubernetes"]["problems"] == []
+    listed = {item["name"]: item for item in (await client.get("/api/projects")).json()}
+    assert listed["Shop"]["namespaces"] == ["shop"] and listed["Shop"]["health"] == "problems"
+    counts = engine.context["integrations"]["kubernetes"]["counts"]
+    assert counts["pods"] == 1 and counts["pods_running"] == 0 and counts["deployments"] == 1 and counts["nodes_ready"] == 1

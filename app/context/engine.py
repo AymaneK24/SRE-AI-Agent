@@ -41,6 +41,9 @@ CRASH_LOG_LINES = 30
 CRASH_LOG_CHARS = 1000
 NO_SOURCE_POLL_S = 30
 STOP_TIMEOUT_S = 10
+# A Kubernetes problem must be gone this long before it counts as resolved, so a pod that runs for a few seconds
+# between crashes doesn't send "resolved" and "failing" again every minute.
+K8S_CLEAR_AFTER_S = 75
 CHANGES_EVERY_S = 120
 MAX_SERIES_PER_SIGNAL = 10
 ANOMALY_Z = 4.0
@@ -132,6 +135,7 @@ class ContextEngine:
         self._seed_deadlines: dict[int, float] = {}
         self._last_ok_mono: float | None = None
         self._stopping = False
+        self._k8s_missing_since: dict[str, float] = {}
 
     # Lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -660,6 +664,7 @@ class ContextEngine:
         if first_poll:
             await self._close_problems_that_ended_offline(current)
         for fingerprint, item in current.items():
+            self._k8s_missing_since.pop(fingerprint, None)
             if fingerprint not in self._active:
                 self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id")}
                 title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
@@ -674,6 +679,11 @@ class ContextEngine:
             # A cluster that didn't answer gives no evidence that its problems ended.
             if k8s_unknown and fingerprint.startswith("k8s:"):
                 continue
+            if fingerprint.startswith("k8s:"):
+                missing_since = self._k8s_missing_since.setdefault(fingerprint, time.monotonic())
+                if time.monotonic() - missing_since < K8S_CLEAR_AFTER_S:
+                    continue
+                self._k8s_missing_since.pop(fingerprint, None)
             item = self._active.pop(fingerprint)
             title = item["clear"]
             if item.get("kind") == "target" and fingerprint not in self._targets_up:

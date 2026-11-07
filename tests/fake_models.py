@@ -98,6 +98,9 @@ class Handler(BaseHTTPRequestHandler):
         if body["model"].startswith(("careless", "careful")):
             self._replay(body, system, used_tool)
             return
+        if body["model"].startswith("stubborn"):
+            self._stubborn(body)
+            return
         if body.get("tools") and not used_tool:
             chunk = {"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
                 "name": "run_range_query", "arguments": {"query": "sum(rate(http_requests_total[5m]))", "minutes": 10}}}]}, "done": False}
@@ -143,6 +146,14 @@ class Handler(BaseHTTPRequestHandler):
             send({"candidates": [{"content": {"role": "model", "parts": [{"text": "".join(words[index:index + 8])}]}, "index": 0}]})
         send({"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
               "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 140}})
+
+    def _stubborn(self, body):
+        """Calls the same tool on every round and never answers, even when it is given no tools, like the Gemini run on Nov 7."""
+        rounds = sum(1 for message in body["messages"] if message["role"] == "assistant")
+        call = {"function": {"name": "get_kubernetes_state", "arguments": {"resource": "pods" if rounds % 2 else "services"}}}
+        self.wfile.write((json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": [call, call]}, "done": False}) + "\n").encode())
+        self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+                                      "prompt_eval_count": 500, "eval_count": 20}) + "\n").encode())
 
     def _replay(self, body, system, used_tool):
         """Two behaviours seen on Nov 6: a careless small model that queries the wrong system and ignores the crash,

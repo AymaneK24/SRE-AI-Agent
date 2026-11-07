@@ -24,6 +24,7 @@ def pod(namespace: str, name: str, deployment: str | None = None, *, waiting: st
     labels, owners = {}, []
     if deployment:
         labels["pod-template-hash"] = "5b5568b987"
+        labels["app"] = deployment
         owners = [{"kind": "ReplicaSet", "name": f"{deployment}-5b5568b987"}]
     state = {"waiting": {"reason": waiting, "message": f"{waiting} message"}} if waiting else {"running": {"startedAt": iso(1)}}
     last = {"terminated": {"reason": last_reason, "exitCode": exit_code, "finishedAt": iso(2)}} if last_reason else {}
@@ -52,6 +53,10 @@ class ClusterState:
         self.deployments: list[dict] = []
         self.nodes: list[dict] = [{"metadata": {"name": "node-1"}, "spec": {}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}]
         self.events: list[dict] = []
+        self.services: list[dict] = [
+            {"metadata": {"namespace": "shop", "name": "payment"}, "spec": {"type": "ClusterIP", "selector": {"app": "payment"}, "ports": [{"port": 8080}]}},
+            {"metadata": {"namespace": "shop", "name": "postgres"}, "spec": {"type": "ClusterIP", "selector": {"app": "postgres"}, "ports": [{"port": 5432}]}},
+        ]
         self.logs: dict[tuple[str, str, bool], str] = {}
         self.forbid: set[str] = set()
         self.down = False
@@ -121,6 +126,8 @@ class FakeKube(BaseHTTPRequestHandler):
                 self._send(200, {"items": [item for item in state.pods if namespace in (None, item["metadata"]["namespace"])]})
             elif resource == "deployments":
                 self._send(200, {"items": state.deployments})
+            elif resource == "services":
+                self._send(200, {"items": state.services})
             elif resource == "nodes":
                 self._send(200, {"items": state.nodes})
             elif resource == "events":

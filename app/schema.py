@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -75,6 +75,14 @@ V5_TABLES = """CREATE TABLE held_alerts (
   cleared_at TEXT,
   released INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
+);
+"""
+
+# Version 6: a project can cover Kubernetes namespaces as well as metric sources. "*" means every namespace.
+V6_TABLES = """CREATE TABLE project_namespaces (
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  namespace TEXT NOT NULL,
+  PRIMARY KEY (project_id, namespace)
 );
 """
 
@@ -408,15 +416,17 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         ] + _split(V4_TABLES.format(**types))
     if version < 5:
         statements += _split(V5_TABLES.format(**types))
+    if version < 6:
+        statements += _split(V6_TABLES.format(**types))
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES))
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES))
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

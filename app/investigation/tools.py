@@ -59,9 +59,10 @@ LOGS_TOOL = {
 }
 KUBERNETES_TOOL = {
     "name": "get_kubernetes_state",
-    "description": "Read Kubernetes state: the problems the console found (with diagnoses), warning events, unhealthy pods, deployments and their images, or nodes.",
+    "description": "Read Kubernetes state: the problems the console found (with diagnoses), warning events, unhealthy pods, deployments and their images, "
+                   "services and whether their selector reaches ready pods, or nodes.",
     "input_schema": {"type": "object", "properties": {
-        "resource": {"type": "string", "enum": ["problems", "events", "pods", "deployments", "nodes"]},
+        "resource": {"type": "string", "enum": ["problems", "events", "pods", "deployments", "services", "nodes"]},
         "namespace": {"type": "string", "description": "Optional namespace."}}, "required": ["resource"]},
 }
 POD_LOGS_TOOL = {
@@ -224,10 +225,17 @@ class ToolRunner:
                 return {"unhealthy_pods": await client.unhealthy_pods(namespace)}
             if resource == "deployments":
                 return {"deployments": await client.rollouts(namespace)}
+            if resource == "services":
+                try:
+                    return {"services": await client.services(namespace)}
+                except SourceError as error:
+                    if error.kind == "forbidden":
+                        return {"services": [], "note": "This token may not list services. Add get and list on services to its role."}
+                    raise
             if resource == "nodes":
                 snapshot = self.engine.k8s_snapshot or await client.snapshot()
                 return {"nodes": snapshot.get("nodes", []), "note": "Node access is forbidden for this token." if "nodes" in snapshot.get("forbidden", []) else ""}
-            raise ValueError("resource must be problems, events, pods, deployments, or nodes")
+            raise ValueError("resource must be problems, events, pods, deployments, services, or nodes")
         finally:
             await client.close()
 
