@@ -19,7 +19,7 @@ docker compose version
 
 ```bash
 cd root-cause-console
-sh deploy/setup-env.sh          # address: localhost, certificate: 3, port: 443 or 8443
+sh deploy/setup-env.sh          # address: localhost, certificate: 2, port: 443 or 8443
 docker compose up -d --build
 docker compose ps
 docker compose logs -f console  # Ctrl+C to stop following

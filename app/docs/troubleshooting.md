@@ -12,7 +12,9 @@ Find the message you see, then the fix. Most problems are network paths, certifi
 | `bind: address already in use` on 80 or 443 | Another program uses the port | Set `RCC_HTTP_PORT` and `RCC_HTTPS_PORT`, and add the port to `RCC_PUBLIC_URL` |
 | The browser warns about the certificate | The self-made certificate | Expected with that choice. See [Certificates](/docs/certificates#made-by-this-server) |
 | `Open the console at the address in RCC_PUBLIC_URL, or add this name to RCC_ALLOWED_HOSTS` | You used another host name or IP than the configured one | Use the configured address, or add the name to `RCC_ALLOWED_HOSTS` and restart |
-| Let's Encrypt fails in Caddy's log | The name doesn't point at the server, or port 80 is closed | `dig +short NAME`, and open port 80 from the internet |
+| Let's Encrypt over the internet fails in Caddy's log | The name doesn't point at the server, or port 80 is closed | `dig +short NAME`, and open port 80 from the internet. For a private server, use another certificate choice |
+| Let's Encrypt through Azure DNS fails | The managed identity lacks **DNS Zone Contributor** on the public zone, the zone isn't delegated, or outbound access to Azure, Let's Encrypt, or public DNS is blocked | `dig NS rcc.company.com @1.1.1.1` must show Azure's name servers. Check the role assignment and `docker compose logs caddy` |
+| `pull access denied for rcc-caddy-dns` | The custom Caddy image wasn't built | `docker build --pull -t rcc-caddy-dns:2 deploy/caddy-dns` |
 | Pages look old after an update | The browser cached the previous files | Reload with Ctrl+Shift+R |
 | Settings, accounts, and connections are gone | The volumes were deleted, for example by `docker compose down -v` | Restore from backup. Use `docker compose down` without `-v` |
 

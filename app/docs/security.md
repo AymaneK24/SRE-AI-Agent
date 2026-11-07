@@ -26,8 +26,10 @@ The console holds read access to your monitoring and, through it, a detailed map
 
 ### Network
 
-- [ ] Reach the console over VPN or your internal network. If it must be on the internet, allow only known IP ranges and require single sign-on.
-- [ ] Publish only 443, and 80 only for Let's Encrypt. Never publish 8000 or 5432.
+- [ ] Run a **private** server: no public IP, reached over VPN, ExpressRoute, or your office network. If it must be on the internet, allow only known IP ranges, require single sign-on, and consider a WAF.
+- [ ] Publish only 443, and 80 only for Let's Encrypt over the internet. Never publish 8000 or 5432.
+- [ ] Give the VM outbound access through a NAT gateway or Azure Firewall, and administer it through Azure Bastion rather than an open SSH port.
+- [ ] Use your company's certificate, or Let's Encrypt through Azure DNS, so nothing needs inbound internet access.
 - [ ] Set `RCC_TARGET_ALLOWLIST` to the systems the console should reach.
 - [ ] Restrict Ollama, Prometheus, and Loki so only the console's server (and your people) can reach them.
 

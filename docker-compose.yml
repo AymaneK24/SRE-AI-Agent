@@ -50,14 +50,19 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    # caddy:2-alpine, or rcc-caddy-dns:2 (deploy/caddy-dns) for Let's Encrypt through Azure DNS on a private server.
+    image: ${RCC_CADDY_IMAGE:-caddy:2-alpine}
     environment:
       RCC_DOMAIN: "${RCC_DOMAIN:?Run sh deploy/setup-env.sh first}"
+      # Only used by deploy/Caddyfile.azure-dns. The VM's managed identity signs in, so no secret is needed.
+      AZURE_SUBSCRIPTION_ID: "${AZURE_SUBSCRIPTION_ID:-}"
+      AZURE_RESOURCE_GROUP_NAME: "${AZURE_RESOURCE_GROUP_NAME:-}"
     ports:
       - "${RCC_HTTP_PORT:-80}:80"
       - "${RCC_HTTPS_PORT:-443}:443"
     volumes:
-      - ${RCC_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      # Defaults to a certificate Caddy makes itself, so a missing setting never asks Let's Encrypt over the internet.
+      - ${RCC_CADDYFILE:-./deploy/Caddyfile.selfsigned}:/etc/caddy/Caddyfile:ro
       - ./deploy/certs:/certs:ro
       - caddy-data:/data
       - caddy-config:/config

@@ -13,12 +13,21 @@ printf 'Your email, which you will sign in with: '
 read -r admin_email
 printf 'Address people will use, without https:// (a host name or IP address): '
 read -r domain
-echo 'Which HTTPS certificate?'
-echo '  1) Let'"'"'s Encrypt: a public host name, with ports 80 and 443 open to the internet'
-echo '  2) Your company'"'"'s certificate: put cert.pem and key.pem in deploy/certs'
-echo '  3) Made by this server: works with an IP address, but browsers warn on first visit'
-printf 'Choose 1, 2, or 3 [3]: '
+echo 'Which HTTPS certificate? A private server, reached over VPN or your network, is recommended.'
+echo '  1) Your company'"'"'s certificate (recommended, private): put cert.pem and key.pem in deploy/certs'
+echo '  2) Made by this server (private): works with an IP address, but browsers warn until you trust it'
+echo '  3) Let'"'"'s Encrypt through Azure DNS (private): a trusted certificate with nothing open to the internet'
+echo '  4) Let'"'"'s Encrypt over the internet (public): ports 80 and 443 open to the internet'
+printf 'Choose 1, 2, 3, or 4 [2]: '
 read -r choice
+azure_subscription=""; azure_dns_group=""; caddy_image=""
+if [ "$choice" = "3" ]; then
+  printf 'Azure subscription ID of the public DNS zone: '
+  read -r azure_subscription
+  printf 'Resource group of that DNS zone: '
+  read -r azure_dns_group
+  caddy_image="rcc-caddy-dns:2"
+fi
 printf 'HTTPS port [443]: '
 read -r https_port
 printf 'Email server (leave empty for none, or enter smtp.gmail.com): '
@@ -40,10 +49,12 @@ if [ -z "$company" ] || [ -z "$admin_name" ]; then echo "Enter the company name 
 case "$admin_email" in *@*.*) ;; *) echo "Enter a real email address."; exit 1 ;; esac
 case "$domain" in *://*|*/*|'') echo "Enter only the host name or IP address, such as rcc.company.internal."; exit 1 ;; esac
 case "$choice" in
-  1) caddyfile=./deploy/Caddyfile ;;
-  2) caddyfile=./deploy/Caddyfile.internal ;;
-  3|'') caddyfile=./deploy/Caddyfile.selfsigned ;;
-  *) echo "Choose 1, 2, or 3."; exit 1 ;;
+  1) caddyfile=./deploy/Caddyfile.internal ;;
+  2|'') caddyfile=./deploy/Caddyfile.selfsigned ;;
+  3) caddyfile=./deploy/Caddyfile.azure-dns
+     if [ -z "$azure_subscription" ] || [ -z "$azure_dns_group" ]; then echo "Enter the subscription ID and resource group of the DNS zone."; exit 1; fi ;;
+  4) caddyfile=./deploy/Caddyfile ;;
+  *) echo "Choose 1, 2, 3, or 4."; exit 1 ;;
 esac
 https_port="${https_port:-443}"
 if [ "$https_port" = "443" ]; then public_url="https://$domain"; else public_url="https://$domain:$https_port"; fi
@@ -55,6 +66,9 @@ RCC_DOMAIN=$domain
 RCC_PUBLIC_URL=$public_url
 RCC_ALLOWED_HOSTS=$domain
 RCC_CADDYFILE=$caddyfile
+RCC_CADDY_IMAGE=${caddy_image:-caddy:2-alpine}
+AZURE_SUBSCRIPTION_ID=$azure_subscription
+AZURE_RESOURCE_GROUP_NAME=$azure_dns_group
 RCC_HTTPS_PORT=$https_port
 RCC_COMPANY_NAME=$company
 RCC_SECRET_KEY=$(openssl rand -hex 32)
@@ -77,4 +91,10 @@ echo "Wrote .env. Save a copy somewhere safe, off this server."
 echo "Address:           $public_url"
 echo "Sign in as:        $admin_email"
 echo "First password:    $admin_password   (you must change it at first sign-in)"
+if [ "$choice" = "1" ] && { [ ! -f deploy/certs/cert.pem ] || [ ! -f deploy/certs/key.pem ]; }; then
+  echo "Before starting:   put cert.pem and key.pem in deploy/certs"
+fi
+if [ "$choice" = "3" ]; then
+  echo "Before starting:   docker build --pull -t rcc-caddy-dns:2 deploy/caddy-dns"
+fi
 echo "Next, run:         docker compose up -d --build"

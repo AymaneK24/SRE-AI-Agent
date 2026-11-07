@@ -2,7 +2,7 @@
 
 Root Cause Console is a self-hosted tool for SRE and platform teams. It connects to the monitoring you already run (Prometheus, Loki, Kubernetes, CloudWatch, Azure Monitor), keeps a live picture of what's wrong, and lets an AI model investigate why something broke.
 
-It runs inside your own network. Each installation belongs to one company, with its own server, database, and keys.
+It runs inside your own network, and we recommend keeping it private: reached over your VPN or company network, with no address on the internet. Each installation belongs to one company, with its own server, database, and keys.
 
 ## What it does
 
