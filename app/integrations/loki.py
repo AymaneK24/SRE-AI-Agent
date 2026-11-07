@@ -55,7 +55,9 @@ class LokiClient:
     async def summary(self) -> dict[str, Any]:
         """Count recent error-like lines by job for the live context."""
         end = time.time()
-        expression = f'sum by (job) (count_over_time({self.selector} |~ "(?i)(error|exception|fatal|panic)" [5m]))'
+        # Loki logs every query it runs, including this one, and that log line contains the words searched for.
+        # Leaving those lines out keeps the console from counting its own queries as errors in Loki's log.
+        expression = f'sum by (job) (count_over_time({self.selector} |~ "(?i)(error|exception|fatal|panic)" != "error|exception|fatal|panic" [5m]))'
         data = await self._get("/loki/api/v1/query", {"query": expression, "time": int(end * 1e9)})
         rows = []
         for item in data.get("result", []):
