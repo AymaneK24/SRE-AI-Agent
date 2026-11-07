@@ -194,7 +194,7 @@ export function mount(container) {
     if (degraded) {
       staleBanner.className = 'stale-banner';
       staleBanner.style.marginTop = '20px';
-      clear(staleBanner, h('b', {}, 'A metric source isn’t answering. '), can('engineer') ? (health.error || '') : '', health.last_ok ? ` The last good data is from ${timeAgo(health.last_ok)}.` : '');
+      clear(staleBanner, h('b', {}, 'A connection isn’t answering. '), can('engineer') ? (health.error || '') : '', health.last_ok ? ` The last good data is from ${timeAgo(health.last_ok)}.` : '');
     }
 
     renderGolden(context);
