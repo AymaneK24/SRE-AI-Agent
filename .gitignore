@@ -7,3 +7,9 @@ __pycache__/
 .ruff_cache/
 deploy/certs/*.pem
 backups/
+# Secrets files used in the docs, so they are never committed by mistake
+rcc-secrets.env
+secrets.env
+*.sql.gz
+# Local-only Compose changes, such as publishing port 8000
+docker-compose.override.yml

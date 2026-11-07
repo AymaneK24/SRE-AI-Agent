@@ -47,7 +47,7 @@ This server's own addresses, cloud metadata addresses, disguised IP addresses, a
 
 ## Run on Kubernetes
 
-`deploy/k8s` holds files for the app, PostgreSQL, and Caddy. Keep the app at one replica, because it holds live runs and monitoring in memory. Replace `ACR_NAME` and `IMAGE_TAG`, and create the `rcc-secrets` Secret and the `rcc-config` and `caddyfile` ConfigMaps first. Put `RCC_MODE=production`, `RCC_PUBLIC_URL`, `RCC_ALLOWED_HOSTS`, `RCC_ADMIN_EMAIL`, and `RCC_ADMIN_NAME` in the ConfigMap, and `RCC_ADMIN_PASSWORD`, `RCC_SECRET_KEY`, and `RCC_DATABASE_URL` in the Secret. Storage uses Azure's `managed-csi` class, so change it on another platform.
+`deploy/k8s` holds files for the app, PostgreSQL, Caddy, the read-only account (`reader-rbac.yaml`), and optional NetworkPolicies (`networkpolicy.yaml`). The **Deploy on AKS** page in the console's docs walks through every command. Keep the app at one replica, because it holds live runs and monitoring in memory. Replace `ACR_NAME` and `IMAGE_TAG`, and create the `rcc-secrets` Secret and the `rcc-config` and `caddyfile` ConfigMaps first. Put `RCC_MODE=production`, `RCC_PUBLIC_URL`, `RCC_ALLOWED_HOSTS`, `RCC_ADMIN_EMAIL`, and `RCC_ADMIN_NAME` in the ConfigMap, and `RCC_ADMIN_PASSWORD`, `RCC_SECRET_KEY`, `POSTGRES_PASSWORD`, and `RCC_DATABASE_URL` in the Secret. Storage uses Azure's `managed-csi` class, so change it on another platform.
 
 ## With no internet access on the server
 
@@ -135,33 +135,11 @@ curl -X POST "$RCC_CHANGES_URL" -H 'Content-Type: application/json' \
 
 ### A read-only Kubernetes account
 
-The console reads pods and their logs, events, deployments, and nodes. It never reads Secrets or ConfigMap contents, and it has no code that writes to the cluster.
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata: { name: rcc-reader, namespace: monitoring }
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata: { name: rcc-reader }
-rules:
-  - apiGroups: [""]
-    resources: [pods, pods/log, events, nodes, services]
-    verbs: [get, list]
-  - apiGroups: [apps]
-    resources: [deployments]
-    verbs: [get, list]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata: { name: rcc-reader }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rcc-reader }
-subjects: [{ kind: ServiceAccount, name: rcc-reader, namespace: monitoring }]
-```
+The console reads pods and their logs, events, Deployments, Services, and nodes. It never reads Secrets or ConfigMap contents, and it has no code that writes to the cluster. `deploy/k8s/reader-rbac.yaml` creates the `rcc` namespace, a `rcc-reader` ServiceAccount, and a ClusterRole with only `get` and `list` on those resources:
 
 ```bash
-kubectl -n monitoring create token rcc-reader --duration=720h
+kubectl apply -f deploy/k8s/reader-rbac.yaml
+kubectl -n rcc create token rcc-reader --duration=720h
 ```
 
 Leaving out `nodes` is fine: node problems then aren't watched, and the console says so. Leaving out `pods/log` means no crash logs in investigations. `services` lets an investigation check whether a Service reaches any ready pod, which explains most "connection refused" errors.

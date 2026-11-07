@@ -116,11 +116,11 @@ b, strong { font-weight: 600; color: var(--ink); }
 
 /* Header */
 .site-header {
-  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px 36px; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px 28px; flex-wrap: wrap;
   padding: 14px clamp(16px, 4vw, 56px); background: var(--page); border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 9px; font-size: 21px; font-weight: 600; letter-spacing: -.035em; text-decoration: none; }
-.site-nav { display: flex; gap: 22px; flex-wrap: wrap; }
+.site-nav { display: flex; gap: 20px; flex-wrap: wrap; }
 .site-nav a { color: var(--body); text-decoration: none; padding: 3px 0; border-bottom: 2px solid transparent; }
 .site-nav a:hover { color: var(--ink); }
 .site-nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }

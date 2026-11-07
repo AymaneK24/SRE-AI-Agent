@@ -275,6 +275,7 @@ export function mount(container) {
       const result = h('div');
       const kube = integrationKind === 'kubernetes';
       const cfg = row?.config || {};
+      const tenant = h('input', { class: 'input', value: cfg.tenant || '', spellcheck: 'false', maxlength: 100, placeholder: 'Optional' });
       const inCluster = h('input', { type: 'checkbox', checked: Boolean(cfg.in_cluster) });
       const verify = h('input', { type: 'checkbox', checked: cfg.verify_tls !== false });
       const serverName = h('input', { class: 'input', value: cfg.tls_server_name || '', spellcheck: 'false', placeholder: 'Optional, such as kubernetes.docker.internal' });
@@ -299,7 +300,7 @@ export function mount(container) {
       ] : [];
       const body = () => ({ kind: integrationKind, name: title, config: kube
         ? { url: url.value.trim(), [extraKey]: extra.value.trim(), in_cluster: inCluster.checked, verify_tls: verify.checked, tls_server_name: serverName.value.trim(), ca_cert: caCert.value.trim(), remove_ca: removeCa }
-        : { url: url.value.trim(), [extraKey]: extra.value.trim() }, secrets: { token: token.value } });
+        : { url: url.value.trim(), [extraKey]: extra.value.trim(), tenant: tenant.value.trim() }, secrets: { token: token.value } });
       return h('form', { 'aria-label': title, onSubmit: async (event) => {
         event.preventDefault();
         try {
@@ -309,7 +310,8 @@ export function mount(container) {
         } catch (error) { showResult(result, false, error.message); }
       } },
       h('h3', { style: 'margin-bottom:10px' }, title, ' ', row ? statusBadge('active') : null),
-      h('div', { class: 'stack' }, field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', ''), ...kubeFields),
+      h('div', { class: 'stack' }, field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', ''),
+        kube ? null : field('Tenant', tenant, 'Only for a multi-tenant Loki. Sent as X-Scope-OrgID.', ''), ...kubeFields),
       result,
       editable ? h('div', { class: 'form-actions' },
         h('button', { class: 'button primary compact', type: 'submit' }, 'Save'),

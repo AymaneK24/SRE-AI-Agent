@@ -241,7 +241,11 @@ def clean_integration_config(kind: str, config: dict[str, Any]) -> dict[str, Any
     if not in_cluster and not re.fullmatch(r"https?://[^\s/@]+(:\d+)?(/[^\s]*)?", url):
         raise _bad("Enter an address such as https://loki.example.com:3100.")
     if kind == "loki":
-        return {"url": url, "selector": str(config.get("selector", "")).strip()[:300], "tenant": str(config.get("tenant", "")).strip()[:100]}
+        tenant = str(config.get("tenant", "")).strip()
+        # It's sent as a header, so only the characters Loki allows in a tenant ID.
+        if tenant and not re.fullmatch(r"[A-Za-z0-9_.|!*'()-]{1,100}", tenant):
+            raise _bad("Enter the tenant as letters, digits, and - _ . only, as your Loki expects in X-Scope-OrgID.")
+        return {"url": url, "selector": str(config.get("selector", "")).strip()[:300], "tenant": tenant}
     ca_cert = str(config.get("ca_cert", "")).strip()
     if ca_cert and (len(ca_cert) > 20000 or not PEM_RE.match(ca_cert)):
         raise _bad("Paste the CA certificate in PEM form, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----.")
