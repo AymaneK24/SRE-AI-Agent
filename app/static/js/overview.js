@@ -14,6 +14,9 @@ function loadPref(key, fallback) {
     return localStorage.getItem(key) === null || Number.isNaN(value) ? fallback : value;
   } catch (error) { return fallback; }
 }
+function loadText(key) {
+  try { return localStorage.getItem(key); } catch (error) { return null; }
+}
 function savePref(key, value) {
   try { localStorage.setItem(key, String(value)); } catch (error) { /* Preference only lasts this session. */ }
 }
@@ -36,6 +39,10 @@ export function mount(container) {
   const heroLabel = h('p', { class: 'hero-chart-title' });
   const heroChartHost = h('div');
   const clusterHost = h('div', { class: 'cluster-panel' });
+  const logsHost = h('div', { class: 'cluster-panel' });
+  const metricsHost = h('div', {}, heroLabel, heroChartHost);
+  const viewSwitch = h('div', { class: 'segments hero-switch', role: 'group', 'aria-label': 'What to show here' });
+  let heroView = loadText('rcc-hero-view');
   const staleBanner = h('div', { hidden: true });
   const attention = h('div');
   const changes = h('div');
@@ -50,7 +57,7 @@ export function mount(container) {
     staleBanner,
     h('section', { class: `hero${can('engineer') ? '' : ' hero-solo'}`, 'aria-labelledby': 'hero-title' },
       h('div', {}, heroTitle, heroCopy, heroActions),
-      h('div', {}, can('engineer') ? [heroLabel, heroChartHost] : null, clusterHost)),
+      h('div', {}, viewSwitch, can('engineer') ? metricsHost : null, clusterHost, logsHost)),
     goldenSection,
     h('section', { class: 'section status-grid' },
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Needs attention')), attention),
@@ -64,7 +71,8 @@ export function mount(container) {
           h('button', { class: 'button compact', type: 'button', onClick: () => fetchAll() }, 'Refresh now'),
           can('engineer') ? h('button', { class: 'button compact primary', type: 'button', onClick: () => editPanel() }, 'Add panel') : null)),
       panelGrid),
-    can('engineer') ? h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', {}, 'Targets by job')), jobs) : null));
+    can('engineer') ? h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h2', {}, 'What’s watched')),
+      h('p', { class: 'small muted', style: 'margin:-6px 0 12px' }, 'Each server, endpoint, log stream, and namespace this console reads, and which connection reads it.'), jobs) : null));
   heroTitle.id = 'hero-title';
 
   function signalValue(signal) {
@@ -79,6 +87,12 @@ export function mount(container) {
     const panels = container.querySelector('[aria-label="Metric panels"]');
     if (panels) panels.hidden = context.coverage?.has_metrics === false;
     const signals = (context.signals || []).filter((signal) => signal.golden && signalValue(signal) !== null);
+    golden.classList.toggle('golden-grid', Boolean(signals.length) || !context.as_of);
+    if (!signals.length && context.as_of) {
+      // Four "No data" tiles say less than one sentence.
+      clear(golden, h('p', { class: 'small muted' }, 'No latency, traffic, error, or saturation metrics were found yet. They appear when your sources collect request, HTTP, or container metrics.'));
+      return;
+    }
     clear(golden, GOLDEN.map(([id, label, hint]) => {
       const worst = signals.filter((signal) => signal.golden === id)
         .sort((a, b) => (b.unit === 'percent') - (a.unit === 'percent') || signalValue(b) - signalValue(a))[0];
@@ -186,10 +200,13 @@ export function mount(container) {
     renderGolden(context);
     renderAttention(context);
     renderChanges(context.events || []);
-    renderJobs(targets.jobs || []);
+    renderWatched(context);
 
-    renderCluster(context);
-    const signal = configured && can('engineer') ? chooseHeroSignal(context) : null;
+    const view = chooseView(context);
+    renderCluster(context, view === 'cluster');
+    renderLogs(context, view === 'logs');
+    metricsHost.hidden = view !== 'metrics';
+    const signal = view === 'metrics' && configured && can('engineer') ? chooseHeroSignal(context) : null;
     const key = signal ? `${signal.query}|${signal.limit}` : '';
     if (key !== heroKey) {
       heroKey = key;
@@ -209,12 +226,26 @@ export function mount(container) {
     }
   }
 
-  // Without metrics there's no chart for the right side, so it shows the cluster and logs instead.
-  function renderCluster(context) {
+  // The right side shows one of: the cluster, a key metric chart, or log streams. Each viewer's choice is remembered.
+  function chooseView(context) {
+    const counts = context.integrations?.kubernetes?.counts || context.cluster_counts;
+    const views = [];
+    if (counts) views.push(['cluster', 'Cluster']);
+    if (context.coverage?.has_metrics !== false && can('engineer')) views.push(['metrics', 'Metrics']);
+    if (context.integrations?.loki?.status === 'ok' && can('engineer')) views.push(['logs', 'Logs']);
+    const names = views.map(([name]) => name);
+    const view = names.includes(heroView) ? heroView : names[0] || '';
+    viewSwitch.hidden = views.length < 2;
+    clear(viewSwitch, views.map(([name, label]) => h('button', {
+      type: 'button', 'aria-pressed': String(name === view),
+      onClick: () => { heroView = name; savePref('rcc-hero-view', name); renderContext(live.context); },
+    }, label)));
+    return view;
+  }
+
+  function renderCluster(context, show) {
     const kube = context.integrations?.kubernetes;
     const counts = kube?.counts || context.cluster_counts;
-    const loki = context.integrations?.loki;
-    const show = context.coverage?.has_metrics === false && (counts || loki);
     clusterHost.hidden = !show;
     if (!show) { clear(clusterHost); return; }
     const parts = [];
@@ -232,19 +263,39 @@ export function mount(container) {
           h('span', { class: 'row-title' }, `${event.reason}: ${event.object}`), h('span', { class: 'row-side' }, event.last_seen ? timeAgo(event.last_seen) : ''),
           h('span', { class: 'row-detail' }, event.message)))));
     }
-    if (can('engineer') && loki?.status === 'ok') {
-      const rows = (loki.error_lines || []).slice(0, 4);
-      parts.push(h('p', { class: 'hero-chart-title cluster-subhead' }, h('b', {}, 'Error-like log lines'), ', last 5 minutes'),
-        rows.length ? h('ul', { class: 'rows' }, rows.map((row) => h('li', { class: 'row' }, icon(row.errors_5m > 0 ? 'warning' : 'ok'),
-          h('span', { class: 'row-title' }, row.job), h('span', { class: 'row-side' }, `${Math.round(row.errors_5m)} lines`))))
-          : h('p', { class: 'small muted' }, 'None.'));
-    }
     clear(clusterHost, parts);
+  }
+
+  function renderLogs(context, show) {
+    const loki = context.integrations?.loki;
+    logsHost.hidden = !show;
+    if (!show || !loki) { clear(logsHost); return; }
+    const streams = loki.streams || [];
+    const total = streams.reduce((sum, row) => sum + row.lines_5m, 0);
+    const errors = streams.reduce((sum, row) => sum + row.errors_5m, 0);
+    clear(logsHost,
+      h('p', { class: 'hero-chart-title' }, h('b', {}, loki.name || 'Loki'), `, ${plural(streams.length, 'stream', 'streams')}, last 5 minutes`),
+      h('div', { class: 'stat-row cluster-stats' },
+        h('div', { class: 'stat' }, h('b', {}, Math.round(total).toLocaleString()), h('span', {}, 'Lines written')),
+        h('div', { class: `stat${errors ? ' is-bad' : ''}` }, h('b', {}, Math.round(errors).toLocaleString()), h('span', {}, 'Error-like lines'))),
+      h('p', { class: 'hero-chart-title cluster-subhead' }, h('b', {}, 'Streams with the most errors')),
+      streams.length ? h('ul', { class: 'rows' }, streams.slice(0, 5).map((row) => h('li', { class: 'row' }, icon(row.errors_5m > 0 ? 'warning' : 'ok'),
+        h('span', { class: 'row-title' }, row.job), h('span', { class: 'row-side' }, `${Math.round(row.errors_5m)} errors in ${Math.round(row.lines_5m)} lines`))))
+        : h('p', { class: 'small muted' }, 'No stream wrote anything in the last 5 minutes.'));
+  }
+
+  // Runbooks for a Kubernetes problem: ones written for this workload, or for this kind of problem.
+  const PROBLEM_SIGNALS = { crashloop: 'kube_restarts', oomkilled: 'kube_oom', not_ready: 'kube_not_ready', rollout_stuck: 'kube_not_ready' };
+  function runbookQuery(detail) {
+    if (!detail.workload) return null;
+    const query = new URLSearchParams({ text: detail.workload });
+    if (PROBLEM_SIGNALS[detail.problem]) query.set('signal', PROBLEM_SIGNALS[detail.problem]);
+    return query.toString();
   }
 
   function investigateLink(prompt, workflowQuery) {
     return h('span', { class: 'row-buttons' },
-      workflowQuery && can('engineer') ? h('a', { class: 'button compact', href: `#/workflows?${workflowQuery}` }, 'Workflows') : null,
+      workflowQuery ? h('a', { class: 'button compact', href: `#/workflows?${workflowQuery}` }, 'Runbooks') : null,
       can('engineer') ? h('a', { class: 'button compact', href: `#/investigate?prompt=${encodeURIComponent(prompt)}` }, 'Investigate') : null);
   }
 
@@ -268,7 +319,7 @@ export function mount(container) {
       const why = detail.diagnosis?.cause || (detail.pods?.length ? `Pods: ${detail.pods.slice(0, 3).join(', ')}` : '');
       rows.push(h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, item.title),
-        h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, null)),
+        h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail))),
         h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem')));
     }
     for (const rule of context.rules?.failing || []) {
@@ -299,16 +350,47 @@ export function mount(container) {
       h('time', { class: 'row-side', datetime: event.ts, title: new Date(event.ts).toLocaleString() }, timeAgo(event.ts))))));
   }
 
-  function renderJobs(rows) {
-    if (!rows.length) {
-      clear(jobs, h('p', { class: 'empty' }, live.context?.as_of ? 'This source doesn’t report scrape targets.' : 'Connect a metric source to see its targets.'));
-      return;
+  let showAllTargets = false;
+  function table(head, rows) {
+    return h('div', { class: 'table-wrap' }, h('table', { class: 'data-table' },
+      h('thead', {}, h('tr', {}, head.map(([label, num]) => h('th', { scope: 'col', class: num ? 'num' : '' }, label)))),
+      h('tbody', {}, rows)));
+  }
+
+  // Everything this console reads: metric targets by address, log streams, and cluster namespaces.
+  function renderWatched(context) {
+    const parts = [];
+    const targets = context.targets?.list || [];
+    if (targets.length) {
+      const shown = showAllTargets ? targets : targets.slice(0, 25);
+      const health = { up: ['ok', 'Up'], down: ['critical', 'Down'] };
+      parts.push(h('h3', { class: 'watched-head' }, `Metric targets (${targets.length})`),
+        table([['Target'], ['Job'], ['Watched by'], ['Status'], ['Last scrape']], shown.map((row) => h('tr', {},
+          h('td', { class: 'cell-title' }, row.instance, row.error ? h('div', { class: 'small', style: 'font-weight:400;overflow-wrap:anywhere' }, row.error) : null),
+          h('td', {}, row.job), h('td', {}, row.source),
+          h('td', {}, h('span', { class: `badge ${(health[row.health] || ['neutral'])[0]}` }, (health[row.health] || [null, 'Unknown'])[1])),
+          h('td', { class: 'small muted' }, row.last_scrape ? timeAgo(row.last_scrape) : '')))),
+        targets.length > 25 ? h('button', { class: 'button compact', type: 'button', style: 'margin-top:10px', onClick: () => { showAllTargets = !showAllTargets; renderWatched(live.context); } },
+          showAllTargets ? 'Show fewer' : `Show all ${targets.length}`) : null);
     }
-    clear(jobs, h('div', { class: 'table-wrap' }, h('table', { class: 'data-table' },
-      h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Job'), h('th', { scope: 'col', class: 'num' }, 'Up'), h('th', { scope: 'col', class: 'num' }, 'Down'), h('th', { scope: 'col', class: 'num' }, 'Unknown'), h('th', { scope: 'col' }, 'Status'))),
-      h('tbody', {}, rows.map((row) => h('tr', {},
-        h('td', {}, row.job), h('td', { class: 'num' }, row.up), h('td', { class: 'num' }, row.down), h('td', { class: 'num' }, row.unknown),
-        h('td', {}, row.down ? h('span', { class: 'badge critical' }, 'Down') : h('span', { class: 'badge ok' }, 'Healthy'))))))));
+    const loki = context.integrations?.loki;
+    if (loki?.status === 'ok') {
+      const streams = loki.streams || [];
+      parts.push(h('h3', { class: 'watched-head' }, `Log streams (${streams.length})`, h('span', { class: 'small muted' }, ` read by ${loki.name || 'Loki'}`)),
+        streams.length ? table([['Stream'], ['Lines in 5 min', true], ['Error-like lines', true]], streams.slice(0, 50).map((row) => h('tr', {},
+          h('td', { class: 'cell-title' }, row.job), h('td', { class: 'num' }, Math.round(row.lines_5m).toLocaleString()),
+          h('td', { class: 'num' }, row.errors_5m ? h('span', { class: 'badge warning' }, Math.round(row.errors_5m).toLocaleString()) : '0'))))
+          : h('p', { class: 'empty' }, 'No stream wrote anything in the last 5 minutes.'));
+    }
+    const kube = context.integrations?.kubernetes;
+    if (kube?.status === 'ok') {
+      const namespaces = kube.namespaces || [];
+      parts.push(h('h3', { class: 'watched-head' }, `Kubernetes namespaces (${namespaces.length})`, h('span', { class: 'small muted' }, ` read from ${kube.name || 'the cluster'}`)),
+        table([['Namespace'], ['Workloads', true], ['Pods ready', true], ['Problems', true]], namespaces.map((row) => h('tr', {},
+          h('td', { class: 'cell-title' }, row.name), h('td', { class: 'num' }, row.workloads), h('td', { class: 'num' }, `${row.ready} / ${row.pods}`),
+          h('td', { class: 'num' }, row.problems ? h('span', { class: 'badge critical' }, row.problems) : '0')))));
+    }
+    clear(jobs, parts.length ? parts : h('p', { class: 'empty' }, live.context?.as_of ? 'Nothing reports targets, log streams, or namespaces yet.' : 'Add a connection to see what it watches.'));
   }
 
   // Panels -----------------------------------------------------------------

@@ -44,6 +44,7 @@ STOP_TIMEOUT_S = 10
 # A Kubernetes problem must be gone this long before it counts as resolved, so a pod that runs for a few seconds
 # between crashes doesn't send "resolved" and "failing" again every minute.
 K8S_CLEAR_AFTER_S = 75
+TARGET_LIST_LIMIT = 500
 CHANGES_EVERY_S = 120
 MAX_SERIES_PER_SIGNAL = 10
 ANOMALY_Z = 4.0
@@ -415,7 +416,10 @@ class ContextEngine:
                     self.k8s_snapshot = snapshot
                     self.k8s_problems = find_problems(snapshot)
                     await self._enrich_k8s_problems(client)
-                    summary["kubernetes"] = {"name": row["name"], "status": "ok", **summary_from_snapshot(snapshot), "problems": self.k8s_problems}
+                    kube = {"name": row["name"], "status": "ok", **summary_from_snapshot(snapshot), "problems": self.k8s_problems}
+                    for namespace in kube["namespaces"]:
+                        namespace["problems"] = sum(1 for item in self.k8s_problems if item["namespace"] == namespace["name"])
+                    summary["kubernetes"] = kube
                 else:
                     summary[row["kind"]] = {"name": row["name"], "status": "ok", **(await client.summary())}
             except (SourceError, BlockedTarget, ValueError) as error:
@@ -565,6 +569,7 @@ class ContextEngine:
     def _summarize_targets(self, targets: list[tuple[Any, dict[str, Any], bool]], now_iso: str) -> dict[str, Any]:
         up = unknown = 0
         down_list = []
+        listed: list[dict[str, Any]] = []
         jobs: dict[str, dict[str, int]] = {}
         self._targets_up = set()
         self._targets_unknown = set()
@@ -577,6 +582,11 @@ class ContextEngine:
             health = target.get("health", "unknown")
             instance = labels.get("instance") or target.get("scrapeUrl", "")
             fingerprint = f"target:{source.id}:{job}:{instance}"
+            if len(listed) < TARGET_LIST_LIMIT:
+                # What is watched, and by which source: the address a person recognises, not the collector's own name.
+                listed.append({"instance": instance, "job": labels.get("job") or target.get("scrapePool", "unknown"), "health": health,
+                               "source_id": source.id, "source": source.name, "last_scrape": target.get("lastScrape"),
+                               "error": scrub(target.get("lastError", ""))})
             if health == "up":
                 up += 1
                 bucket["up"] += 1
@@ -595,6 +605,7 @@ class ContextEngine:
         return {
             "total": len(targets), "up": up, "down": len(down_list), "unknown": unknown, "down_list": down_list,
             "jobs": [{"job": job, **counts} for job, counts in sorted(jobs.items())],
+            "list": sorted(listed, key=lambda row: ({"down": 0, "unknown": 1}.get(row["health"], 2), row["source"], row["job"], row["instance"])),
         }
 
     def _find_anomalies(self, signals: list[dict[str, Any]]) -> list[dict[str, Any]]:

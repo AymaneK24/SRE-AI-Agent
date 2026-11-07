@@ -29,7 +29,7 @@ The server enforces this on every request. Hiding something on a page is never t
 | Overview | Status, golden signals, saved charts, and which Kubernetes workloads are failing. No queries, labels, addresses, logs, or diagnosis evidence | Full, with queries and targets | Full | Full |
 | Projects | Status, incidents, issues, and reports someone shared | Also create reports and record verdicts | Also delete projects | Same as admin |
 | Investigate | **Results only:** the question and the answer, for shared and automatic investigations. No input box | Own private work, plus shared and automatic work | All investigations | All investigations |
-| Workflows | Hidden | Follow reviewed workflows, and write drafts | Also review and archive | Same as admin |
+| Workflows (runbook library) | Read reviewed runbooks: steps, commands, project, and servers. Can't follow or write them | Follow reviewed runbooks, and write drafts | Also review and archive | Same as admin |
 | Logs | Hidden | Own and shared investigations and prompts, and state changes | All, plus alerts sent and the audit trail | Same as admin |
 | Connections, AI settings | Hidden | Hidden. Can choose a model, without seeing its address | Full | Full |
 | Organization | Hidden | Hidden | Usage and members | Also security policies and single sign-on |

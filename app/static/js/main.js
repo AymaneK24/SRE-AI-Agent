@@ -16,7 +16,7 @@ const APP_ROUTES = {
   overview: ['viewer', mountOverview],
   projects: ['viewer', mountProjects],
   investigate: ['viewer', (container, params) => (can('engineer') ? mountInvestigate(container, params) : mountResults(container, params))],
-  workflows: ['engineer', mountWorkflows],
+  workflows: ['viewer', mountWorkflows],
   logs: ['engineer', mountLogs],
   connections: ['admin', mountConnections],
   organization: ['admin', mountOrganization],

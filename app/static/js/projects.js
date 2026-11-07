@@ -78,6 +78,7 @@ function dailyChart(daily) {
 
 export function mount(container, params) {
   let disposed = false;
+  let notesTimer = null;
   let days = 30;
   const body = h('div');
   clear(container, h('div', { class: 'page' }, body));
@@ -197,28 +198,32 @@ export function mount(container, params) {
     const reportStatus = h('div');
     const covered = period.covered_days < period.days * 0.9;
 
+    // With AI notes, the report is saved at once and its PDF becomes available only when the notes are in.
     async function generate() {
-      clear(reportStatus, h('p', { class: 'form-result muted', role: 'status' }, includeAi.checked ? 'Saving the report and asking the AI model for notes. On a CPU, this can take several minutes.' : 'Saving the report'));
+      clear(reportStatus, h('p', { class: 'form-result muted', role: 'status' }, 'Saving the report'));
       try {
-        const report = await api(`/api/projects/${projectId}/reports`, { method: 'POST', body: { days } });
-        if (includeAi.checked) {
-          try {
-            await api(`/api/projects/${projectId}/reports/${report.id}/notes`, { method: 'POST', body: {} });
-          } catch (error) {
-            toast(`Report saved without AI notes. ${error.message}`);
-          }
-        }
+        const report = await api(`/api/projects/${projectId}/reports`, { method: 'POST', body: { days, ai_notes: includeAi.checked } });
+        if (report.notes_status === 'failed') toast(`Report saved without AI notes. ${report.notes_error}`);
         showProject(projectId);
       } catch (error) { clear(reportStatus, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     }
 
     async function addNotes(report) {
-      toast('Asking the AI model for notes');
       try {
         await api(`/api/projects/${projectId}/reports/${report.id}/notes`, { method: 'POST', body: {} });
         showProject(projectId);
       } catch (error) { toast(error.message); }
     }
+
+    clearTimeout(notesTimer);
+    if (reports.some((report) => report.notes_status === 'pending')) {
+      notesTimer = setTimeout(() => { if (!disposed) showProject(projectId); }, 4000);
+    }
+    const notesCell = (report) => {
+      if (report.notes_status === 'pending') return h('span', { class: 'badge neutral' }, 'Writing AI notes');
+      if (report.notes_status === 'failed') return h('span', { class: 'small', title: report.notes_error }, h('span', { class: 'badge warning' }, 'Notes failed'), ' ', h('span', { class: 'muted' }, report.notes_error));
+      return report.ai_model ? `${report.ai_model}${report.ai_cost_usd ? `, ${usd(report.ai_cost_usd)}` : ''}` : h('span', { class: 'muted' }, 'None');
+    };
 
     async function removeReport(report) {
       await api(`/api/projects/${projectId}/reports/${report.id}`, { method: 'DELETE' });
@@ -265,12 +270,14 @@ export function mount(container, params) {
           reports.map((report) => h('tr', {},
             h('td', { style: 'white-space:nowrap' }, dateTime(report.created_at), report.created_by ? h('div', { class: 'small muted' }, report.created_by) : null),
             h('td', { class: 'num' }, `${report.days} days`), h('td', { class: 'num' }, report.summary.occurrences),
-            can('engineer') ? h('td', {}, report.ai_model ? `${report.ai_model}${report.ai_cost_usd ? `, ${usd(report.ai_cost_usd)}` : ''}` : h('span', { class: 'muted' }, 'None')) : null,
+            can('engineer') ? h('td', {}, notesCell(report)) : null,
             can('engineer') ? h('td', {}, report.shared ? 'Shared' : h('span', { class: 'muted' }, 'Not shared')) : null,
             h('td', {}, h('span', { class: 'row-buttons' },
-              h('a', { class: 'button compact primary', href: `/api/projects/${projectId}/reports/${report.id}/pdf`, download: '' }, 'Download PDF'),
+              report.notes_status === 'pending'
+                ? h('span', { class: 'small muted', role: 'status' }, 'The PDF is ready when the notes are')
+                : h('a', { class: 'button compact primary', href: `/api/projects/${projectId}/reports/${report.id}/pdf`, download: '' }, 'Download PDF'),
               can('engineer') ? h('button', { class: 'button compact', type: 'button', onClick: () => shareReport(report, !report.shared) }, report.shared ? 'Stop sharing' : 'Share') : null,
-              can('engineer') && !report.ai_model ? h('button', { class: 'button compact', type: 'button', onClick: () => addNotes(report) }, 'Add AI notes') : null,
+              can('engineer') && !report.ai_model && report.notes_status !== 'pending' ? h('button', { class: 'button compact', type: 'button', onClick: () => addNotes(report) }, report.notes_status === 'failed' ? 'Try AI notes again' : 'Add AI notes') : null,
               can('engineer') ? h('button', { class: 'button compact', type: 'button', onClick: () => removeReport(report) }, 'Delete') : null))))))
           : can('engineer') ? null : h('p', { class: 'empty' }, 'No reports have been shared yet.')),
 
@@ -327,5 +334,5 @@ export function mount(container, params) {
   }
 
   (params.id ? showProject(Number(params.id)) : showList()).catch((error) => clear(body, h('p', { class: 'error-note' }, error.message)));
-  return () => { disposed = true; };
+  return () => { disposed = true; clearTimeout(notesTimer); };
 }

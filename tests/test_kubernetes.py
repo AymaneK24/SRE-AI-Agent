@@ -445,3 +445,57 @@ async def test_projects_can_cover_kubernetes_namespaces(console, kube_only):
     assert listed["Shop"]["namespaces"] == ["shop"] and listed["Shop"]["health"] == "problems"
     counts = engine.context["integrations"]["kubernetes"]["counts"]
     assert counts["pods"] == 1 and counts["pods_running"] == 0 and counts["deployments"] == 1 and counts["nodes_ready"] == 1
+
+
+# Nov 7, evening ----------------------------------------------------------------------
+async def test_saved_ca_is_summarised_not_shown(console, kube, tmp_path):
+    server_tls, ca_pem = _tls_material(tmp_path)
+    client = await console.company("CaCo", "o@ca.example")
+    body = {"kind": "kubernetes", "name": "k", "config": {"url": kube, "ca_cert": ca_pem, "tls_server_name": "kubernetes.docker.internal"}, "secrets": {"token": TOKEN}}
+    saved = (await client.post("/api/integrations", json=body)).json()
+    assert "ca_cert" not in saved["config"] and "BEGIN CERTIFICATE" not in json.dumps(saved)
+    assert saved["config"]["ca_info"]["subject"] == "CN=test-kubernetes-ca" and saved["config"]["ca_info"]["expires"]
+    again = (await client.post("/api/integrations", json={**body, "config": {"url": kube, "tls_server_name": "kubernetes.docker.internal"}})).json()
+    assert again["config"]["ca_info"]["subject"] == "CN=test-kubernetes-ca", "saving without pasting it again keeps the CA"
+    removed = (await client.post("/api/integrations", json={**body, "config": {"url": kube, "remove_ca": True}})).json()
+    assert removed["config"]["ca_info"] is None
+    listed = (await client.get("/api/integrations")).json()
+    assert "BEGIN CERTIFICATE" not in json.dumps(listed)
+
+
+async def test_watched_lists_namespaces(console, kube_only):
+    client, org_id, engine = kube_only
+    namespaces = engine.context["integrations"]["kubernetes"]["namespaces"]
+    assert namespaces == [{"name": "shop", "pods": 1, "ready": 0, "workloads": 1, "problems": 1}]
+
+
+async def test_runbook_library(console, kube_only):
+    client, org_id, engine = kube_only
+    project = (await client.post("/api/projects", json={"name": "Shop", "namespaces": ["shop"]})).json()
+    steps = [{"title": "Check the database Service", "command": "kubectl -n shop get endpoints postgres", "risk": "none"},
+             {"title": "Restart the database", "command": "kubectl -n shop rollout restart statefulset/postgres", "risk": "medium", "undo": "Nothing to undo"}]
+    bad = await client.post("/api/workflows", json={"name": "Bad", "steps": steps, "project_id": 99999})
+    assert bad.status_code == 422
+    created = await client.post("/api/workflows", json={"name": "Payment can't reach postgres", "steps": steps, "project_id": project["id"], "targets": ["payment", "db.internal"]})
+    assert created.status_code == 201, created.text
+    runbook = created.json()
+    assert runbook["project_id"] == project["id"] and runbook["targets"] == ["db.internal", "payment"]
+    matched = (await client.get("/api/workflows/match", params={"text": "payment"})).json()
+    assert [item["id"] for item in matched] == [runbook["id"]], "a runbook written for a workload matches problems that name it"
+
+    await client.post("/api/org/members/invite", json={"email": "viewer@kube.example", "name": "Val Viewer", "role": "viewer"})
+    viewer = console.client()
+    assert (await viewer.post("/api/auth/accept-invite", json={"token": console.last_link_token("viewer@kube.example"), "name": "Val", "password": "Correct-horse-battery-staple-1"})).status_code == 200
+    before = (await viewer.get("/api/workflows")).json()
+    assert before and all(item["status"] == "approved" for item in before), "viewers see the reviewed built-in runbooks"
+    assert runbook["id"] not in [item["id"] for item in before], "viewers don't see drafts"
+    assert (await client.post(f"/api/workflows/{runbook['id']}/status", json={"status": "approved"})).status_code == 200
+    seen = {item["id"]: item for item in (await viewer.get("/api/workflows")).json()}
+    assert seen[runbook["id"]]["steps"][0]["command"].startswith("kubectl")
+    assert (await viewer.post("/api/workflows", json={"name": "Mine", "steps": steps})).status_code == 403, "viewers can read but not write"
+    assert (await viewer.post(f"/api/workflows/{runbook['id']}/runs", json={})).status_code == 403
+    assert (await viewer.get(f"/api/workflows/{runbook['id']}/runs")).status_code == 403
+
+    assert (await client.delete(f"/api/projects/{project['id']}")).status_code == 204
+    kept = {item["id"]: item for item in (await client.get("/api/workflows")).json()}
+    assert kept[runbook["id"]]["project_id"] is None, "deleting a project keeps its runbooks"

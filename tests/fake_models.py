@@ -98,6 +98,8 @@ class Handler(BaseHTTPRequestHandler):
         if body["model"].startswith(("careless", "careful")):
             self._replay(body, system, used_tool)
             return
+        if body["model"].startswith("slow"):
+            time.sleep(1.5)  # Like a model on a CPU: long enough for a test to see work in progress.
         if body["model"].startswith("stubborn"):
             self._stubborn(body)
             return

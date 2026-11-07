@@ -61,4 +61,10 @@ class LokiClient:
         for item in data.get("result", []):
             rows.append({"job": item.get("metric", {}).get("job", "unknown"), "errors_5m": float(item.get("value", [0, 0])[1])})
         rows.sort(key=lambda row: -row["errors_5m"])
-        return {"selector": self.selector, "error_lines": rows[:10]}
+        # How much each stream writes, so a stream that went silent shows up too.
+        volume = await self._get("/loki/api/v1/query", {"query": f"sum by (job) (count_over_time({self.selector} [5m]))", "time": int(end * 1e9)})
+        errors = {row["job"]: row["errors_5m"] for row in rows}
+        streams = [{"job": item.get("metric", {}).get("job", "unknown"), "lines_5m": float(item.get("value", [0, 0])[1])} for item in volume.get("result", [])]
+        streams = [{**row, "errors_5m": errors.get(row["job"], 0.0)} for row in streams]
+        streams.sort(key=lambda row: (-row["errors_5m"], -row["lines_5m"]))
+        return {"selector": self.selector, "error_lines": rows[:10], "streams": streams[:100]}

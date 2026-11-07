@@ -252,8 +252,35 @@ def clean_integration_config(kind: str, config: dict[str, Any]) -> dict[str, Any
             "verify_tls": bool(config.get("verify_tls", True)), "ca_cert": ca_cert, "tls_server_name": server_name, "in_cluster": in_cluster}
 
 
+def certificate_info(pem: str) -> dict[str, Any] | None:
+    """Who a CA certificate names and when it expires, so the page can show it without the whole PEM block."""
+    if not pem:
+        return None
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+
+        cert = x509.load_pem_x509_certificate(pem.encode())
+        return {"subject": cert.subject.rfc4514_string()[:200], "expires": cert.not_valid_after_utc.isoformat().replace("+00:00", "Z"),
+                "sha256": cert.fingerprint(hashes.SHA256()).hex()[:16]}
+    except ValueError:
+        return {"subject": "Unreadable certificate", "expires": None, "sha256": ""}
+
+
 def public_integration(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in {**row, "config": json.loads(row["config"]), "has_secret": bool(row["secret_enc"]), "enabled": bool(row["enabled"])}.items() if key != "secret_enc"}
+    config = json.loads(row["config"])
+    # The page shows a saved CA as a short summary. The PEM block stays on the server.
+    ca_cert = config.pop("ca_cert", "")
+    if row["kind"] == "kubernetes":
+        config["ca_info"] = certificate_info(ca_cert)
+    return {key: value for key, value in {**row, "config": config, "has_secret": bool(row["secret_enc"]), "enabled": bool(row["enabled"])}.items() if key != "secret_enc"}
+
+
+def _keep_saved_ca(config: dict[str, Any], body_config: dict[str, Any], saved: dict[str, Any] | None) -> dict[str, Any]:
+    """Saving or testing without pasting the CA again keeps the saved one, unless the person removed it."""
+    if saved and saved["kind"] == "kubernetes" and not config.get("ca_cert") and not body_config.get("remove_ca"):
+        config["ca_cert"] = json.loads(saved["config"]).get("ca_cert", "")
+    return config
 
 
 @router.get("/k8s/namespaces")
@@ -279,7 +306,7 @@ async def test_integration(body: IntegrationTestBody, user: Admin, ctx: Ctx) -> 
     secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
     client = None
     try:
-        config = clean_integration_config(body.kind, body.config)
+        config = _keep_saved_ca(clean_integration_config(body.kind, body.config), body.config, saved)
         if config["url"]:
             await check_url(config["url"], ctx.config.target_policy)
         client = build_integration({"kind": body.kind, "config": config, "secret_enc": ctx.box.encrypt_json(secrets)}, ctx.box, ctx.config)
@@ -300,9 +327,10 @@ async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> di
     except BlockedTarget as error:
         raise HTTPException(422, str(error)) from error
     now = utcnow()
-    # Saving again without retyping the token keeps the saved one.
-    saved = await ctx.db.one("SELECT secret_enc FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
+    # Saving again without retyping the token or pasting the CA keeps the saved ones.
+    saved = await ctx.db.one("SELECT kind, config, secret_enc FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
     secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
+    config = _keep_saved_ca(config, body.config, saved)
     await ctx.db.execute("DELETE FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
     new_id = await ctx.db.insert(
         "INSERT INTO integrations(org_id, kind, name, config, secret_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

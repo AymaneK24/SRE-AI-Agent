@@ -128,7 +128,8 @@ async def test_sharing_gives_viewers_the_question_and_answer_only(console, team)
     body = result.json()
     assert body["exchanges"] == [{"question": "Why is checkout failing?", "answer": "The pool is exhausted.", "status": "complete", "asked_at": "now"}]
     assert set(body) == {"id", "title", "status", "root_cause_note", "updated_at", "exchanges"}
-    assert "secret-model" not in result.text and "99" not in result.text
+    # Not the model, its token count, or its cost. (Checked by field: a timestamp can contain any digits.)
+    assert "secret-model" not in result.text and "input_tokens" not in result.text and "cost" not in result.text
     assert [item["id"] for item in (await viewer.get("/api/results")).json()["items"]] == [cid]
     # Another engineer can read a shared investigation, but only its owner or an admin can change it.
     assert (await bob.get(f"/api/conversations/{cid}")).status_code == 200
@@ -237,7 +238,7 @@ async def test_viewer_cannot_query_metrics_or_read_settings(team):
     viewer = team["viewer"]
     assert (await viewer.post("/api/metrics/query_range", json={"query": "node_uname_info", "start": 1, "end": 2, "step": 1})).status_code == 403
     for path in ["/api/metrics/names", "/api/ai/settings", "/api/sources", "/api/integrations", "/api/collectors", "/api/context/prompt-preview", "/api/events", "/api/changes",
-                 "/api/org/retention", "/api/org/members", "/api/org/usage", "/api/org/channels", "/api/audit", "/api/conversations", "/api/llm-calls", "/api/workflows", "/api/workflows/match"]:
+                 "/api/org/retention", "/api/org/members", "/api/org/usage", "/api/org/channels", "/api/audit", "/api/conversations", "/api/llm-calls"]:
         assert (await viewer.get(path)).status_code == 403, path
 
 

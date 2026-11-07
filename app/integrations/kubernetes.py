@@ -315,6 +315,16 @@ def summary_from_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
         "deployments": len(deployments), "deployments_available": sum(1 for row in deployments if row["ready"] >= row["desired"]),
         "nodes": len(nodes), "nodes_ready": sum(1 for node in nodes if node["ready"]),
     }
+    per_namespace: dict[str, dict[str, Any]] = {}
+    for pod in pods:
+        row = per_namespace.setdefault(pod["namespace"], {"name": pod["namespace"], "pods": 0, "ready": 0, "workloads": set()})
+        row["pods"] += 1
+        row["ready"] += int(pod["phase"] == "Running" and pod["ready"])
+        row["workloads"].add(f"{pod['workload_kind']}/{pod['workload']}")
+    for deployment in deployments:
+        row = per_namespace.setdefault(deployment["namespace"], {"name": deployment["namespace"], "pods": 0, "ready": 0, "workloads": set()})
+        row["workloads"].add(f"Deployment/{deployment['name']}")
+    namespaces = [{**row, "workloads": len(row["workloads"])} for row in sorted(per_namespace.values(), key=lambda item: item["name"])]
     return {"unhealthy_pods": unhealthy[:10], "warning_events": snap["events"][:10], "deployments_below_desired": below,
             "nodes_not_ready": [node for node in nodes if not node["ready"] or node["pressure"]][:10],
-            "forbidden": snap["forbidden"], "counts": counts}
+            "forbidden": snap["forbidden"], "counts": counts, "namespaces": namespaces[:100]}
