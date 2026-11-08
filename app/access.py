@@ -42,6 +42,12 @@ def viewer_context(context: dict[str, Any]) -> dict[str, Any]:
         "signals": _viewer_golden(context.get("signals", [])),
         "sources": [{"id": source.get("id"), "name": source.get("name"), "status": source.get("status")} for source in context.get("sources", [])],
         "events": [viewer_event(event) for event in context.get("events", [])],
+        # Viewers see that a workload is failing, never its logs, pods, or diagnosis evidence.
+        "problems": [{"kind": item.get("kind"), "severity": item.get("severity"), "title": mask_addresses(item.get("title"))}
+                     for item in context.get("problems", []) if item.get("kind") == "k8s"],
+        "coverage": {key: (context.get("coverage") or {}).get(key) for key in ("has_metrics", "has_logs", "has_kubernetes")},
+        # Counts only: how many pods and nodes are healthy, never their names.
+        "cluster_counts": ((context.get("integrations") or {}).get("kubernetes") or {}).get("counts"),
     }
 
 

@@ -17,21 +17,24 @@ The script asks a few questions, writes `.env` with new secrets, and prints your
 
 Open the address it printed, and sign in with your email and that password. You must choose a new password. Then:
 
-1. **Connections:** add your metric sources and choose an AI model.
+1. **Connections:** add what you have: metric sources, Loki, a Kubernetes cluster. Any one of them is enough. Then choose an AI model.
 2. **Projects:** group sources by system.
 3. **Organization > Members:** invite your team.
 
-**The AI model must be reachable too.** Use an Ollama server on your network, or allow outbound access to `api.anthropic.com` for Claude. Inside Docker, use `host.docker.internal` for something on the same machine, not `localhost`.
+**The AI model must be reachable too.** Use an Ollama server on your network, or allow outbound access to `api.anthropic.com` for Claude or `generativelanguage.googleapis.com` for Gemini. Inside Docker, use `host.docker.internal` for something on the same machine, not `localhost`.
 
 ## Choose a certificate
 
 The script asks which one fits your network:
 
-| Choice | Use it when | What you do |
-|---|---|---|
-| Let's Encrypt | The server has a public host name | Open ports 80 and 443 to the internet |
-| Your company's certificate | You have an internal host name and a company certificate authority | Put `cert.pem` and `key.pem` in `deploy/certs` |
-| Made by this server | You only have an IP address, or are trying it out | Accept the browser warning on first visit. Traffic is encrypted, but browsers can't confirm whose server it is |
+We recommend a private server, reached over VPN or your company network, with one of the first three choices.
+
+| Choice | Server | Use it when | What you do |
+|---|---|---|---|
+| 1. Your company's certificate (recommended) | Private | You have an internal host name and a company certificate authority | Put `cert.pem` and `key.pem` in `deploy/certs` |
+| 2. Made by this server | Private | You only have an IP address, or are trying it out | Accept the browser warning on first visit, or install Caddy's root certificate on each device |
+| 3. Let's Encrypt through Azure DNS | Private | You want a certificate browsers trust, with nothing open to the internet | Build `deploy/caddy-dns`, and give the VM's identity DNS Zone Contributor on a public Azure DNS zone |
+| 4. Let's Encrypt over the internet | Public | People must reach the console from anywhere | Open ports 80 and 443 to the internet |
 
 To change later, edit `RCC_CADDYFILE` in `.env`, then run `docker compose up -d`.
 
@@ -47,7 +50,7 @@ This server's own addresses, cloud metadata addresses, disguised IP addresses, a
 
 ## Run on Kubernetes
 
-`deploy/k8s` holds files for the app, PostgreSQL, and Caddy. Keep the app at one replica, because it holds live runs and monitoring in memory. Replace `ACR_NAME` and `IMAGE_TAG`, and create the `rcc-secrets` Secret and the `rcc-config` and `caddyfile` ConfigMaps first. Put `RCC_MODE=production`, `RCC_PUBLIC_URL`, `RCC_ALLOWED_HOSTS`, `RCC_ADMIN_EMAIL`, and `RCC_ADMIN_NAME` in the ConfigMap, and `RCC_ADMIN_PASSWORD`, `RCC_SECRET_KEY`, and `RCC_DATABASE_URL` in the Secret. Storage uses Azure's `managed-csi` class, so change it on another platform.
+`deploy/k8s` holds files for the app, PostgreSQL, Caddy, the read-only account (`reader-rbac.yaml`), and optional NetworkPolicies (`networkpolicy.yaml`). The **Deploy on AKS** page in the console's docs walks through every command. Keep the app at one replica, because it holds live runs and monitoring in memory. Replace `ACR_NAME` and `IMAGE_TAG`, and create the `rcc-secrets` Secret and the `rcc-config` and `caddyfile` ConfigMaps first. Put `RCC_MODE=production`, `RCC_PUBLIC_URL`, `RCC_ALLOWED_HOSTS`, `RCC_ADMIN_EMAIL`, and `RCC_ADMIN_NAME` in the ConfigMap, and `RCC_ADMIN_PASSWORD`, `RCC_SECRET_KEY`, `POSTGRES_PASSWORD`, and `RCC_DATABASE_URL` in the Secret. Storage uses Azure's `managed-csi` class, so change it on another platform.
 
 ## With no internet access on the server
 
@@ -131,7 +134,24 @@ curl -X POST "$RCC_CHANGES_URL" -H 'Content-Type: application/json' \
 | Azure Monitor | The **Monitoring Reader** role, plus **Log Analytics Reader** for logs |
 | Amazon Managed Prometheus | `aps:QueryMetrics`, `aps:GetSeries`, `aps:GetLabels`, and `aps:GetMetricMetadata` |
 | Google Managed Prometheus | **Monitoring Viewer** |
-| Kubernetes | A ServiceAccount token with a role limited to `get`, `list`, and `watch`. Don't include Secrets |
+| Kubernetes | A ServiceAccount token with the read-only role below. It never needs Secrets |
+
+### A read-only Kubernetes account
+
+The console reads pods and their logs, events, Deployments, Services, and nodes. It never reads Secrets or ConfigMap contents, and it has no code that writes to the cluster. `deploy/k8s/reader-rbac.yaml` creates the `rcc` namespace, a `rcc-reader` ServiceAccount, and a ClusterRole with only `get` and `list` on those resources:
+
+```bash
+kubectl apply -f deploy/k8s/reader-rbac.yaml
+kubectl -n rcc create token rcc-reader --duration=720h
+```
+
+Leaving out `nodes` is fine: node problems then aren't watched, and the console says so. Leaving out `pods/log` means no crash logs in investigations. `services` lets an investigation check whether a Service reaches any ready pod, which explains most "connection refused" errors.
+
+**Connecting to the cluster:**
+
+- **Console inside the cluster:** tick *The console runs inside this cluster*. It uses its own mounted service account, so there's no address or token to enter. Bind the role above to that service account.
+- **Console outside the cluster:** enter the API address and the token, and paste the cluster's CA certificate. In a kubeconfig it's `certificate-authority-data`, base64-decoded: `kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d`.
+- **Docker Desktop:** the API certificate names `kubernetes.docker.internal`, but a container reaches the host as `host.docker.internal`. Use `https://host.docker.internal:6443` as the address, paste the CA as above, and set **TLS server name** to `kubernetes.docker.internal`.
 
 ## What has and hasn't been tested
 
@@ -139,4 +159,4 @@ curl -X POST "$RCC_CHANGES_URL" -H 'Content-Type: application/json' \
 
 **Not tested:** the real `python:3.12-slim`, `postgres`, and `caddy` images, the full Compose stack running together, a Kubernetes cluster, Let's Encrypt, a company certificate, the no-internet steps, and real Gmail or Slack delivery. Do a trial install first.
 
-CloudWatch was tested with the real AWS SDK against a simulator. Azure Monitor, managed Prometheus sign-in, Kubernetes, and single sign-on were tested against fake servers. Try each with a real account first.
+CloudWatch was tested with the real AWS SDK against a simulator. Azure Monitor, managed Prometheus sign-in, Kubernetes (including a private CA and TLS server name), Gemini, and single sign-on were tested against fake servers that follow each API's documented format. Try each with a real account first.

@@ -81,6 +81,9 @@ class WorkflowBody(BaseModel):
     risk: Literal["low", "medium", "high"] = "medium"
     match_rules: dict[str, list[str]] = Field(default_factory=dict)
     steps: list[WorkflowStep] = Field(min_length=1, max_length=30)
+    # Where this runbook applies: a project, and the servers or workloads it was written for (host names, IPs, workload names).
+    project_id: int | None = None
+    targets: list[Label] = Field(default_factory=list, max_length=20)
 
 
 class WorkflowStatusBody(BaseModel):
@@ -184,7 +187,8 @@ async def update_member(member_id: int, body: MemberPatch, user: Admin, ctx: Ctx
 
 
 @router.delete("/org/members/{member_id}", status_code=204)
-async def remove_member(member_id: int, user: Admin, ctx: Ctx) -> Response:
+async def remove_member(member_id: int, user: Admin, ctx: Ctx, delete_investigations: bool = False) -> Response:
+    """Removes a person. With delete_investigations, also deletes their private investigations, for a deletion request."""
     target = await ctx.db.one("SELECT * FROM users WHERE id = ? AND org_id = ?", (member_id, user.org_id))
     if not target:
         raise HTTPException(404, "This member no longer exists.")
@@ -192,8 +196,19 @@ async def remove_member(member_id: int, user: Admin, ctx: Ctx) -> Response:
         raise HTTPException(409, "The platform administrator can't be removed.")
     if target["role"] == "owner" and (not user.can("owner") or not await _other_owners(ctx, user.org_id, member_id)):
         raise HTTPException(409, "An organization needs at least one active owner.")
+    deleted = 0
+    if delete_investigations:
+        private = await ctx.db.all(
+            "SELECT id FROM conversations WHERE org_id = ? AND owner_id = ? AND visibility = 'private' AND trigger = 'manual'", (user.org_id, member_id))
+        for row in private:
+            if ctx.investigations.active_run(row["id"]):
+                raise HTTPException(409, "One of their investigations is still running. Stop it first.")
+        for row in private:
+            await ctx.db.unindex(row["id"])
+            await ctx.db.execute("DELETE FROM conversations WHERE id = ? AND org_id = ?", (row["id"], user.org_id))
+        deleted = len(private)
     await ctx.db.execute("DELETE FROM users WHERE id = ? AND org_id = ?", (member_id, user.org_id))
-    await ctx.db.audit(user.org_id, "member_removed", f"user:{member_id}", {"email": target["email"]}, actor=user.actor)
+    await ctx.db.audit(user.org_id, "member_removed", f"user:{member_id}", {"email": target["email"], "private_investigations_deleted": deleted}, actor=user.actor)
     return Response(status_code=204)
 
 
@@ -322,9 +337,16 @@ async def _own_workflow(ctx: AppContext, org_id: int, workflow_id: int) -> dict[
     return row
 
 
+async def _check_project(ctx: AppContext, org_id: int, project_id: int | None) -> None:
+    if project_id is not None and not await ctx.db.one("SELECT id FROM projects WHERE id = ? AND org_id = ?", (project_id, org_id)):
+        raise HTTPException(422, "That project no longer exists.")
+
+
 @router.get("/workflows")
-async def list_workflows(user: Engineer, ctx: Ctx) -> list[dict[str, Any]]:
-    rows = await ctx.db.all("SELECT * FROM workflows WHERE org_id = ? AND status <> 'archived' ORDER BY status, name", (user.org_id,))
+async def list_workflows(user: User, ctx: Ctx) -> list[dict[str, Any]]:
+    # Viewers can study reviewed runbooks, but not drafts, and they can't follow or change them.
+    status_filter = "status <> 'archived'" if user.can("engineer") else "status = 'approved'"
+    rows = await ctx.db.all(f"SELECT * FROM workflows WHERE org_id = ? AND {status_filter} ORDER BY status, name", (user.org_id,))  # noqa: S608
     tally = await ctx.db.all("SELECT workflow_id, outcome, count(*) AS n FROM workflow_records WHERE org_id = ? GROUP BY workflow_id, outcome", (user.org_id,))
     stats: dict[int, dict[str, int]] = {}
     for item in tally:
@@ -333,16 +355,20 @@ async def list_workflows(user: Engineer, ctx: Ctx) -> list[dict[str, Any]]:
 
 
 @router.get("/workflows/match")
-async def match_workflows(user: Engineer, ctx: Ctx, text: str = "", alert: str = "", signal: str = "") -> list[dict[str, Any]]:
-    return await workflows_for(ctx.db, user.org_id, alert_names=[alert] if alert else [], signal_ids=[signal] if signal else [], text=text)
+async def match_workflows(user: User, ctx: Ctx, text: str = "", alert: str = "", signal: str = "") -> list[dict[str, Any]]:
+    found = await workflows_for(ctx.db, user.org_id, alert_names=[alert] if alert else [], signal_ids=[signal] if signal else [], text=text)
+    return found if user.can("engineer") else [item for item in found if item["status"] == "approved"]
 
 
 @router.post("/workflows", status_code=201)
 async def create_workflow(body: WorkflowBody, user: Engineer, ctx: Ctx) -> dict[str, Any]:
+    await _check_project(ctx, user.org_id, body.project_id)
     now = utcnow()
     workflow_id = await ctx.db.insert(
-        "INSERT INTO workflows(org_id, name, summary, match_rules, risk, steps, status, origin, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'draft', 'manual', ?, ?, ?)",
-        (user.org_id, body.name, body.summary, json.dumps(body.match_rules), body.risk, json.dumps([step.model_dump() for step in body.steps]), user.actor, now, now),
+        "INSERT INTO workflows(org_id, name, summary, match_rules, risk, steps, status, origin, created_by, created_at, updated_at, project_id, targets) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'draft', 'manual', ?, ?, ?, ?, ?)",
+        (user.org_id, body.name, body.summary, json.dumps(body.match_rules), body.risk, json.dumps([step.model_dump() for step in body.steps]), user.actor, now, now,
+         body.project_id, json.dumps(sorted(set(body.targets)))),
     )
     await ctx.db.audit(user.org_id, "workflow_created", f"workflow:{workflow_id}", {"name": body.name}, actor=user.actor)
     return public_workflow(await _own_workflow(ctx, user.org_id, workflow_id))
@@ -351,10 +377,13 @@ async def create_workflow(body: WorkflowBody, user: Engineer, ctx: Ctx) -> dict[
 @router.put("/workflows/{workflow_id}")
 async def update_workflow(workflow_id: int, body: WorkflowBody, user: Engineer, ctx: Ctx) -> dict[str, Any]:
     await _own_workflow(ctx, user.org_id, workflow_id)
+    await _check_project(ctx, user.org_id, body.project_id)
     # Any edit returns the workflow to draft, so changed steps are reviewed again.
     await ctx.db.execute(
-        "UPDATE workflows SET name = ?, summary = ?, match_rules = ?, risk = ?, steps = ?, status = 'draft', reviewed_by = '', updated_at = ? WHERE id = ? AND org_id = ?",
-        (body.name, body.summary, json.dumps(body.match_rules), body.risk, json.dumps([step.model_dump() for step in body.steps]), utcnow(), workflow_id, user.org_id),
+        "UPDATE workflows SET name = ?, summary = ?, match_rules = ?, risk = ?, steps = ?, status = 'draft', reviewed_by = '', updated_at = ?, project_id = ?, targets = ? "
+        "WHERE id = ? AND org_id = ?",
+        (body.name, body.summary, json.dumps(body.match_rules), body.risk, json.dumps([step.model_dump() for step in body.steps]), utcnow(),
+         body.project_id, json.dumps(sorted(set(body.targets))), workflow_id, user.org_id),
     )
     await ctx.db.audit(user.org_id, "workflow_updated", f"workflow:{workflow_id}", {"name": body.name}, actor=user.actor)
     return public_workflow(await _own_workflow(ctx, user.org_id, workflow_id))

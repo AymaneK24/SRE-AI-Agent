@@ -47,68 +47,87 @@ def _alert_lines(alerts: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _problem_lines(index: int, problem: dict[str, Any]) -> list[str]:
+    detail = problem.get("detail") or {}
+    lines = [f"{index}. [{problem['severity']}] {problem['title']}"]
+    if problem["kind"] == "k8s":
+        facts = detail.get("facts") or {}
+        bits = []
+        if detail.get("pods"):
+            bits.append(f"pods: {', '.join(detail['pods'][:5])}")
+        if facts.get("container"):
+            bits.append(f"container: {facts['container']}")
+        if facts.get("image"):
+            bits.append(f"image: {facts['image']}")
+        if facts.get("limits"):
+            bits.append("limits: " + ", ".join(f"{key}={value}" for key, value in facts["limits"].items()))
+        if facts.get("message"):
+            bits.append(f"message: {facts['message']}")
+        if bits:
+            lines.append("   " + "; ".join(bits))
+        diagnosis = detail.get("diagnosis")
+        if diagnosis:
+            lines.append(f"   Diagnosis (computed from cluster state, not by a model): {diagnosis['cause']}")
+            for item in diagnosis.get("evidence", [])[:4]:
+                lines.append(f"     - {item}")
+        logs = detail.get("logs")
+        if logs and logs.get("lines"):
+            lines.append(f"   Last {len(logs['lines'])} log lines of {logs.get('which', 'the container')} ({logs.get('pod', '')}):")
+            lines.append("   <untrusted_logs>")
+            lines += [f"     {line}" for line in logs["lines"]]
+            lines.append("   </untrusted_logs>")
+        elif logs and logs.get("note"):
+            lines.append(f"   Logs: {logs['note']}")
+    elif problem["kind"] == "alert" and detail.get("summary"):
+        lines.append(f"   summary: {detail['summary']}")
+    elif problem["kind"] == "target" and detail.get("error"):
+        lines.append(f"   error: {detail['error']}")
+    elif problem["kind"] == "signal":
+        if detail.get("value") is not None:
+            usual = f", usual {format_value(detail.get('baseline'), detail.get('unit', ''))}" if detail.get("baseline") is not None else ""
+            lines.append(f"   value {format_value(detail['value'], detail.get('unit', ''))}{usual}. PromQL: {detail.get('query', '')}")
+    return lines
+
+
 def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
-    """Render most important facts first and say explicitly when something was left out."""
+    """Render what is broken first, then the evidence around it, then the background, and say when something was left out."""
     health = context.get("health", {})
     status = health.get("status", "unknown")
+    coverage = context.get("coverage", {})
+    has_metrics = coverage.get("has_metrics", bool(context.get("sources")))
+    integrations = context.get("integrations", {})
     sections: list[list[str]] = []
     header = [
         f"Context version {context.get('version')} as of {context.get('as_of') or 'never'} ({_age(context.get('as_of'))}).",
-        f"Overall source health: {status}.",
+        f"Overall connection health: {status}.",
     ]
     for source in context.get("sources", []):
-        line = f"Source {source.get('id')} \"{source.get('name')}\": {source.get('kind')} {source.get('version') or ''} at {source.get('url') or 'unknown'}, query language {source.get('query_language') or 'unknown'}, status {source.get('status')}."
+        line = f"Metric source {source.get('id')} \"{source.get('name')}\": {source.get('kind')} {source.get('version') or ''} at {source.get('url') or 'unknown'}, query language {source.get('query_language') or 'unknown'}, status {source.get('status')}."
         if source.get("logs_language"):
             line += f" Logs language: {source['logs_language']}."
         header.append(line)
         if source.get("stale"):
             header.append(f"WARNING: source \"{source.get('name')}\" is not answering ({source.get('error')}). Its data below is from the last good poll at {source.get('last_ok')}.")
+    for kind, label in (("loki", "Log store: Loki, query language LogQL"), ("kubernetes", "Kubernetes cluster")):
+        item = integrations.get(kind)
+        if item:
+            state = "ok" if item.get("status") == "ok" else f"not answering: {item.get('error')}"
+            header.append(f"{label} \"{item.get('name', kind)}\", status {state}.")
     if context.get("stale") and not context.get("sources"):
         header.append(f"WARNING: the source is not answering. Everything below is from the last good poll at {health.get('last_ok')}.")
-    if health.get("error"):
-        header.append(f"Source error: {health['error']}")
     sections.append(header)
 
     if status == "not_configured":
-        sections.append(["No metric source is connected, so no metrics are available."])
+        sections.append(["Nothing is connected: no metric source, log store, or Kubernetes cluster, so there is no live data."])
         return "\n".join(sections[0] + sections[1])
 
-    alerts = context.get("alerts", {})
-    firing = alerts.get("firing", [])
-    sections.append([f"FIRING ALERTS ({len(firing)}):"] + (_alert_lines(firing) or ["- none"]))
-    pending = alerts.get("pending", [])
-    if pending:
-        sections.append([f"PENDING ALERTS ({len(pending)}):"] + _alert_lines(pending))
-
-    targets = context.get("targets", {})
-    target_lines = [
-        f"TARGETS: {targets.get('up', 0)} up, {targets.get('down', 0)} down, {targets.get('unknown', 0)} unknown, of {targets.get('total', 0)}."
-    ]
-    for target in targets.get("down_list", []):
-        target_lines.append(
-            f"- DOWN {target['instance']} job={target['job']} since {target.get('since')} error: {target.get('error') or 'none reported'}"
-        )
-    sections.append(target_lines)
-
-    rules = context.get("rules", {})
-    rule_lines = [
-        f"RULES: {rules.get('alerting', 0)} alerting and {rules.get('recording', 0)} recording, {len(rules.get('failing', []))} failing."
-    ]
-    rule_lines += [f"- FAILING {rule['name']} in {rule['group']}: {rule['error']}" for rule in rules.get("failing", [])]
-    sections.append(rule_lines)
-
-    anomalies = context.get("anomalies", [])
-    anomaly_lines = [f"SIGNALS OUT OF NORMAL RANGE ({len(anomalies)}):"]
-    for item in anomalies:
-        reason = "over its limit" if item["kind"] == "over_limit" else "unusual compared with its last hour"
-        baseline = f", usual {format_value(item.get('baseline'), item['unit'])}" if item.get("baseline") is not None else ""
-        score = f", robust z-score {item['z']}" if item.get("z") is not None else ""
-        anomaly_lines.append(
-            f"- {item['title']} [{label_text(item['labels'])}] = {format_value(item['value'], item['unit'])}{baseline}{score}; {reason}. PromQL: {item['query']}"
-        )
-    if not anomalies:
-        anomaly_lines.append("- none")
-    sections.append(anomaly_lines)
+    problems = context.get("problems", [])
+    problem_lines = [f"PROBLEMS RIGHT NOW ({len(problems)}), worst first:"]
+    for index, problem in enumerate(problems, start=1):
+        problem_lines += _problem_lines(index, problem)
+    if not problems:
+        problem_lines.append("- none detected by the console. That doesn't prove the system is healthy: check what the user describes.")
+    sections.append(problem_lines)
 
     changes = context.get("changes", [])
     if changes:
@@ -117,7 +136,6 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
             + [f"- {change['ts']} [{change['origin']}] {change.get('service') or ''} {change['title']}" for change in changes]
         )
 
-    integrations = context.get("integrations", {})
     loki = integrations.get("loki")
     if loki:
         if loki.get("status") == "ok":
@@ -126,58 +144,98 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
                             + ([f"- job={row['job']}: {row['errors_5m']:.0f} lines" for row in rows] or ["- none"]))
         else:
             sections.append([f"LOGS: Loki query failed: {loki.get('error')}"])
+
     kubernetes = integrations.get("kubernetes")
     if kubernetes:
         if kubernetes.get("status") == "ok":
-            lines = ["KUBERNETES:"]
+            lines = ["KUBERNETES DETAIL:"]
             lines += [f"- Pod {row['namespace']}/{row['pod']}: {row['phase']}, {row['restarts']} restarts, {', '.join(row['reasons']) or 'no reason given'}" for row in kubernetes.get("unhealthy_pods", [])]
             lines += [f"- Deployment {row['namespace']}/{row['deployment']}: {row['ready']} of {row['desired']} ready, revision {row['revision']}, images {', '.join(row['images'])}" for row in kubernetes.get("deployments_below_desired", [])]
             lines += [f"- Warning {row['last_seen']} {row['object']}: {row['reason']}: {row['message']}" for row in kubernetes.get("warning_events", [])]
+            if kubernetes.get("forbidden"):
+                lines.append(f"- This token can't list: {', '.join(kubernetes['forbidden'])}. Problems in those kinds can't be seen.")
             if len(lines) == 1:
                 lines.append("- no unhealthy pods, warning events, or under-replicated deployments")
             sections.append(lines)
         else:
-            sections.append([f"KUBERNETES: query failed: {kubernetes.get('error')}"])
+            sections.append([f"KUBERNETES: the cluster didn't answer: {kubernetes.get('error')}"])
+
+    if has_metrics:
+        alerts = context.get("alerts", {})
+        firing = alerts.get("firing", [])
+        pending = alerts.get("pending", [])
+        targets = context.get("targets", {})
+        rules = context.get("rules", {})
+        anomalies = context.get("anomalies", [])
+        quiet = []
+        if firing:
+            sections.append([f"FIRING ALERTS ({len(firing)}):"] + _alert_lines(firing))
+        else:
+            quiet.append("FIRING ALERTS: none.")
+        if pending:
+            sections.append([f"PENDING ALERTS ({len(pending)}):"] + _alert_lines(pending))
+        target_line = f"TARGETS: {targets.get('up', 0)} up, {targets.get('down', 0)} down, {targets.get('unknown', 0)} unknown, of {targets.get('total', 0)}."
+        if targets.get("down_list"):
+            sections.append([target_line] + [
+                f"- DOWN {target['instance']} job={target['job']} since {target.get('since')} error: {target.get('error') or 'none reported'}"
+                for target in targets["down_list"]])
+        else:
+            quiet.append(target_line)
+        failing = rules.get("failing", [])
+        if failing:
+            sections.append([f"RULES: {len(failing)} failing."] + [f"- FAILING {rule['name']} in {rule['group']}: {rule['error']}" for rule in failing])
+        if anomalies:
+            anomaly_lines = [f"SIGNALS OUT OF NORMAL RANGE ({len(anomalies)}):"]
+            for item in anomalies:
+                reason = "over its limit" if item["kind"] == "over_limit" else "unusual compared with its last hour"
+                baseline = f", usual {format_value(item.get('baseline'), item['unit'])}" if item.get("baseline") is not None else ""
+                score = f", robust z-score {item['z']}" if item.get("z") is not None else ""
+                anomaly_lines.append(
+                    f"- {item['title']} [{label_text(item['labels'])}] = {format_value(item['value'], item['unit'])}{baseline}{score}; {reason}. PromQL: {item['query']}"
+                )
+            sections.append(anomaly_lines)
+        else:
+            quiet.append("SIGNALS OUT OF RANGE: none.")
+        if quiet:
+            sections.append([" ".join(quiet)])
 
     events = context.get("events", [])
     if events:
         sections.append(
-            [f"RECENT CHANGES, newest first ({len(events)}):"]
+            [f"RECENT EVENTS, newest first ({len(events)}):"]
             + [f"- {event['ts']} [{event['severity']}] {event['title']}" for event in events]
         )
 
-    coverage = context.get("coverage", {})
     missing = coverage.get("missing", [])
-    absent = ["traces"]
-    if not coverage.get("has_logs"):
-        absent.append("logs")
+    available = [name for name, present in (("metrics", has_metrics), ("logs", coverage.get("has_logs")), ("Kubernetes", coverage.get("has_kubernetes"))) if present]
+    absent = [name for name, present in (("metrics", has_metrics), ("logs", coverage.get("has_logs")), ("the Kubernetes API", coverage.get("has_kubernetes"))) if not present]
+    absent.append("traces")
     if not coverage.get("has_changes"):
         absent.append("recorded deployments or changes")
-    if not coverage.get("has_kubernetes"):
-        absent.append("the Kubernetes API")
-    coverage_lines = [
-        f"DATA COVERAGE: {coverage.get('metric_count', 0)} metric names exist. Not available here: {', '.join(absent)}."
-    ]
+    coverage_lines = [f"DATA COVERAGE: available: {', '.join(available) or 'nothing'}. Not available here: {', '.join(absent)}."]
+    if has_metrics:
+        coverage_lines.append(f"{coverage.get('metric_count', 0)} metric names exist.")
     if missing:
         coverage_lines.append("Not found on this server: " + ", ".join(missing) + ".")
     sections.append(coverage_lines)
 
-    signal_lines = ["CURRENT SIGNALS:"]
-    for signal in context.get("signals", []):
-        if signal.get("error"):
-            signal_lines.append(f"- {signal['title']}: query failed: {signal['error']}")
-            continue
-        if not signal.get("series"):
-            continue
-        extra = signal.get("total_series", 0) - len(signal["series"])
-        values = "; ".join(
-            f"{label_text(row['labels'])} = {format_value(row['value'], signal['unit'])}"
-            + (f" (usual {format_value(row['baseline'], signal['unit'])})" if row.get("baseline") is not None else "")
-            for row in signal["series"]
-        )
-        suffix = f"; plus {extra} more series" if extra > 0 else ""
-        signal_lines.append(f"- {signal['title']}: {values}{suffix}. PromQL: {signal['query']}")
-    sections.append(signal_lines)
+    if has_metrics:
+        signal_lines = ["CURRENT SIGNALS:"]
+        for signal in context.get("signals", []):
+            if signal.get("error"):
+                signal_lines.append(f"- {signal['title']}: query failed: {signal['error']}")
+                continue
+            if not signal.get("series"):
+                continue
+            extra = signal.get("total_series", 0) - len(signal["series"])
+            values = "; ".join(
+                f"{label_text(row['labels'])} = {format_value(row['value'], signal['unit'])}"
+                + (f" (usual {format_value(row['baseline'], signal['unit'])})" if row.get("baseline") is not None else "")
+                for row in signal["series"]
+            )
+            suffix = f"; plus {extra} more series" if extra > 0 else ""
+            signal_lines.append(f"- {signal['title']}: {values}{suffix}. PromQL: {signal['query']}")
+        sections.append(signal_lines)
 
     return _fit(sections, max_chars)
 

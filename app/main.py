@@ -14,12 +14,12 @@ from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from . import ai_settings
-from .api import ai_routes, auth_routes, data_routes, hook_routes, org_routes, project_routes
+from .api import ai_routes, auth_routes, data_routes, docs_routes, hook_routes, org_routes, project_routes
 from .api.deps import AppContext
 from .auth import RateLimiter, ensure_default_admin, load_principal
 from .config import Config
@@ -166,8 +166,14 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(401, "Sign in to continue.")
         return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
-    for module in (auth_routes, data_routes, ai_routes, org_routes, project_routes, hook_routes):
+    for module in (auth_routes, data_routes, ai_routes, org_routes, project_routes, hook_routes, docs_routes):
         app.include_router(module.router)
+
+    # The documentation space has its own page. Its content comes from /api/docs, which needs a sign-in.
+    @app.get("/docs", include_in_schema=False)
+    @app.get("/docs/{slug}", include_in_schema=False)
+    async def docs_page(slug: str = "") -> FileResponse:
+        return FileResponse(STATIC_DIR / "docs.html", headers={"Cache-Control": "no-cache"})
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return app

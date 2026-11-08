@@ -1,4 +1,4 @@
-"""Model settings, investigations, prompt logs, and accuracy results."""
+"""Model settings, investigations, and prompt logs."""
 from __future__ import annotations
 
 import json
@@ -29,6 +29,7 @@ class OllamaSettings(BaseModel):
     num_ctx: int = Field(default=8192, ge=2048, le=1048576)
     use_tools: bool = False
     strict_answers: bool = False
+    small_model: Literal["auto", "on", "off"] = "auto"
 
 
 class ClaudeSettings(BaseModel):
@@ -39,11 +40,25 @@ class ClaudeSettings(BaseModel):
     strict_answers: bool = True
 
 
+class GeminiSettings(BaseModel):
+    model: str = Field(default="", max_length=200)
+    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    use_tools: bool = True
+    consent: bool = False
+    strict_answers: bool = True
+
+
+ProviderName = Literal["ollama", "claude", "gemini"]
+CloudProvider = Literal["claude", "gemini"]
+
+
 class AiSettingsBody(BaseModel):
-    provider: Literal["ollama", "claude"]
+    provider: ProviderName
     max_rounds: int = Field(default=6, ge=1, le=12)
     ollama: OllamaSettings
     claude: ClaudeSettings
+    # Optional, so a client that doesn't know about Gemini keeps the saved Gemini settings.
+    gemini: GeminiSettings | None = None
 
 
 class ApiKeyBody(BaseModel):
@@ -62,7 +77,7 @@ class ConversationPatch(BaseModel):
 
 class MessageBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
-    provider: Literal["ollama", "claude"] | None = None
+    provider: ProviderName | None = None
     model: str | None = Field(default=None, max_length=200)
     use_tools: bool | None = None
 
@@ -74,17 +89,22 @@ class ShareBody(BaseModel):
 @router.get("/ai/settings")
 async def get_ai_settings(user: Engineer, ctx: Ctx) -> dict[str, Any]:
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
-    try:
-        _, source = await ai_settings.claude_key(ctx.db, user.org_id, ctx.box, ctx.config)
-    except ValueError:
-        source = "unreadable"
-    configured = source in {"saved", "environment"}
+    sources = {}
+    for name in ai_settings.CLOUD_PROVIDERS:
+        try:
+            _, sources[name] = await ai_settings.cloud_key(ctx.db, user.org_id, ctx.box, ctx.config, name)
+        except ValueError:
+            sources[name] = "unreadable"
     if not user.can("admin"):
         # Engineers pick a model, and that's all they need: no server address or key details.
-        return {"provider": settings["provider"], "ollama": {"model": settings["ollama"]["model"], "use_tools": settings["ollama"]["use_tools"]},
-                "claude": {"model": settings["claude"]["model"], "use_tools": settings["claude"]["use_tools"], "consent": settings["claude"]["consent"], "key_configured": configured}}
-    settings["claude"]["key_source"] = source
-    settings["claude"]["key_configured"] = configured
+        output = {"provider": settings["provider"], "ollama": {"model": settings["ollama"]["model"], "use_tools": settings["ollama"]["use_tools"]}}
+        for name in ai_settings.CLOUD_PROVIDERS:
+            output[name] = {"model": settings[name]["model"], "use_tools": settings[name]["use_tools"], "consent": settings[name]["consent"],
+                            "key_configured": sources[name] in {"saved", "environment"}}
+        return output
+    for name in ai_settings.CLOUD_PROVIDERS:
+        settings[name]["key_source"] = sources[name]
+        settings[name]["key_configured"] = sources[name] in {"saved", "environment"}
     return settings
 
 
@@ -92,47 +112,55 @@ async def get_ai_settings(user: Engineer, ctx: Ctx) -> dict[str, Any]:
 async def put_ai_settings(body: AiSettingsBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
     previous = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
     payload = body.model_dump()
-    if payload["provider"] == "claude" and not payload["claude"]["consent"]:
-        raise HTTPException(422, "Allow sending telemetry to Anthropic before choosing Claude.")
+    if payload["gemini"] is None:
+        payload["gemini"] = {key: previous["gemini"][key] for key in GeminiSettings.model_fields}
+    if payload["provider"] in ai_settings.CLOUD_PROVIDERS and not payload[payload["provider"]]["consent"]:
+        company = ai_settings.CLOUD_PROVIDERS[payload["provider"]]
+        raise HTTPException(422, f"Allow sending telemetry to {company} before choosing {payload['provider'].capitalize()}.")
     if payload["ollama"]["url"] != ctx.config.default_ollama_url:
         try:
             await check_url(payload["ollama"]["url"], ctx.config.target_policy)
         except BlockedTarget as error:
             raise HTTPException(422, str(error)) from error
     await ctx.db.set_setting(user.org_id, "ai", payload)
-    if previous["claude"]["consent"] != payload["claude"]["consent"]:
-        await ctx.db.audit(user.org_id, "cloud_data_consent_changed", "claude", {"allowed": payload["claude"]["consent"]}, actor=user.actor)
+    for name in ai_settings.CLOUD_PROVIDERS:
+        if previous[name]["consent"] != payload[name]["consent"]:
+            await ctx.db.audit(user.org_id, "cloud_data_consent_changed", name, {"allowed": payload[name]["consent"]}, actor=user.actor)
     await ctx.db.audit(user.org_id, "ai_settings_changed", payload["provider"], {
         "provider": payload["provider"], "model": payload[payload["provider"]]["model"], "ollama_url": payload["ollama"]["url"]}, actor=user.actor)
     return await get_ai_settings(user, ctx)
 
 
-@router.put("/ai/claude-key", status_code=204)
-async def put_claude_key(body: ApiKeyBody, user: Admin, ctx: Ctx) -> Response:
-    await ctx.db.set_setting(user.org_id, ai_settings.CLAUDE_KEY_SETTING, ctx.box.encrypt(body.api_key.strip()))
-    await ctx.db.audit(user.org_id, "claude_key_saved", "claude", {}, actor=user.actor)
+KEY_SETTINGS = {"claude": ai_settings.CLAUDE_KEY_SETTING, "gemini": ai_settings.GEMINI_KEY_SETTING}
+
+
+@router.put("/ai/{name}-key", status_code=204)
+async def put_api_key(name: CloudProvider, body: ApiKeyBody, user: Admin, ctx: Ctx) -> Response:
+    await ctx.db.set_setting(user.org_id, KEY_SETTINGS[name], ctx.box.encrypt(body.api_key.strip()))
+    await ctx.db.audit(user.org_id, f"{name}_key_saved", name, {}, actor=user.actor)
     return Response(status_code=204)
 
 
-@router.delete("/ai/claude-key", status_code=204)
-async def delete_claude_key(user: Admin, ctx: Ctx) -> Response:
-    await ctx.db.set_setting(user.org_id, ai_settings.CLAUDE_KEY_SETTING, "")
-    await ctx.db.audit(user.org_id, "claude_key_removed", "claude", {}, actor=user.actor)
+@router.delete("/ai/{name}-key", status_code=204)
+async def delete_api_key(name: CloudProvider, user: Admin, ctx: Ctx) -> Response:
+    await ctx.db.set_setting(user.org_id, KEY_SETTINGS[name], "")
+    await ctx.db.audit(user.org_id, f"{name}_key_removed", name, {}, actor=user.actor)
     return Response(status_code=204)
 
 
 @router.get("/ai/providers/{name}/models")
-async def provider_models(name: Literal["ollama", "claude"], user: Engineer, ctx: Ctx, url: str | None = None) -> dict[str, Any]:
+async def provider_models(name: ProviderName, user: Engineer, ctx: Ctx, url: str | None = None) -> dict[str, Any]:
     # Trying a new address makes this server connect somewhere, so only admins can choose one.
     if url and not user.can("admin"):
         raise HTTPException(403, "This needs the admin role or higher.")
-    if name == "claude":
+    fallback = FALLBACK_MODELS if name == "claude" else []
+    if name in ai_settings.CLOUD_PROVIDERS:
         try:
-            key, _ = await ai_settings.claude_key(ctx.db, user.org_id, ctx.box, ctx.config)
+            key, _ = await ai_settings.cloud_key(ctx.db, user.org_id, ctx.box, ctx.config, name)
         except ValueError as error:
-            return {"ok": False, "models": FALLBACK_MODELS, "error": str(error)}
+            return {"ok": False, "models": fallback, "error": str(error)}
         if not key:
-            return {"ok": False, "models": FALLBACK_MODELS, "error": "Add an API key to load your available models."}
+            return {"ok": False, "models": fallback, "error": "Add an API key to load your available models."}
     try:
         provider, settings = await ai_settings.build_provider(ctx.db, user.org_id, ctx.box, ctx.config, name)
     except ProviderError as error:
@@ -148,7 +176,7 @@ async def provider_models(name: Literal["ollama", "claude"], user: Engineer, ctx
     except BlockedTarget as error:
         return {"ok": False, "models": [], "error": str(error)}
     except ProviderError as error:
-        return {"ok": False, "models": FALLBACK_MODELS if name == "claude" else [], "error": error.message}
+        return {"ok": False, "models": fallback, "error": error.message}
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
         return {"ok": False, "models": [], "error": "That address didn't answer like an Ollama server."}
     finally:

@@ -1,5 +1,5 @@
-// Projects: a group of metric sources with its status, recurring issues, patterns, and PDF reports.
-import { api, can, clear, closeDialog, confirmDialog, dateTime, dialogHead, h, live, openDialog, timeAgo, toast, usd } from './core.js';
+// Projects: metric sources and Kubernetes namespaces behind one system, with status, recurring issues, patterns, and PDF reports.
+import { api, can, clear, closeDialog, confirmDialog, dateTime, dialogHead, h, icon, live, openDialog, timeAgo, toast, usd } from './core.js';
 
 const HEALTH = {
   healthy: ['ok', 'Healthy'], attention: ['warning', 'Needs attention'], problems: ['critical', 'Problems now'],
@@ -9,6 +9,15 @@ const VERDICTS = { real: 'Real problem', false_positive: 'False alarm', expected
 const SOURCE_STATUS = { ok: ['ok', 'Answering'], unreachable: ['critical', 'Not answering'], paused: ['neutral', 'Paused'], waiting: ['neutral', 'Waiting'] };
 
 function badge([tone, text]) { return h('span', { class: `badge ${tone}` }, text); }
+
+function coverText(project) {
+  const parts = [];
+  if (project.sources?.length) parts.push(`${project.sources.length} ${project.sources.length === 1 ? 'source' : 'sources'}`);
+  const namespaces = project.namespaces || [];
+  if (namespaces.includes('*')) parts.push('all namespaces');
+  else if (namespaces.length) parts.push(namespaces.length <= 2 ? namespaces.join(', ') : `${namespaces.length} namespaces`);
+  return parts.join(' and ') || 'Nothing yet';
+}
 
 function duration(minutes) {
   if (minutes === null || minutes === undefined) return 'Not finished';
@@ -69,6 +78,7 @@ function dailyChart(daily) {
 
 export function mount(container, params) {
   let disposed = false;
+  let notesTimer = null;
   let days = 30;
   const body = h('div');
   clear(container, h('div', { class: 'page' }, body));
@@ -80,20 +90,45 @@ export function mount(container, params) {
       node: sources.length
         ? h('fieldset', { class: 'stack source-picker' }, h('legend', {}, 'Metric sources in this project'),
           boxes.map((box) => h('label', { class: 'check' }, box.input, box.name, h('span', { class: 'small muted' }, ` ${box.kind}`))))
-        : h('p', { class: 'notice' }, 'Connect a metric source first. You can add it to this project later.'),
+        : null,
       values: () => boxes.filter((box) => box.input.checked).map((box) => box.id),
+    };
+  }
+
+  // A project can cover a cluster's namespaces, so a team with only Kubernetes still gets status, incidents, and reports.
+  async function namespacesPicker(selected) {
+    const data = await api('/api/k8s/namespaces').catch(() => ({ connected: false, namespaces: [] }));
+    if (!data.connected) return { node: null, values: () => selected };
+    const known = [...new Set([...data.namespaces, ...selected.filter((name) => name !== '*')])].sort();
+    const all = h('input', { type: 'checkbox', checked: selected.includes('*') });
+    const boxes = known.map((name) => ({ name, input: h('input', { type: 'checkbox', checked: selected.includes(name) }) }));
+    const sync = () => boxes.forEach((box) => { box.input.disabled = all.checked; });
+    all.addEventListener('change', sync);
+    sync();
+    return {
+      node: h('fieldset', { class: 'stack source-picker' }, h('legend', {}, 'Kubernetes namespaces in this project'),
+        h('label', { class: 'check' }, all, 'All namespaces'),
+        boxes.map((box) => h('label', { class: 'check' }, box.input, box.name))),
+      values: () => (all.checked ? ['*'] : boxes.filter((box) => box.input.checked).map((box) => box.name)),
     };
   }
 
   async function editProject(project) {
     const picker = await sourcesPicker(project?.source_ids || []);
+    const nsPicker = await namespacesPicker(project?.namespaces || []);
     const name = h('input', { class: 'input', required: true, maxlength: 120, value: project?.name || '', placeholder: 'Payments platform' });
     const description = h('textarea', { class: 'input', rows: 2, maxlength: 1000, placeholder: 'What this project covers' });
     description.value = project?.description || '';
     const result = h('div');
     openDialog(h('form', { class: 'stack', onSubmit: async (event) => {
       event.preventDefault();
-      const payload = { name: name.value.trim(), description: description.value.trim(), source_ids: picker.values() };
+      const payload = { name: name.value.trim(), description: description.value.trim(), source_ids: picker.values(), namespaces: nsPicker.values() };
+      if (!payload.source_ids.length && !payload.namespaces.length) {
+        clear(result, h('p', { class: 'form-result bad', role: 'alert' }, picker.node || nsPicker.node
+          ? 'Choose at least one metric source or namespace, so the project has something to watch.'
+          : 'Connect a metric source or a Kubernetes cluster in Connections first.'));
+        return;
+      }
       try {
         const saved = project ? await api(`/api/projects/${project.id}`, { method: 'PUT', body: payload }) : await api('/api/projects', { method: 'POST', body: payload });
         closeDialog();
@@ -103,25 +138,27 @@ export function mount(container, params) {
       } catch (error) { clear(result, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     } }, dialogHead(project ? 'Edit project' : 'New project'),
     h('label', { class: 'field' }, h('span', {}, 'Name'), name), h('label', { class: 'field' }, h('span', {}, 'Description'), description),
-    picker.node, result, h('button', { class: 'button primary', type: 'submit' }, 'Save project')));
+    picker.node, nsPicker.node,
+    !picker.node && !nsPicker.node ? h('p', { class: 'notice' }, 'Connect a metric source or a Kubernetes cluster first. You can add it to this project later.') : null,
+    result, h('button', { class: 'button primary', type: 'submit' }, 'Save project')));
   }
 
   async function showList() {
     const projects = await api('/api/projects');
     if (disposed) return;
     clear(body,
-      h('div', { class: 'section-head' },
+      h('div', { class: 'section-head page-head' },
         h('h1', { class: 'page-title' }, 'Projects'),
         can('engineer') ? h('button', { class: 'button primary', type: 'button', onClick: () => editProject(null) }, 'New project') : null),
-      h('p', { class: 'page-lede' }, 'Group the metric sources behind a system, then see its status and recurring problems, and download a report.'),
+      h('p', { class: 'page-lede' }, 'Group the metric sources and Kubernetes namespaces behind a system, then see its status and recurring problems, and download a report.'),
       projects.length
-        ? tableOf([['Project'], ['Status'], ['Sources', true], ['Problems, 30 days', true], ['Recurring issues', true], ['Active now', true]],
+        ? tableOf([['Project'], ['Status'], ['Covers'], ['Problems, 30 days', true], ['Recurring issues', true], ['Active now', true]],
           projects.map((project) => h('tr', {},
             h('td', { class: 'cell-title' }, h('a', { href: `#/projects/${project.id}` }, project.name), project.description ? h('div', { class: 'small muted', style: 'font-weight:400' }, project.description) : null),
             h('td', {}, badge(HEALTH[project.health])),
-            h('td', { class: 'num' }, project.sources.length), h('td', { class: 'num' }, project.summary.occurrences),
+            h('td', { class: 'small' }, coverText(project)), h('td', { class: 'num' }, project.summary.occurrences),
             h('td', { class: 'num' }, project.summary.recurring), h('td', { class: 'num' }, project.summary.active))))
-        : h('p', { class: 'empty' }, can('engineer') ? 'No projects yet. Create one to group your metric sources.' : 'No projects yet.'));
+        : h('p', { class: 'empty' }, can('engineer') ? 'No projects yet. Create one to group your metric sources or namespaces.' : 'No projects yet.'));
   }
 
   async function showProject(projectId) {
@@ -161,28 +198,32 @@ export function mount(container, params) {
     const reportStatus = h('div');
     const covered = period.covered_days < period.days * 0.9;
 
+    // With AI notes, the report is saved at once and its PDF becomes available only when the notes are in.
     async function generate() {
-      clear(reportStatus, h('p', { class: 'form-result muted', role: 'status' }, includeAi.checked ? 'Saving the report and asking the AI model for notes. On a CPU, this can take several minutes.' : 'Saving the report'));
+      clear(reportStatus, h('p', { class: 'form-result muted', role: 'status' }, 'Saving the report'));
       try {
-        const report = await api(`/api/projects/${projectId}/reports`, { method: 'POST', body: { days } });
-        if (includeAi.checked) {
-          try {
-            await api(`/api/projects/${projectId}/reports/${report.id}/notes`, { method: 'POST', body: {} });
-          } catch (error) {
-            toast(`Report saved without AI notes. ${error.message}`);
-          }
-        }
+        const report = await api(`/api/projects/${projectId}/reports`, { method: 'POST', body: { days, ai_notes: includeAi.checked } });
+        if (report.notes_status === 'failed') toast(`Report saved without AI notes. ${report.notes_error}`);
         showProject(projectId);
       } catch (error) { clear(reportStatus, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     }
 
     async function addNotes(report) {
-      toast('Asking the AI model for notes');
       try {
         await api(`/api/projects/${projectId}/reports/${report.id}/notes`, { method: 'POST', body: {} });
         showProject(projectId);
       } catch (error) { toast(error.message); }
     }
+
+    clearTimeout(notesTimer);
+    if (reports.some((report) => report.notes_status === 'pending')) {
+      notesTimer = setTimeout(() => { if (!disposed) showProject(projectId); }, 4000);
+    }
+    const notesCell = (report) => {
+      if (report.notes_status === 'pending') return h('span', { class: 'badge neutral' }, 'Writing AI notes');
+      if (report.notes_status === 'failed') return h('span', { class: 'small', title: report.notes_error }, h('span', { class: 'badge warning' }, 'Notes failed'), ' ', h('span', { class: 'muted' }, report.notes_error));
+      return report.ai_model ? `${report.ai_model}${report.ai_cost_usd ? `, ${usd(report.ai_cost_usd)}` : ''}` : h('span', { class: 'muted' }, 'None');
+    };
 
     async function removeReport(report) {
       await api(`/api/projects/${projectId}/reports/${report.id}`, { method: 'DELETE' });
@@ -199,7 +240,7 @@ export function mount(container, params) {
 
     clear(body,
       h('p', { class: 'small', style: 'margin:24px 0 6px' }, h('a', { href: '#/projects' }, 'All projects')),
-      h('div', { class: 'section-head' },
+      h('div', { class: 'section-head page-head', style: 'padding-top:12px' },
         h('h1', { class: 'page-title' }, project.name),
         can('engineer') ? h('span', { class: 'row-buttons' },
           h('button', { class: 'button compact', type: 'button', onClick: () => editProject(project) }, 'Edit'),
@@ -223,28 +264,37 @@ export function mount(container, params) {
         can('engineer') ? h('div', { class: 'form-actions', style: 'margin-top:0' },
           h('button', { class: 'button primary', type: 'button', onClick: generate }, 'Generate report'),
           h('label', { class: 'check' }, includeAi, 'Include AI notes'),
-          live.ai ? h('span', { class: 'small muted' }, `Uses ${live.ai.provider === 'claude' ? live.ai.claude.model : live.ai.ollama.model || 'no model yet'}.`) : null) : null,
+          live.ai ? h('span', { class: 'small muted' }, `Uses ${live.ai[live.ai.provider]?.model || 'no model yet'}.`) : null) : null,
         reportStatus,
         reports.length ? h('div', { style: 'margin-top:12px' }, tableOf([['Generated'], ['Period', true], ['Problems', true], can('engineer') ? ['AI notes'] : null, can('engineer') ? ['Viewers'] : null, ['']].filter(Boolean),
           reports.map((report) => h('tr', {},
             h('td', { style: 'white-space:nowrap' }, dateTime(report.created_at), report.created_by ? h('div', { class: 'small muted' }, report.created_by) : null),
             h('td', { class: 'num' }, `${report.days} days`), h('td', { class: 'num' }, report.summary.occurrences),
-            can('engineer') ? h('td', {}, report.ai_model ? `${report.ai_model}${report.ai_cost_usd ? `, ${usd(report.ai_cost_usd)}` : ''}` : h('span', { class: 'muted' }, 'None')) : null,
+            can('engineer') ? h('td', {}, notesCell(report)) : null,
             can('engineer') ? h('td', {}, report.shared ? 'Shared' : h('span', { class: 'muted' }, 'Not shared')) : null,
             h('td', {}, h('span', { class: 'row-buttons' },
-              h('a', { class: 'button compact primary', href: `/api/projects/${projectId}/reports/${report.id}/pdf`, download: '' }, 'Download PDF'),
+              report.notes_status === 'pending'
+                ? h('span', { class: 'small muted', role: 'status' }, 'The PDF is ready when the notes are')
+                : h('a', { class: 'button compact primary', href: `/api/projects/${projectId}/reports/${report.id}/pdf`, download: '' }, 'Download PDF'),
               can('engineer') ? h('button', { class: 'button compact', type: 'button', onClick: () => shareReport(report, !report.shared) }, report.shared ? 'Stop sharing' : 'Share') : null,
-              can('engineer') && !report.ai_model ? h('button', { class: 'button compact', type: 'button', onClick: () => addNotes(report) }, 'Add AI notes') : null,
+              can('engineer') && !report.ai_model && report.notes_status !== 'pending' ? h('button', { class: 'button compact', type: 'button', onClick: () => addNotes(report) }, report.notes_status === 'failed' ? 'Try AI notes again' : 'Add AI notes') : null,
               can('engineer') ? h('button', { class: 'button compact', type: 'button', onClick: () => removeReport(report) }, 'Delete') : null))))))
           : can('engineer') ? null : h('p', { class: 'empty' }, 'No reports have been shared yet.')),
 
-      h('section', { class: 'section' }, h('h2', { style: 'margin-bottom:10px' }, 'Source status'),
+      view.kubernetes ? h('section', { class: 'section' }, h('h2', { style: 'margin-bottom:10px' }, 'Kubernetes'),
+        h('p', { class: 'small muted', style: 'margin-bottom:8px' }, view.kubernetes.namespaces?.includes('*') || !view.kubernetes.namespaces ? 'All namespaces.' : `Namespaces: ${view.kubernetes.namespaces.join(', ')}.`),
+        view.kubernetes.status === 'not_connected' ? h('p', { class: 'empty' }, 'No cluster is connected.')
+          : view.kubernetes.problems.length ? h('ul', { class: 'rows' }, view.kubernetes.problems.map((item) => h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
+            h('span', { class: 'row-title' }, item.title), h('span', { class: 'row-side' }), item.cause ? h('span', { class: 'row-detail' }, item.cause) : null)))
+            : h('p', { class: 'empty' }, 'No workload problems in these namespaces.')) : null,
+
+      view.sources.length || !view.kubernetes ? h('section', { class: 'section' }, h('h2', { style: 'margin-bottom:10px' }, 'Source status'),
         view.sources.length ? tableOf([['Source'], can('engineer') ? ['Type'] : null, ['Status'], ['Active alerts', true], ['Targets down', true], ['Signals out of range', true]].filter(Boolean),
           view.sources.map((source) => h('tr', {},
             h('td', { class: 'cell-title' }, source.name, source.error ? h('div', { class: 'small', style: 'font-weight:400;overflow-wrap:anywhere' }, source.error) : null),
             can('engineer') ? h('td', {}, source.kind_label) : null, h('td', {}, badge(SOURCE_STATUS[source.status] || SOURCE_STATUS.waiting)),
             h('td', { class: 'num' }, source.alerts), h('td', { class: 'num' }, source.targets_down), h('td', { class: 'num' }, source.signals_out_of_range))))
-          : h('p', { class: 'empty' }, can('engineer') ? 'No sources in this project. Select Edit to add some.' : 'No sources in this project.')),
+          : h('p', { class: 'empty' }, can('engineer') ? 'No sources in this project. Select Edit to add some.' : 'No sources in this project.')) : null,
 
       summary.occurrences ? h('section', { class: 'section' }, h('h2', { style: 'margin-bottom:10px' }, 'Problems per day'), dailyChart(view.daily)) : null,
 
@@ -284,5 +334,5 @@ export function mount(container, params) {
   }
 
   (params.id ? showProject(Number(params.id)) : showList()).catch((error) => clear(body, h('p', { class: 'error-note' }, error.message)));
-  return () => { disposed = true; };
+  return () => { disposed = true; clearTimeout(notesTimer); };
 }

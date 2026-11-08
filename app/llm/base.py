@@ -42,8 +42,11 @@ class Provider(Protocol):
     is_remote: bool
 
     def build_request(
-        self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]: ...
+        self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True,
+    ) -> dict[str, Any]:
+        """`allow_tools=False` keeps the tools declared, so earlier tool calls in the history stay valid, but tells
+        the model it must answer now. Providers without that switch leave the tools out."""
+        ...
 
     def stream(self, request: dict[str, Any]) -> AsyncIterator[TextDelta | ToolCall | Finished]: ...
 

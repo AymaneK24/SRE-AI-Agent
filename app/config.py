@@ -47,7 +47,9 @@ class Config:
     admin_email: str = field(default_factory=lambda: _env("RCC_ADMIN_EMAIL").strip().lower())
     admin_name: str = field(default_factory=lambda: _env("RCC_ADMIN_NAME", "Administrator"))
     signup_open: bool = field(default_factory=lambda: _bool("RCC_SIGNUP_OPEN", True))
-    product_operator: str = field(default_factory=lambda: _env("RCC_OPERATOR_NAME", "Aymane KENBOUCH"))
+    # Who runs this installation and answers for its data: usually the company that installed it.
+    product_operator: str = field(default_factory=lambda: _env("RCC_OPERATOR_NAME"))
+    operator_address: str = field(default_factory=lambda: _env("RCC_OPERATOR_ADDRESS"))
     contact_email: str = field(default_factory=lambda: _env("RCC_CONTACT_EMAIL"))
     legal_reviewed: bool = field(default_factory=lambda: _bool("RCC_LEGAL_REVIEWED"))
 
@@ -60,6 +62,8 @@ class Config:
 
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     anthropic_base_url: str = field(default_factory=lambda: _env("RCC_ANTHROPIC_URL", "https://api.anthropic.com"))
+    gemini_api_key: str = field(default_factory=lambda: _env("RCC_GEMINI_API_KEY") or _env("GEMINI_API_KEY"))
+    gemini_base_url: str = field(default_factory=lambda: _env("RCC_GEMINI_URL", "https://generativelanguage.googleapis.com"))
     default_ollama_url: str = field(default_factory=lambda: _env("RCC_OLLAMA_URL", "http://localhost:11434"))
     aws_endpoint_url: str = field(default_factory=lambda: _env("RCC_AWS_ENDPOINT_URL"))
     azure_management_url: str = field(default_factory=lambda: _env("RCC_AZURE_MANAGEMENT_URL", "https://management.azure.com"))

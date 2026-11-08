@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Root Cause Docs</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/app.css">
+<link rel="stylesheet" href="/css/docs.css">
+<script src="/js/theme.js"></script>
+</head>
+<body class="docs-body">
+<a class="skip-link" href="#doc-article">Skip to content</a>
+<header class="docs-header">
+  <button class="icon-button docs-menu-button" id="docs-menu" type="button" aria-label="Show the page list" aria-expanded="false" aria-controls="docs-nav">
+    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+  </button>
+  <a class="brand" href="/" aria-label="Root Cause Console, back to the platform" title="Back to the platform">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><path d="M3 24l8-4 6 3 7-13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="26" cy="7" r="4" fill="var(--critical)"/></svg>
+    <span>Root Cause</span>
+  </a>
+  <span class="docs-label">Docs</span>
+  <div class="docs-search" role="search">
+    <input class="input" id="docs-search" type="search" placeholder="Search the docs" aria-label="Search the docs" autocomplete="off" maxlength="80" aria-controls="docs-results" aria-expanded="false">
+    <kbd class="docs-kbd" aria-hidden="true">/</kbd>
+    <div class="docs-results" id="docs-results" role="listbox" hidden></div>
+  </div>
+  <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch color theme"></button>
+</header>
+<div class="docs-layout">
+  <nav class="docs-nav" id="docs-nav" aria-label="Documentation"></nav>
+  <main class="docs-main" id="doc-article" tabindex="-1"></main>
+  <aside class="docs-toc" id="docs-toc" aria-label="On this page"></aside>
+</div>
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script type="module" src="/js/docs.js"></script>
+</body>
+</html>

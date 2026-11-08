@@ -1,4 +1,5 @@
-// Remediation workflows: reviewed steps for people, shown as a pipeline and followed one at a time. Nothing on this page runs anything.
+// The runbook library: fixes the team wrote and reviewed, step by step with commands, linked to projects and servers.
+// Engineers write and follow them; viewers can study the reviewed ones. Nothing on this page runs anything.
 import { api, can, clear, closeDialog, dateTime, dialogHead, h, openDialog, statusBadge, timeAgo, toast } from './core.js';
 
 const STATE_TEXT = { done: 'Done', skipped: 'Skipped', pending: 'Waiting', current: 'Next', preview: '' };
@@ -29,41 +30,59 @@ export function mount(container, params) {
   let runs = [];
   let focusIndex = null;
   let disposed = false;
+  let projects = [];
   const listHost = h('nav', { class: 'workflow-list', 'aria-label': 'Workflows' });
   const detailHost = h('div', { class: 'workflow-detail' });
+  const search = h('input', { class: 'input', type: 'search', placeholder: 'Search runbooks, steps, commands, servers', 'aria-label': 'Search runbooks', value: params.text || '' });
+  const projectFilter = h('select', { class: 'input', 'aria-label': 'Project' }, h('option', { value: '' }, 'All projects'));
+  search.addEventListener('input', () => { matchedIds = null; renderList(); });
+  projectFilter.addEventListener('change', () => renderList());
 
   clear(container, h('div', { class: 'page' },
     h('div', { class: 'section-head page-head' },
       h('h1', { class: 'page-title' }, 'Workflows'),
-      h('button', { class: 'button primary', type: 'button', onClick: () => edit(null) }, 'New workflow')),
-    h('p', { class: 'page-lede' }, 'Reviewed remediation steps, followed one at a time and recorded as you go.'),
-    h('p', { class: 'read-only-banner' }, h('b', {}, 'This console can’t run these steps. '), 'A person reads each one, decides, and carries it out in your own tools.'),
+      can('engineer') ? h('button', { class: 'button primary', type: 'button', onClick: () => edit(null) }, 'New workflow') : null),
+    h('p', { class: 'page-lede' }, 'Your team’s runbook library: fixes for problems that come back, written once as steps and commands, reviewed, and shared, so nobody has to rebuild the context or ask the AI from scratch. Study them, follow them, and ask the AI when a case is new.'),
+    h('p', { class: 'read-only-banner' }, h('b', {}, 'This console can’t run these steps. '), 'A person reads each one, decides, and carries it out on the servers with their own access.'),
+    h('div', { class: 'filter-row workflow-filters' }, search, projectFilter),
     h('div', { class: 'workflow-layout' }, listHost, detailHost)));
+
+  const projectName = (id) => projects.find((project) => project.id === id)?.name || '';
+  const wordsOf = (item) => [item.name, item.summary, projectName(item.project_id), ...(item.targets || []),
+    ...item.steps.flatMap((step) => [step.title, step.detail, step.command])].join(' ').toLowerCase();
 
   const activeRun = () => runs.find((run) => run.status === 'running') || null;
 
   async function load() {
-    items = await api('/api/workflows');
-    if (params.alert || params.signal) {
-      const query = new URLSearchParams({ alert: params.alert || '', signal: params.signal || '' });
+    [items, projects] = await Promise.all([api('/api/workflows'), api('/api/projects').catch(() => [])]);
+    clear(projectFilter, h('option', { value: '' }, 'All projects'), projects.map((project) => h('option', { value: String(project.id) }, project.name)));
+    if (params.alert || params.signal || params.text) {
+      const query = new URLSearchParams({ alert: params.alert || '', signal: params.signal || '', text: params.text || '' });
       const matched = await api(`/api/workflows/match?${query}`);
       matchedIds = new Set(matched.map((item) => item.id));
       if (!selectedId && matched.length) selectedId = matched[0].id;
     }
-    if (!selectedId && items.length) selectedId = items[0].id;
+    // When nothing matches the problem, show nothing rather than an unrelated runbook.
+    if (!selectedId && items.length && !matchedIds) selectedId = items[0].id;
     await loadRuns();
     if (!disposed) render();
   }
 
   async function loadRuns() {
-    runs = selectedId && items.some((item) => item.id === selectedId) ? await api(`/api/workflows/${selectedId}/runs`) : [];
+    // Viewers study runbooks; following one and its history are for engineers.
+    runs = can('engineer') && selectedId && items.some((item) => item.id === selectedId) ? await api(`/api/workflows/${selectedId}/runs`) : [];
   }
 
   function renderList() {
-    const shown = matchedIds ? items.filter((item) => matchedIds.has(item.id)) : items;
+    const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const project = Number(projectFilter.value) || null;
+    let shown = matchedIds ? items.filter((item) => matchedIds.has(item.id)) : items;
+    if (!matchedIds && words.length) shown = shown.filter((item) => { const text = wordsOf(item); return words.every((word) => text.includes(word)); });
+    if (project) shown = shown.filter((item) => item.project_id === project);
     clear(listHost,
-      matchedIds ? h('p', { class: 'small muted list-note' }, shown.length ? `${shown.length} match this alert. ` : 'None match this alert. ',
-        h('button', { class: 'link-button', type: 'button', onClick: () => { matchedIds = null; render(); } }, 'Show all')) : null,
+      matchedIds ? h('p', { class: 'small muted list-note' }, shown.length ? `${shown.length} match this problem. ` : 'None match this problem yet. ',
+        h('button', { class: 'link-button', type: 'button', onClick: () => { matchedIds = null; search.value = ''; render(); } }, 'Show all')) : null,
+      !shown.length && !matchedIds ? h('p', { class: 'small muted list-note' }, items.length ? 'No runbook matches.' : can('engineer') ? 'No runbooks yet. Write the fix for a problem you keep seeing.' : 'No reviewed runbooks yet.') : null,
       shown.map((item) => h('a', {
         href: `#/workflows/${item.id}`, 'aria-current': item.id === selectedId ? 'true' : null,
         onClick: async (event) => {
@@ -74,7 +93,8 @@ export function mount(container, params) {
           await loadRuns();
           render();
         },
-      }, item.name, h('small', {}, `${item.status === 'approved' ? 'Reviewed' : 'Draft'}, ${item.risk} risk, ${item.steps.length} steps`))));
+      }, item.name, h('small', {}, `${item.status === 'approved' ? 'Reviewed' : 'Draft'}, ${item.risk} risk, ${item.steps.length} steps`
+        + `${item.project_id && projectName(item.project_id) ? `, ${projectName(item.project_id)}` : ''}${item.targets?.length ? `, ${item.targets.slice(0, 2).join(', ')}${item.targets.length > 2 ? '…' : ''}` : ''}`))));
   }
 
   function resultsText(results) {
@@ -177,13 +197,16 @@ export function mount(container, params) {
       h('div', { class: 'detail-head' },
         h('h2', {}, item.name),
         h('span', { class: 'row-buttons' },
-          h('button', { class: 'button compact', type: 'button', onClick: () => edit(item) }, 'Edit'),
+          can('engineer') ? h('button', { class: 'button compact', type: 'button', onClick: () => edit(item) }, 'Edit') : null,
           can('admin') && item.status === 'draft' ? h('button', { class: 'button compact primary', type: 'button', onClick: () => setStatus(item, 'approved') }, 'Mark as reviewed') : null,
           can('admin') ? h('button', { class: 'button compact', type: 'button', onClick: () => setStatus(item, 'archived') }, 'Archive') : null)),
       h('p', { class: 'small detail-meta' }, statusBadge(item.status), h('span', {}, `${item.risk} risk`),
         h('span', { class: 'muted' }, item.origin === 'ai' ? 'Drafted by AI' : item.origin === 'built-in' ? 'Built in' : `Written by ${item.created_by}`),
         item.reviewed_by ? h('span', { class: 'muted' }, `Reviewed by ${item.reviewed_by}`) : null),
       h('p', { class: 'body-text' }, item.summary),
+      item.project_id || item.targets?.length ? h('p', { class: 'small detail-meta' },
+        item.project_id && projectName(item.project_id) ? h('span', {}, h('span', { class: 'muted' }, 'Project: '), h('a', { href: `#/projects/${item.project_id}` }, projectName(item.project_id))) : null,
+        item.targets?.length ? h('span', {}, h('span', { class: 'muted' }, 'For: '), item.targets.join(', ')) : null) : null,
       h('p', { class: 'small muted' }, resultsText(item.results)),
       item.status === 'draft' ? h('p', { class: 'notice' }, can('admin') ? 'This draft hasn’t been reviewed. Check every step, then mark it as reviewed so people can follow it.' : 'This draft hasn’t been reviewed, so it can’t be followed yet. Ask an admin to review it.') : null,
 
@@ -191,7 +214,7 @@ export function mount(container, params) {
         h('b', {}, complete ? 'All steps finished' : `Step ${currentIndex + 1} of ${steps.length}`),
         h('span', { class: 'muted small' }, `Started by ${run.started_by}, ${timeAgo(run.started_at)}. Anyone on the team can continue it.`),
         h('span', { class: 'run-meter', role: 'img', 'aria-label': `${finished} of ${steps.length} steps finished` }, h('i', { style: `width:${Math.round(100 * finished / steps.length)}%` })))
-        : item.status === 'approved' ? h('div', { class: 'run-bar' },
+        : item.status === 'approved' && can('engineer') ? h('div', { class: 'run-bar' },
           h('button', { class: 'button primary', type: 'button', onClick: () => start(item) }, 'Start following these steps'),
           h('span', { class: 'muted small' }, 'This records your progress. It doesn’t run anything.')) : null,
 
@@ -231,7 +254,10 @@ export function mount(container, params) {
     const summary = h('input', { class: 'input', maxlength: 500, value: item?.summary || '' });
     const risk = h('select', { class: 'input' }, ['low', 'medium', 'high'].map((value) => h('option', { value, selected: (item?.risk || 'medium') === value }, value)));
     const alerts = h('input', { class: 'input', value: (item?.match_rules?.alerts || []).join(', '), placeholder: 'highcpu, targetdown' });
-    const keywords = h('input', { class: 'input', value: (item?.match_rules?.keywords || []).join(', '), placeholder: 'disk space' });
+    const keywords = h('input', { class: 'input', value: (item?.match_rules?.keywords || []).join(', '), placeholder: 'disk space, crash-looping, oomkilled' });
+    const project = h('select', { class: 'input' }, h('option', { value: '' }, 'Any project'),
+      projects.map((entry) => h('option', { value: String(entry.id), selected: item?.project_id === entry.id }, entry.name)));
+    const targets = h('input', { class: 'input', value: (item?.targets || []).join(', '), placeholder: 'vm-pay-01, 10.0.4.12, payment, db.internal' });
     const stepsHost = h('div', { class: 'stack' });
     const result = h('div');
     const steps = (item?.steps?.length ? item.steps : [{ title: '' }]).map((step) => ({ ...step }));
@@ -258,6 +284,7 @@ export function mount(container, params) {
     async function save(event) {
       event.preventDefault();
       const body = { name: name.value.trim(), summary: summary.value.trim(), risk: risk.value, match_rules: { alerts: list(alerts.value), keywords: list(keywords.value), signals: item?.match_rules?.signals || [] },
+        project_id: Number(project.value) || null, targets: targets.value.split(',').map((part) => part.trim()).filter(Boolean),
         steps: steps.map((step) => ({ title: step.title || '', detail: step.detail || '', command: step.command || '', risk: step.risk || 'none', undo: step.undo || '', verify: step.verify || '' })) };
       try {
         const saved = item ? await api(`/api/workflows/${item.id}`, { method: 'PUT', body }) : await api('/api/workflows', { method: 'POST', body });
@@ -271,6 +298,8 @@ export function mount(container, params) {
     openDialog(h('form', { class: 'stack', onSubmit: save }, dialogHead(item ? 'Edit workflow' : 'New workflow'),
       item ? h('p', { class: 'notice' }, 'Saving returns this workflow to draft, so someone reviews the changes. A run already in progress keeps its steps.') : null,
       h('label', { class: 'field' }, h('span', {}, 'Name'), name), h('label', { class: 'field' }, h('span', {}, 'Summary'), summary), h('label', { class: 'field' }, h('span', {}, 'Risk'), risk),
+      h('label', { class: 'field' }, h('span', {}, 'Project'), project),
+      h('label', { class: 'field' }, h('span', {}, 'Servers or workloads it is for'), targets, h('small', {}, 'Host names, IP addresses, or workload names, separated by commas. Problems that name one of these show this runbook.')),
       h('label', { class: 'field' }, h('span', {}, 'Match alert names containing'), alerts), h('label', { class: 'field' }, h('span', {}, 'Match text containing'), keywords),
       stepsHost, h('button', { class: 'button compact', type: 'button', onClick: () => { steps.push({ title: '' }); renderSteps(); } }, 'Add step'),
       result, h('button', { class: 'button primary', type: 'submit' }, 'Save draft')), { wide: true });

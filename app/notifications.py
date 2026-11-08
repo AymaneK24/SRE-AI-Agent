@@ -20,6 +20,10 @@ from .workflows import workflows_for
 
 log = logging.getLogger("rcc.notify")
 
+# Every alert email says why it arrived and how to stop it.
+ALERT_EMAIL_REASON = ("You receive this because an administrator of {company} added your address to an alert email channel "
+                      "in Root Cause Console. To stop these emails, ask them to remove it in Connections, Alerts.")
+
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 COOLDOWN_S = 900
 WEBHOOK_HOSTS = {
@@ -234,7 +238,8 @@ class Notifier:
             for address in settings.get("recipients", []):
                 await self.mailer.send(address, message["subject"], message.get("email_text", message["text"]), message.get("link"), message.get("link_label", "Open in the console"),
                                        tone=message.get("tone", "default"), subtitle=message.get("subtitle", ""), title=message.get("title", ""),
-                                       body_html=message.get("body_html", ""), images=message.get("images"), attachments=message.get("attachments"))
+                                       body_html=message.get("body_html", ""), images=message.get("images"), attachments=message.get("attachments"),
+                                       reason=ALERT_EMAIL_REASON.format(company=self.mailer.config.company_name or "your organization"))
             return
         if kind == "slack":
             payload: dict[str, Any] = {"text": _escape_slack(message["text"])}

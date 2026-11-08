@@ -1,0 +1,24 @@
+# A trusted Let's Encrypt certificate for a private server, proved through Azure DNS (DNS-01).
+# Needs the rcc-caddy-dns image (deploy/caddy-dns), a public Azure DNS zone for RCC_DOMAIN's parent,
+# and the VM's managed identity with the "DNS Zone Contributor" role on that zone only.
+# Nothing connects to this server from the internet.
+{
+	admin off
+}
+{$RCC_DOMAIN} {
+	tls {
+		dns azure {
+			subscription_id {$AZURE_SUBSCRIPTION_ID}
+			resource_group_name {$AZURE_RESOURCE_GROUP_NAME}
+		}
+		# Ask public resolvers, so the private DNS zone with the same name doesn't hide the challenge record.
+		resolvers 1.1.1.1 8.8.8.8
+	}
+	encode gzip
+	header -Server
+	@internal path /metrics
+	respond @internal 404
+	reverse_proxy console:8000 {
+		flush_interval -1
+	}
+}

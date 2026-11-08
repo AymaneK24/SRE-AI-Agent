@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -76,6 +76,23 @@ V5_TABLES = """CREATE TABLE held_alerts (
   released INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+"""
+
+# Version 6: a project can cover Kubernetes namespaces as well as metric sources. "*" means every namespace.
+V6_TABLES = """CREATE TABLE project_namespaces (
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  namespace TEXT NOT NULL,
+  PRIMARY KEY (project_id, namespace)
+);
+"""
+
+# Version 7: a report knows whether its AI notes are still being written, and a workflow can belong to a project
+# and name the servers or workloads it is for. New columns, so fresh installs and upgrades run the same statements.
+V7_COLUMNS = """ALTER TABLE project_reports ADD COLUMN notes_status TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE project_reports ADD COLUMN notes_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE project_reports ADD COLUMN notes_started_at TEXT;
+ALTER TABLE workflows ADD COLUMN project_id BIGINT;
+ALTER TABLE workflows ADD COLUMN targets TEXT NOT NULL DEFAULT '[]';
 """
 
 COMMON = """
@@ -408,15 +425,19 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         ] + _split(V4_TABLES.format(**types))
     if version < 5:
         statements += _split(V5_TABLES.format(**types))
+    if version < 6:
+        statements += _split(V6_TABLES.format(**types))
+    if version < 7:
+        statements += _split(V7_COLUMNS)
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES))
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS)
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

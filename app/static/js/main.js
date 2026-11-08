@@ -16,7 +16,7 @@ const APP_ROUTES = {
   overview: ['viewer', mountOverview],
   projects: ['viewer', mountProjects],
   investigate: ['viewer', (container, params) => (can('engineer') ? mountInvestigate(container, params) : mountResults(container, params))],
-  workflows: ['engineer', mountWorkflows],
+  workflows: ['viewer', mountWorkflows],
   logs: ['engineer', mountLogs],
   connections: ['admin', mountConnections],
   organization: ['admin', mountOrganization],
@@ -42,7 +42,8 @@ function renderNav(name) {
   const account = document.getElementById('account-area');
   const me = live.me;
   const links = me && !me.must_change_password ? NAV.filter(([id]) => can(APP_ROUTES[id][0])) : [];
-  clear(nav, links.map(([id, label]) => h('a', { href: `#/${id}`, 'aria-current': id === name ? 'page' : null }, id === 'investigate' && !can('engineer') ? 'Investigations' : label)));
+  clear(nav, links.map(([id, label]) => h('a', { href: `#/${id}`, 'aria-current': id === name ? 'page' : null }, id === 'investigate' && !can('engineer') ? 'Investigations' : label)),
+    links.length ? h('a', { href: '/docs' }, 'Docs') : null);
   if (me) {
     clear(account,
       h('a', { class: 'account-name', href: '#/account', title: `${me.email}, ${me.role}. Your account.` }, me.name),
@@ -86,7 +87,7 @@ function route() {
   chip.hidden = !me || me.must_change_password || !can('engineer');
   if (can('admin')) chip.setAttribute('href', '#/connections');
   else chip.removeAttribute('href');
-  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Start your trial', legal: 'Policies' };
+  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Create an account', legal: 'Policies' };
   document.title = titles[name] ? `${titles[name]}, Root Cause Console` : 'Root Cause Console';
   const render = APP_ROUTES[name]?.[1] || PUBLIC_ROUTES[name];
   unmount = render(view, params);
@@ -100,9 +101,9 @@ function renderLiveChip() {
   let text = 'Connecting';
   if (!live.connected && context) { tone = 'critical'; text = 'Connection lost'; }
   else if (status === 'ok') { tone = 'ok'; text = 'Live'; }
-  else if (status === 'partial') { tone = 'warning'; text = 'Some sources down'; }
-  else if (status === 'unreachable') { tone = 'critical'; text = 'Sources not answering'; }
-  else if (status === 'not_configured') { text = 'No source connected'; }
+  else if (status === 'partial') { tone = 'warning'; text = 'Some connections down'; }
+  else if (status === 'unreachable') { tone = 'critical'; text = 'Connections not answering'; }
+  else if (status === 'not_configured') { text = 'Nothing connected'; }
   clear(chip, h('span', { class: `dot ${tone}` }), text);
 }
 

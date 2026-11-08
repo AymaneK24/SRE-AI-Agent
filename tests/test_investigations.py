@@ -69,7 +69,7 @@ def test_headline_reports_problems_first():
     assert "firing" in headline_for("ok", {"down": 0, "total": 1}, {"firing": [{}]}, [])["text"]
     assert headline_for("ok", {"down": 0, "total": 3}, {"firing": []}, [])["tone"] == "ok"
     assert "out of date" in headline_for("unreachable", {}, {}, [])["text"]
-    assert "source" in headline_for("partial", {"down": 0}, {"firing": []}, [], ["aws"])["text"]
+    assert "connection" in headline_for("partial", {"down": 0}, {"firing": []}, [], ["aws"])["text"]
 
 
 def test_render_keeps_alerts_when_budget_is_small():
@@ -230,8 +230,8 @@ class ScriptedProvider:
     def __init__(self, answers=None, on_first_tool=None, loop_forever=False):
         self.requests, self.answers, self.on_first_tool, self.loop_forever = [], list(answers or []), on_first_tool, loop_forever
 
-    def build_request(self, model, system, messages, tools):
-        return {"model": model, "system": system, "messages": [dict(m) for m in messages], "tools": bool(tools)}
+    def build_request(self, model, system, messages, tools, allow_tools=True):
+        return {"model": model, "system": system, "messages": [dict(m) for m in messages], "tools": bool(tools) and allow_tools}
 
     async def stream(self, request):
         self.requests.append(request)
@@ -279,6 +279,9 @@ async def test_tool_rounds_are_limited(console, prom_server):
     await _run(run)
     assert len(provider.requests) == 3 and provider.requests[-1]["tools"] is False
     assert "used all your queries" in provider.requests[-1]["system"]
+    detail = (await client.get(f"/api/conversations/{conversation['id']}")).json()
+    message = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
+    assert message["status"] == "complete" and message["content"].strip(), "a model that never stops asking still ends with an answer"
 
 
 async def test_incomplete_answer_is_repaired_once(console, prom_server):
