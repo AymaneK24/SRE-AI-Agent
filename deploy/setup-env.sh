@@ -63,6 +63,7 @@ admin_password="$(openssl rand -hex 16)"
 umask 077
 cat > .env <<ENV
 RCC_DOMAIN=$domain
+RCC_DEFAULT_SNI=$domain
 RCC_PUBLIC_URL=$public_url
 RCC_ALLOWED_HOSTS=$domain
 RCC_CADDYFILE=$caddyfile

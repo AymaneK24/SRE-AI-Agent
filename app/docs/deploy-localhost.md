@@ -49,6 +49,57 @@ docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > caddy
 
 > **Security:** A trusted root can sign a certificate for any website. Do this only for a trial on your own computer, remove it afterwards, and never on a shared machine.
 
+## Let others on your network reach it
+
+To let a colleague on the same Wi-Fi or office network try your console, by your computer's IP address:
+
+**1. Find your IP.** In Windows, `ipconfig`, under your Wi-Fi or Ethernet adapter, such as `10.50.55.177`. Not the `172.x` address of WSL, which other computers can't reach.
+
+**2. Tell the console about it** in `.env`, keeping `localhost` for yourself:
+
+```bash
+RCC_DOMAIN=10.50.55.177, localhost
+RCC_DEFAULT_SNI=10.50.55.177
+RCC_PUBLIC_URL=https://10.50.55.177
+RCC_ALLOWED_HOSTS=10.50.55.177,localhost
+```
+
+`RCC_DEFAULT_SNI` matters: browsers and Windows send no server name when connecting to an IP address, and without it Caddy can't pick a certificate, so the connection fails with a TLS error. Then run `docker compose up -d`.
+
+**3. Allow it through Windows Firewall**, in PowerShell **as administrator** (Win + X, Terminal (Admin)):
+
+```powershell
+Get-NetConnectionProfile                       # NetworkCategory should be Private on a network you trust
+Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
+
+New-NetFirewallRule -DisplayName "Root Cause Console (HTTPS)" -Direction Inbound -Protocol TCP `
+  -LocalPort 443 -Action Allow -Profile Private -RemoteAddress LocalSubnet
+```
+
+If your laptop's policy doesn't let you change the network to Private, use `-Profile Public,Private` instead. `LocalSubnet` still limits it to devices on your network. A **Block** rule always wins over an Allow rule, so check none blocks Docker:
+
+```powershell
+Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'docker|vpnkit' } | Select-Object DisplayName, Action, Profile, Enabled
+```
+
+**4. Check, from Windows** (not from WSL, whose own network may not reach your Wi-Fi address):
+
+```powershell
+curl.exe -vk https://10.50.55.177/healthz      # ends with {"status":"ok"}
+```
+
+Then from your colleague's computer: `Test-NetConnection 10.50.55.177 -Port 443` should say `True`.
+
+| If it still fails | Fix |
+|---|---|
+| `TcpTestSucceeded : False` from the other computer | A VPN client such as NordVPN blocks LAN access while connected, or the router isolates Wi-Fi devices ("AP isolation" or "client isolation"). Disconnect the VPN, or turn isolation off |
+| A TLS error | `RCC_DEFAULT_SNI` isn't set to the IP, or `docker compose up -d` wasn't run after changing `.env` |
+| *Open the console at the address in RCC_PUBLIC_URL* | Add the IP to `RCC_ALLOWED_HOSTS` |
+
+Your colleague's browser warns about the certificate, because Caddy made it. Traffic is still encrypted. Invite them in **Organization > Members** first. When you're done, remove the rule: `Remove-NetFirewallRule -DisplayName "Root Cause Console (HTTPS)"`.
+
+> **Security:** Only do this on a network you trust, such as your home or office, never on public Wi-Fi. Your IP can change when you reconnect, so update `.env` if it does.
+
 ## 3. Connect Docker Desktop's Kubernetes
 
 Follow [Kubernetes on Docker Desktop](/docs/kubernetes#docker-desktop): address `https://host.docker.internal:6443`, the CA from `kubectl config view`, and **TLS server name** `kubernetes.docker.internal`.

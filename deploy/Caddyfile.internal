@@ -2,6 +2,9 @@
 {
 	admin off
 	auto_https disable_redirects
+	# Browsers and Windows send no server name when you open https://IP-ADDRESS, so Caddy needs to know
+	# which certificate to use. Without this, connecting by IP fails with a TLS internal error.
+	default_sni {$RCC_DEFAULT_SNI:localhost}
 }
 {$RCC_DOMAIN} {
 	tls /certs/cert.pem /certs/key.pem

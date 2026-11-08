@@ -109,3 +109,14 @@ def test_deployment_files_default_to_a_private_server():
 
     assert (root / "deploy/Caddyfile.azure-dns").read_text().count("dns azure") == 1
     assert subprocess.run(["sh", "-n", str(root / "deploy/setup-env.sh")]).returncode == 0
+
+
+def test_ip_address_access_has_a_default_certificate():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # Clients send no server name to https://IP-ADDRESS, so Caddy must be told which certificate to use.
+    for name in ("Caddyfile.selfsigned", "Caddyfile.internal"):
+        assert "default_sni {$RCC_DEFAULT_SNI:localhost}" in (root / "deploy" / name).read_text()
+    assert 'RCC_DEFAULT_SNI: "${RCC_DEFAULT_SNI:-localhost}"' in (root / "docker-compose.yml").read_text()
+    assert "RCC_DEFAULT_SNI=$domain" in (root / "deploy/setup-env.sh").read_text()
