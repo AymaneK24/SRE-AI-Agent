@@ -1,6 +1,7 @@
-"""Keeps a current picture of one organization's systems, across all of its metric sources.
+"""Keeps a current picture of one organization's systems, across all of its connections.
 
-Each poll rebuilds the context from targets, alerts, rules, and tracked signals. The engine compares it
+Metric sources, log stores, and Kubernetes clusters are each optional: any one of them is enough to build a context.
+Each poll rebuilds the context from targets, alerts, rules, tracked signals, log summaries, and cluster problems. The engine compares it
 with the previous poll, records what changed, and pushes it to subscribers. Investigations always read
 `engine.context`, so a model never works from an old copy.
 """
@@ -19,7 +20,9 @@ from typing import Any, Awaitable, Callable
 from ..broker import Broker
 from ..config import Config
 from ..db import Database, sha256_text, utcnow
-from ..integrations.kubernetes import KubernetesClient
+from ..diagnosis.problems import SEVERITY_RANK, find_problems
+from ..diagnosis.rules import diagnose
+from ..integrations.kubernetes import KubernetesClient, summary_from_snapshot
 from ..integrations.loki import LokiClient
 from ..net_guard import BlockedTarget
 from ..secrets_store import SecretBox, scrub
@@ -32,7 +35,16 @@ log = logging.getLogger("rcc.context")
 BASELINE_EVERY_S = 300
 METRICS_EVERY_S = 300
 SNAPSHOT_EVERY_S = 600
-INTEGRATION_EVERY_S = 60
+INTEGRATION_EVERY_S = 30
+CRASH_LOG_PROBLEMS = 3
+CRASH_LOG_LINES = 30
+CRASH_LOG_CHARS = 1000
+NO_SOURCE_POLL_S = 30
+STOP_TIMEOUT_S = 10
+# A Kubernetes problem must be gone this long before it counts as resolved, so a pod that runs for a few seconds
+# between crashes doesn't send "resolved" and "failing" again every minute.
+K8S_CLEAR_AFTER_S = 75
+TARGET_LIST_LIMIT = 500
 CHANGES_EVERY_S = 120
 MAX_SERIES_PER_SIGNAL = 10
 ANOMALY_Z = 4.0
@@ -105,6 +117,10 @@ class ContextEngine:
         self.context: dict[str, Any] = self._empty_context("not_configured")
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=EVENT_MEMORY)
         self.integration_summary: dict[str, Any] = {}
+        self.integration_kinds: set[str] = set()
+        self.k8s_snapshot: dict[str, Any] | None = None
+        self.k8s_problems: list[dict[str, Any]] = []
+        self._crash_logs: dict[str, dict[str, Any]] = {}
         self._integrations_at = 0.0
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
@@ -119,6 +135,8 @@ class ContextEngine:
         self._seeded: set[int] = set()
         self._seed_deadlines: dict[int, float] = {}
         self._last_ok_mono: float | None = None
+        self._stopping = False
+        self._k8s_missing_since: dict[str, float] = {}
 
     # Lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -126,12 +144,18 @@ class ContextEngine:
         self._task = asyncio.create_task(self._loop(), name=f"context-engine-{self.org_id}")
 
     async def stop(self) -> None:
+        # The flag and the wake-up end the loop even if a cancellation is lost. That happens when it arrives at the
+        # same moment as the loop's own wait timeout, or inside a client library that manages cancellation itself.
+        self._stopping = True
+        self._wake.set()
         if self._task:
             self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._task, timeout=STOP_TIMEOUT_S)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+            except Exception:  # A failed last poll must not stop the shutdown.
+                log.exception("context engine ended with an error")
         await self._close_sources()
 
     async def _close_sources(self) -> None:
@@ -156,9 +180,29 @@ class ContextEngine:
                     message = getattr(error, "message", str(error))
                     log.error("cannot load source %s: %s", row["id"], message)
                     self.source_errors.append({"id": row["id"], "name": row["name"], "kind": row["kind"], "status": "unreachable", "error": message})
-            if not rows:
+            await self._load_integration_kinds()
+            if not rows and not self.integration_kinds:
                 self.context = self._empty_context("not_configured")
         self._wake.set()
+
+    async def _load_integration_kinds(self) -> None:
+        rows = await self.db.all("SELECT kind FROM integrations WHERE org_id = ? AND enabled = 1", (self.org_id,))
+        self.integration_kinds = {row["kind"] for row in rows}
+
+    async def integrations_changed(self) -> None:
+        """A log store or cluster was added or removed: read it on the next poll, without waiting."""
+        await self._load_integration_kinds()
+        self._integrations_at = 0.0
+        if "kubernetes" not in self.integration_kinds:
+            self.k8s_snapshot, self.k8s_problems = None, []
+        if not self.states and not self.integration_kinds:
+            self.integration_summary = {}
+            self.context = self._empty_context("not_configured")
+        self._wake.set()
+
+    @property
+    def has_connections(self) -> bool:
+        return bool(self.states) or bool(self.integration_kinds)
 
     def _reset_state(self) -> None:
         self._active = {}
@@ -170,23 +214,29 @@ class ContextEngine:
         self._material_hash = ""
         self._last_ok_mono = None
         self.integration_summary = {}
+        self.k8s_snapshot, self.k8s_problems = None, []
         self._integrations_at = 0.0
         self.recent_events.clear()
 
     async def _loop(self) -> None:
-        while True:
-            delay = 30.0
-            if self.states:
+        while not self._stopping:
+            delay = float(NO_SOURCE_POLL_S)
+            if self.has_connections:
                 await self.poll()
-                delay = float(min(state.poll_seconds for state in self.states.values()))
+                if self.states:
+                    delay = float(min(min(state.poll_seconds for state in self.states.values()), NO_SOURCE_POLL_S if self.integration_kinds else 3600))
             else:
                 if self.source_errors:
                     self.context = self._empty_context("unreachable")
                 self.broker.publish({"type": "context", "data": self.public_context()})
+            if self._stopping:
+                return
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=delay)
             except asyncio.TimeoutError:
-                pass
+                task = asyncio.current_task()
+                if task and task.cancelling():
+                    raise asyncio.CancelledError from None
             self._wake.clear()
 
     def _empty_context(self, status: str) -> dict[str, Any]:
@@ -204,7 +254,8 @@ class ContextEngine:
             "events": [],
             "changes": [],
             "integrations": {},
-            "coverage": {"metric_count": 0, "missing": [], "signal_count": 0},
+            "problems": [],
+            "coverage": {"metric_count": 0, "missing": [], "signal_count": 0, "has_metrics": False},
         }
 
     def public_context(self) -> dict[str, Any]:
@@ -220,15 +271,17 @@ class ContextEngine:
             return self.states[source_id].source
         if source_id is None and self.states:
             return next(iter(self.states.values())).source
+        if not self.states:
+            raise SourceError("No metric source is connected, so metric queries can't run. Use the log and Kubernetes tools instead.", "bad_data")
         raise SourceError("That metric source isn't connected.", "bad_data")
 
     # Polling ----------------------------------------------------------------
     async def poll(self) -> None:
         async with self._poll_lock:
-            if not self.states:
+            if not self.has_connections:
                 return
             started = time.monotonic()
-            results = await asyncio.gather(*(self._poll_source(state) for state in self.states.values()))
+            results = list(await asyncio.gather(*(self._poll_source(state) for state in self.states.values())))
             await self._refresh_integrations()
             await self._merge(results, started)
 
@@ -352,24 +405,77 @@ class ContextEngine:
             return
         self._integrations_at = time.monotonic()
         rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND enabled = 1", (self.org_id,))
+        self.integration_kinds = {row["kind"] for row in rows}
         summary: dict[str, Any] = {}
         for row in rows:
             client = None
             try:
                 client = build_integration(row, self.box, self.config)
-                summary[row["kind"]] = {"name": row["name"], "status": "ok", **(await client.summary())}
+                if row["kind"] == "kubernetes":
+                    snapshot = await client.snapshot()
+                    self.k8s_snapshot = snapshot
+                    self.k8s_problems = find_problems(snapshot)
+                    await self._enrich_k8s_problems(client)
+                    kube = {"name": row["name"], "status": "ok", **summary_from_snapshot(snapshot), "problems": self.k8s_problems}
+                    for namespace in kube["namespaces"]:
+                        namespace["problems"] = sum(1 for item in self.k8s_problems if item["namespace"] == namespace["name"])
+                    summary["kubernetes"] = kube
+                else:
+                    summary[row["kind"]] = {"name": row["name"], "status": "ok", **(await client.summary())}
             except (SourceError, BlockedTarget, ValueError) as error:
                 summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(getattr(error, "message", str(error)))}
+            except Exception as error:  # A bad answer from one connection must not stop the others.
+                log.exception("integration refresh failed for %s", row["kind"])
+                summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(f"Refresh failed: {error}")}
             finally:
                 if client:
                     await client.close()
+        if "kubernetes" not in summary:
+            self.k8s_snapshot, self.k8s_problems = None, []
         self.integration_summary = summary
+
+    async def _enrich_k8s_problems(self, client: Any) -> None:
+        """Add the crashed container's last lines and a rule-based diagnosis to the worst problems.
+
+        Logs are read again only when a pod restarts, so a crash loop costs one log call per restart, not per poll.
+        A failure here never hides the problems themselves.
+        """
+        events = (self.k8s_snapshot or {}).get("events", [])
+        wanted: dict[str, dict[str, Any]] = {}
+        for problem in self.k8s_problems:
+            logs = None
+            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and len(wanted) < CRASH_LOG_PROBLEMS:
+                pod = problem["pods"][0]
+                container = problem["facts"].get("container", "")
+                previous = problem["problem"] != "not_ready"
+                key = f"{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
+                logs = self._crash_logs.get(key)
+                if logs is None:
+                    try:
+                        result = await client.pod_logs(problem["namespace"], pod, container, previous, CRASH_LOG_LINES)
+                        lines = [scrub(line) for line in result.get("lines", [])]
+                        while lines and sum(len(line) for line in lines) > CRASH_LOG_CHARS:
+                            lines.pop(0)
+                        logs = {"pod": pod, "which": "the crashed container" if previous else "the running container",
+                                "lines": lines, "note": result.get("note", "")}
+                    except SourceError as error:
+                        logs = {"pod": pod, "lines": [], "note": f"Couldn't read the logs: {error.message}"}
+                wanted[key] = logs
+                problem["logs"] = logs
+            try:
+                problem["diagnosis"] = diagnose(problem, (logs or {}).get("lines"), events)
+            except Exception:  # A rule that trips on odd data must not stop the poll.
+                log.exception("diagnosis failed for %s", problem["fingerprint"])
+        self._crash_logs = wanted
+
+    def _integration_ok(self, kind: str) -> bool:
+        return self.integration_summary.get(kind, {}).get("status") == "ok"
 
     # Combining sources ------------------------------------------------------
     async def _merge(self, results: list[dict[str, Any] | None], started: float) -> None:
         now_iso = utcnow()
         sources_info, targets_raw, alerts_raw, groups_raw, signals = [], [], [], [], []
-        any_ok = any(result is not None for result in results)
+        any_ok = any(result is not None for result in results) or any(item.get("status") == "ok" for item in self.integration_summary.values())
         for state in self.states.values():
             source = state.source
             sources_info.append({
@@ -389,13 +495,18 @@ class ContextEngine:
                 signals.extend(state.last["signals"])
         sources_info.extend(self.source_errors)
         failed = [item for item in sources_info if item["status"] != "ok"]
-        status = "ok" if not failed else ("partial" if any_ok else "unreachable")
+        failed_connections = failed + [{"name": item.get("name", kind), "error": item.get("error")} for kind, item in self.integration_summary.items() if item.get("status") != "ok"]
+        if not sources_info and not self.integration_summary:
+            status = "not_configured" if not self.integration_kinds else "unreachable"
+        else:
+            status = "ok" if not failed_connections else ("partial" if any_ok else "unreachable")
         target_state = self._summarize_targets(targets_raw, now_iso)
         alert_state = summarize_alerts(alerts_raw)
         rule_state = summarize_rules(groups_raw)
         anomalies = self._find_anomalies(signals)
+        current = self._current_problems(target_state, alert_state, rule_state, anomalies)
         if any_ok:
-            await self._diff_and_record(target_state, alert_state, rule_state, anomalies)
+            await self._diff_and_record(current)
             self._last_ok_mono = time.monotonic()
         self.version += 1
         has_data = any(state.last for state in self.states.values())
@@ -419,11 +530,11 @@ class ContextEngine:
                 "status": status, "failures": len(failed),
                 "last_ok": max((item["last_ok"] for item in sources_info if item.get("last_ok")), default=None),
                 "poll_ms": round((time.monotonic() - started) * 1000),
-                "error": "; ".join(f"{item['name']}: {item['error']}" for item in failed) or None,
+                "error": "; ".join(f"{item['name']}: {item['error']}" for item in failed_connections) or None,
                 "age_seconds": 0,
             },
             "stale": bool(failed) and has_data,
-            "headline": headline_for(status, target_state, alert_state, anomalies, [item["name"] for item in failed]),
+            "headline": headline_for(status, target_state, alert_state, anomalies, [item["name"] for item in failed_connections], self.k8s_problems),
             "targets": target_state,
             "alerts": alert_state,
             "rules": rule_state,
@@ -432,12 +543,14 @@ class ContextEngine:
             "events": list(self.recent_events),
             "changes": changes,
             "integrations": self.integration_summary,
+            "problems": ranked_problems(current),
             "coverage": {
+                "has_metrics": bool(self.states),
                 "metric_count": sum(len(state.metric_names) for state in self.states.values()),
                 "signal_count": sum(1 for signal in signals if signal["series"]),
                 "missing": missing,
-                "has_logs": "loki" in self.integration_summary or any(state.source.logs_language for state in self.states.values()),
-                "has_kubernetes": "kubernetes" in self.integration_summary,
+                "has_logs": "loki" in self.integration_kinds or "kubernetes" in self.integration_kinds or any(state.source.logs_language for state in self.states.values()),
+                "has_kubernetes": "kubernetes" in self.integration_kinds,
                 "has_changes": bool(changes),
             },
         }
@@ -456,6 +569,7 @@ class ContextEngine:
     def _summarize_targets(self, targets: list[tuple[Any, dict[str, Any], bool]], now_iso: str) -> dict[str, Any]:
         up = unknown = 0
         down_list = []
+        listed: list[dict[str, Any]] = []
         jobs: dict[str, dict[str, int]] = {}
         self._targets_up = set()
         self._targets_unknown = set()
@@ -468,6 +582,11 @@ class ContextEngine:
             health = target.get("health", "unknown")
             instance = labels.get("instance") or target.get("scrapeUrl", "")
             fingerprint = f"target:{source.id}:{job}:{instance}"
+            if len(listed) < TARGET_LIST_LIMIT:
+                # What is watched, and by which source: the address a person recognises, not the collector's own name.
+                listed.append({"instance": instance, "job": labels.get("job") or target.get("scrapePool", "unknown"), "health": health,
+                               "source_id": source.id, "source": source.name, "last_scrape": target.get("lastScrape"),
+                               "error": scrub(target.get("lastError", ""))})
             if health == "up":
                 up += 1
                 bucket["up"] += 1
@@ -486,6 +605,7 @@ class ContextEngine:
         return {
             "total": len(targets), "up": up, "down": len(down_list), "unknown": unknown, "down_list": down_list,
             "jobs": [{"job": job, **counts} for job, counts in sorted(jobs.items())],
+            "list": sorted(listed, key=lambda row: ({"down": 0, "unknown": 1}.get(row["health"], 2), row["source"], row["job"], row["instance"])),
         }
 
     def _find_anomalies(self, signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -512,7 +632,8 @@ class ContextEngine:
         found.sort(key=lambda item: (item["kind"] != "over_limit", -abs(item.get("z") or 0)))
         return found
 
-    async def _diff_and_record(self, targets: dict[str, Any], alerts: dict[str, Any], rules: dict[str, Any], anomalies: list[dict[str, Any]]) -> None:
+    def _current_problems(self, targets: dict[str, Any], alerts: dict[str, Any], rules: dict[str, Any], anomalies: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Everything wrong right now, from every connection, keyed by a fingerprint that stays the same while it lasts."""
         current: dict[str, dict[str, Any]] = {}
         for alert in alerts["firing"]:
             current[alert["fingerprint"]] = {
@@ -523,6 +644,13 @@ class ContextEngine:
             current[target["fingerprint"]] = {
                 "kind": "target", "severity": "critical", "title": f"Target down: {target['instance']} ({target['job']})",
                 "clear": f"Target back up: {target['instance']} ({target['job']})", "detail": target,
+            }
+        for problem in self.k8s_problems:
+            detail = {key: value for key, value in problem.items() if key not in {"title", "clear"}}
+            if problem.get("diagnosis"):
+                detail["summary"] = problem["diagnosis"]["cause"]
+            current[problem["fingerprint"]] = {
+                "kind": "k8s", "severity": problem["severity"], "title": problem["title"], "clear": problem["clear"], "detail": detail,
             }
         for anomaly in anomalies:
             wording = "over its limit" if anomaly["kind"] == "over_limit" else "unusual for this server"
@@ -537,21 +665,36 @@ class ContextEngine:
                 "kind": "rule", "severity": "warning", "title": f"Rule failing: {rule['name']}",
                 "clear": f"Rule evaluating again: {rule['name']}", "detail": rule,
             }
+        return current
+
+    async def _diff_and_record(self, current: dict[str, dict[str, Any]]) -> None:
+        k8s_unknown = "kubernetes" in self.integration_kinds and not self._integration_ok("kubernetes")
         # Problems seen on the first poll started at an unknown earlier time, so don't date them as new.
         first_poll = not self._state_known
         self._state_known = True
         if first_poll:
             await self._close_problems_that_ended_offline(current)
         for fingerprint, item in current.items():
+            self._k8s_missing_since.pop(fingerprint, None)
             if fingerprint not in self._active:
                 self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id")}
                 title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
-                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, item["detail"], item["detail"].get("source_id"), notify=not first_poll)
+                # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
+                detail = {key: value for key, value in item["detail"].items() if key != "logs"}
+                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"), notify=not first_poll)
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.
             if fingerprint in self._targets_unknown:
                 continue
+            # A cluster that didn't answer gives no evidence that its problems ended.
+            if k8s_unknown and fingerprint.startswith("k8s:"):
+                continue
+            if fingerprint.startswith("k8s:"):
+                missing_since = self._k8s_missing_since.setdefault(fingerprint, time.monotonic())
+                if time.monotonic() - missing_since < K8S_CLEAR_AFTER_S:
+                    continue
+                self._k8s_missing_since.pop(fingerprint, None)
             item = self._active.pop(fingerprint)
             title = item["clear"]
             if item.get("kind") == "target" and fingerprint not in self._targets_up:
@@ -565,9 +708,13 @@ class ContextEngine:
         for row in rows:
             if not row["kind"].endswith("_started") or row["fingerprint"] in current:
                 continue
-            state = self.states.get(row["source_id"])
-            if not state or not state.last:
-                continue  # Without an answer from its source, there's no evidence that it ended.
+            if row["fingerprint"].startswith("k8s:"):
+                if not self._integration_ok("kubernetes"):
+                    continue
+            else:
+                state = self.states.get(row["source_id"])
+                if not state or not state.last:
+                    continue  # Without an answer from its source, there's no evidence that it ended.
             name = row["title"].removeprefix("Already active when the console connected. ")
             await self._record_event(row["kind"].replace("_started", "_cleared"), "info", row["fingerprint"], f"Ended while the console was offline: {name}", {}, row["source_id"], notify=False)
 
@@ -636,9 +783,9 @@ class ContextEngine:
         return self.public_context()
 
     def is_fresh(self) -> bool:
-        if self._last_ok_mono is None or not self.states:
+        if self._last_ok_mono is None or not self.has_connections:
             return False
-        interval = min(state.poll_seconds for state in self.states.values())
+        interval = min([state.poll_seconds for state in self.states.values()] + ([INTEGRATION_EVERY_S] if self.integration_kinds else []))
         return time.monotonic() - self._last_ok_mono <= max(interval * 2, 30)
 
 
@@ -661,7 +808,8 @@ class EngineManager:
 
     async def start_active(self) -> None:
         rows = await self.db.all(
-            "SELECT DISTINCT s.org_id FROM sources s JOIN organizations o ON o.id = s.org_id WHERE s.enabled = 1 AND o.status = 'active'")
+            "SELECT DISTINCT s.org_id FROM sources s JOIN organizations o ON o.id = s.org_id WHERE s.enabled = 1 AND o.status = 'active' "
+            "UNION SELECT DISTINCT i.org_id FROM integrations i JOIN organizations o ON o.id = i.org_id WHERE i.enabled = 1 AND o.status = 'active'")
         for row in rows:
             await self.get(row["org_id"])
 
@@ -760,6 +908,7 @@ def material_hash(context: dict[str, Any]) -> str:
         "down": sorted(target["fingerprint"] for target in context.get("targets", {}).get("down_list", [])),
         "anomalies": sorted(item["fingerprint"] for item in context.get("anomalies", [])),
         "rules": sorted(f"{rule['group']}:{rule['name']}" for rule in context.get("rules", {}).get("failing", [])),
+        "problems": sorted(item["fingerprint"] for item in context.get("problems", [])),
     }
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
@@ -768,27 +917,44 @@ def _plural(count: int, one: str, many: str) -> str:
     return f"{count} {one if count == 1 else many}"
 
 
-def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], anomalies: list[dict[str, Any]], failed: list[str] | None = None) -> dict[str, str]:
+def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], anomalies: list[dict[str, Any]], failed: list[str] | None = None,
+                 k8s_problems: list[dict[str, Any]] | None = None) -> dict[str, str]:
     if status == "not_configured":
-        return {"tone": "idle", "text": "Connect a metric source to start."}
+        return {"tone": "idle", "text": "Connect a metric source, a log store, or a Kubernetes cluster to start."}
     if status == "unreachable":
-        return {"tone": "critical", "text": "Your metric sources aren't answering. These numbers are out of date."}
+        return {"tone": "critical", "text": "Your connections aren't answering. These numbers are out of date."}
     firing = len(alerts.get("firing", []))
     down = targets.get("down", 0)
+    k8s = k8s_problems or []
+    k8s_critical = [item for item in k8s if item["severity"] == "critical"]
     parts = []
     if firing:
         parts.append(f"{_plural(firing, 'alert is', 'alerts are')} firing.")
     if down:
         parts.append(f"{_plural(down, 'target is', 'targets are')} down.")
+    if k8s_critical:
+        parts.append(f"{_plural(len(k8s_critical), 'Kubernetes workload is', 'Kubernetes workloads are')} failing.")
     if status == "partial" and failed:
-        parts.append(f"{_plural(len(failed), 'source isn’t', 'sources aren’t')} answering.")
+        parts.append(f"{_plural(len(failed), 'connection isn’t', 'connections aren’t')} answering.")
     if parts:
         return {"tone": "critical", "text": " ".join(parts)}
-    if anomalies:
-        return {"tone": "warning", "text": f"Nothing is firing, but {_plural(len(anomalies), 'signal looks', 'signals look')} wrong."}
+    if anomalies or k8s:
+        count = len(anomalies) + len(k8s)
+        return {"tone": "warning", "text": f"Nothing is firing, but {_plural(count, 'thing looks', 'things look')} wrong."}
     if targets.get("total", 0) == 0 and status == "ok" and not alerts.get("firing"):
         return {"tone": "ok", "text": "Connected. Nothing is firing."}
     return {"tone": "ok", "text": "Everything is up. Nothing is firing."}
+
+
+KIND_ORDER = {"alert": 0, "target": 1, "k8s": 2, "log": 3, "rule": 4, "signal": 5}
+
+
+def ranked_problems(current: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """One list of what is wrong, worst first, for the page and for the model."""
+    rows = [{"fingerprint": fingerprint, "kind": item["kind"], "severity": item["severity"], "title": item["title"],
+             "detail": item["detail"]} for fingerprint, item in current.items()]
+    rows.sort(key=lambda row: (-SEVERITY_RANK.get(row["severity"], 0), KIND_ORDER.get(row["kind"], 9), row["title"]))
+    return rows
 
 
 def age_seconds(iso: str | None) -> float | None:

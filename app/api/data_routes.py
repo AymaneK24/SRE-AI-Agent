@@ -231,17 +231,69 @@ async def delete_source(source_id: int, user: Admin, ctx: Ctx) -> Response:
 
 
 # Log and Kubernetes connections ---------------------------------------------
+PEM_RE = re.compile(r"^\s*(-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+$")
+SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
 def clean_integration_config(kind: str, config: dict[str, Any]) -> dict[str, Any]:
+    in_cluster = kind == "kubernetes" and bool(config.get("in_cluster"))
     url = str(config.get("url", "")).strip().rstrip("/")
-    if not re.fullmatch(r"https?://[^\s/@]+(:\d+)?(/[^\s]*)?", url):
+    if not in_cluster and not re.fullmatch(r"https?://[^\s/@]+(:\d+)?(/[^\s]*)?", url):
         raise _bad("Enter an address such as https://loki.example.com:3100.")
     if kind == "loki":
-        return {"url": url, "selector": str(config.get("selector", "")).strip()[:300], "tenant": str(config.get("tenant", "")).strip()[:100]}
-    return {"url": url, "namespace": str(config.get("namespace", "")).strip()[:100], "verify_tls": bool(config.get("verify_tls", True))}
+        tenant = str(config.get("tenant", "")).strip()
+        # It's sent as a header, so only the characters Loki allows in a tenant ID.
+        if tenant and not re.fullmatch(r"[A-Za-z0-9_.|!*'()-]{1,100}", tenant):
+            raise _bad("Enter the tenant as letters, digits, and - _ . only, as your Loki expects in X-Scope-OrgID.")
+        return {"url": url, "selector": str(config.get("selector", "")).strip()[:300], "tenant": tenant}
+    ca_cert = str(config.get("ca_cert", "")).strip()
+    if ca_cert and (len(ca_cert) > 20000 or not PEM_RE.match(ca_cert)):
+        raise _bad("Paste the CA certificate in PEM form, from -----BEGIN CERTIFICATE----- to -----END CERTIFICATE-----.")
+    server_name = str(config.get("tls_server_name", "")).strip()
+    if server_name and not SERVER_NAME_RE.match(server_name):
+        raise _bad("Enter the TLS server name as a host name, such as kubernetes.docker.internal.")
+    return {"url": "" if in_cluster else url, "namespace": str(config.get("namespace", "")).strip()[:100],
+            "verify_tls": bool(config.get("verify_tls", True)), "ca_cert": ca_cert, "tls_server_name": server_name, "in_cluster": in_cluster}
+
+
+def certificate_info(pem: str) -> dict[str, Any] | None:
+    """Who a CA certificate names and when it expires, so the page can show it without the whole PEM block."""
+    if not pem:
+        return None
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+
+        cert = x509.load_pem_x509_certificate(pem.encode())
+        return {"subject": cert.subject.rfc4514_string()[:200], "expires": cert.not_valid_after_utc.isoformat().replace("+00:00", "Z"),
+                "sha256": cert.fingerprint(hashes.SHA256()).hex()[:16]}
+    except ValueError:
+        return {"subject": "Unreadable certificate", "expires": None, "sha256": ""}
 
 
 def public_integration(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in {**row, "config": json.loads(row["config"]), "has_secret": bool(row["secret_enc"]), "enabled": bool(row["enabled"])}.items() if key != "secret_enc"}
+    config = json.loads(row["config"])
+    # The page shows a saved CA as a short summary. The PEM block stays on the server.
+    ca_cert = config.pop("ca_cert", "")
+    if row["kind"] == "kubernetes":
+        config["ca_info"] = certificate_info(ca_cert)
+    return {key: value for key, value in {**row, "config": config, "has_secret": bool(row["secret_enc"]), "enabled": bool(row["enabled"])}.items() if key != "secret_enc"}
+
+
+def _keep_saved_ca(config: dict[str, Any], body_config: dict[str, Any], saved: dict[str, Any] | None) -> dict[str, Any]:
+    """Saving or testing without pasting the CA again keeps the saved one, unless the person removed it."""
+    if saved and saved["kind"] == "kubernetes" and not config.get("ca_cert") and not body_config.get("remove_ca"):
+        config["ca_cert"] = json.loads(saved["config"]).get("ca_cert", "")
+    return config
+
+
+@router.get("/k8s/namespaces")
+async def k8s_namespaces(user: Engineer, ctx: Ctx) -> dict[str, Any]:
+    """Namespaces seen in the cluster's last snapshot, for choosing what a project covers."""
+    engine = await ctx.engines.get(user.org_id)
+    snapshot = engine.k8s_snapshot or {}
+    names = {pod["namespace"] for pod in snapshot.get("pods", [])} | {row["namespace"] for row in snapshot.get("deployments", [])}
+    return {"connected": "kubernetes" in engine.integration_kinds, "namespaces": sorted(name for name in names if name)}
 
 
 @router.get("/integrations")
@@ -258,8 +310,9 @@ async def test_integration(body: IntegrationTestBody, user: Admin, ctx: Ctx) -> 
     secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
     client = None
     try:
-        config = clean_integration_config(body.kind, body.config)
-        await check_url(config["url"], ctx.config.target_policy)
+        config = _keep_saved_ca(clean_integration_config(body.kind, body.config), body.config, saved)
+        if config["url"]:
+            await check_url(config["url"], ctx.config.target_policy)
         client = build_integration({"kind": body.kind, "config": config, "secret_enc": ctx.box.encrypt_json(secrets)}, ctx.box, ctx.config)
         return JSONResponse(await client.test())
     except (SourceError, BlockedTarget) as error:
@@ -273,16 +326,22 @@ async def test_integration(body: IntegrationTestBody, user: Admin, ctx: Ctx) -> 
 async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
     config = clean_integration_config(body.kind, body.config)
     try:
-        await check_url(config["url"], ctx.config.target_policy)
+        if config["url"]:
+            await check_url(config["url"], ctx.config.target_policy)
     except BlockedTarget as error:
         raise HTTPException(422, str(error)) from error
     now = utcnow()
+    # Saving again without retyping the token or pasting the CA keeps the saved ones.
+    saved = await ctx.db.one("SELECT kind, config, secret_enc FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
+    secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
+    config = _keep_saved_ca(config, body.config, saved)
     await ctx.db.execute("DELETE FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
     new_id = await ctx.db.insert(
         "INSERT INTO integrations(org_id, kind, name, config, secret_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json({k: v for k, v in body.secrets.items() if v}), now, now),
+        (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json(secrets), now, now),
     )
     await ctx.db.audit(user.org_id, "integration_saved", f"integration:{new_id}", {"kind": body.kind}, actor=user.actor)
+    await (await ctx.engines.get(user.org_id)).integrations_changed()
     return public_integration(await ctx.db.one("SELECT * FROM integrations WHERE id = ?", (new_id,)))
 
 
@@ -290,6 +349,7 @@ async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> di
 async def delete_integration(integration_id: int, user: Admin, ctx: Ctx) -> Response:
     await ctx.db.execute("DELETE FROM integrations WHERE id = ? AND org_id = ?", (integration_id, user.org_id))
     await ctx.db.audit(user.org_id, "integration_deleted", f"integration:{integration_id}", {}, actor=user.actor)
+    await (await ctx.engines.get(user.org_id)).integrations_changed()
     return Response(status_code=204)
 
 
@@ -410,14 +470,17 @@ async def refresh_context(user: Engineer, ctx: Ctx) -> dict[str, Any]:
 
 
 @router.get("/context/prompt-preview")
-async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude"] | None = None) -> dict[str, Any]:
+async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None) -> dict[str, Any]:
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
     name = provider or settings["provider"]
     chars = int(settings["ollama"]["num_ctx"]) * 2 if name == "ollama" else 60000
     engine = await ctx.engines.get(user.org_id)
     rendered = render_context(engine.context, chars)
+    section = settings[name]
+    mode = section.get("small_model", "auto")
+    compact = name == "ollama" and (mode == "on" or (mode == "auto" and ai_settings.is_small_model(section.get("model", ""))))
     return {"version": engine.context.get("version"), "as_of": engine.context.get("as_of"), "provider": name, "max_chars": chars,
-            "text": build_system(rendered, [], [], settings[name]["use_tools"], False)}
+            "text": build_system(rendered, [], [], section["use_tools"], False, None, compact)}
 
 
 @router.get("/stream")

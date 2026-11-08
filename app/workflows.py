@@ -97,7 +97,8 @@ async def seed_workflows(db: Database, org_id: int) -> None:
 
 
 def public_workflow(row: dict[str, Any]) -> dict[str, Any]:
-    return {**row, "match_rules": json.loads(row["match_rules"]), "steps": json.loads(row["steps"])}
+    return {**row, "match_rules": json.loads(row["match_rules"]), "steps": json.loads(row["steps"]),
+            "targets": json.loads(row.get("targets") or "[]"), "project_id": row.get("project_id")}
 
 
 def new_run_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -109,7 +110,10 @@ def public_run(row: dict[str, Any]) -> dict[str, Any]:
     return {**row, "steps": json.loads(row["steps"])}
 
 
-def _matches(rules: dict[str, Any], names: set[str], signals: set[str], text: str) -> bool:
+def _matches(rules: dict[str, Any], names: set[str], signals: set[str], text: str, targets: list[str] | None = None) -> bool:
+    # A runbook written for a server or workload matches anything that names it.
+    if text and any(target.lower() in text for target in targets or [] if len(target) >= 3):
+        return True
     if any(any(rule.lower() in name for name in names) for rule in rules.get("alerts", [])):
         return True
     if signals & {item for item in rules.get("signals", [])}:
@@ -122,7 +126,7 @@ async def workflows_for(db: Database, org_id: int, *, alert_names: list[str] | N
     names = {name.lower() for name in alert_names or []}
     signals = {re.sub(r"^s\d+_", "", item) for item in signal_ids or []}
     lowered = text.lower()
-    return [public_workflow(row) for row in rows if _matches(json.loads(row["match_rules"]), names, signals, lowered)]
+    return [public_workflow(row) for row in rows if _matches(json.loads(row["match_rules"]), names, signals, lowered, json.loads(row.get("targets") or "[]"))]
 
 
 async def matching_workflows(db: Database, org_id: int, prompt: str, context: dict[str, Any], limit: int = 4) -> list[dict[str, Any]]:
@@ -130,7 +134,8 @@ async def matching_workflows(db: Database, org_id: int, prompt: str, context: di
     if context.get("targets", {}).get("down"):
         names.append("targetdown")
     signals = [item["signal_id"] for item in context.get("anomalies", [])]
-    found = await workflows_for(db, org_id, alert_names=names, signal_ids=signals, text=prompt)
+    problems = " ".join(item["title"] for item in context.get("problems", []))
+    found = await workflows_for(db, org_id, alert_names=names, signal_ids=signals, text=f"{prompt} {problems}")
     # Reviewed workflows come first, and drafts never hide them.
     found.sort(key=lambda item: item["status"] != "approved")
     return found[:limit]

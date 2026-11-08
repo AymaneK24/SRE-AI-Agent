@@ -5,7 +5,9 @@ import { api, can, clear, confirmDialog, dialogHead, formatValue, h, labelText, 
 let remembered = null;
 
 function queryFromArgs(args) {
-  return args && (args.query || args.contains || args.text || args.resource) || '';
+  if (!args) return '';
+  if (args.pod || args.name) return `${args.namespace ? `${args.namespace}/` : ''}${args.pod || args.name}${args.previous ? ', crashed container' : ''}`;
+  return args.query || args.contains || args.text || args.resource || '';
 }
 
 function toolLabel(name) {
@@ -15,6 +17,8 @@ function toolLabel(name) {
     list_metrics: 'Searched metric names',
     query_logs: 'Searched logs',
     get_kubernetes_state: 'Read Kubernetes state',
+    get_pod_logs: 'Read pod logs',
+    describe_object: 'Described',
     get_recent_changes: 'Read recent changes',
     search_past_investigations: 'Searched past investigations',
   }[name] || name;
@@ -30,7 +34,7 @@ export function mount(container, params) {
   let activeRunId = null;
   let streamAbort = null;
   let tickTimer = null;
-  let modelOptions = { ollama: [], claude: [] };
+  let modelOptions = { ollama: [], claude: [], gemini: [] };
   let disposed = false;
 
   const titleHost = h('div');
@@ -77,19 +81,22 @@ export function mount(container, params) {
 
   function renderComposerNote() {
     const { provider } = selectedParts();
-    composerNote.hidden = provider !== 'claude';
-    composerNote.textContent = provider === 'claude' ? 'Your prompt and the live context, including host and service names, go to Anthropic.' : '';
+    const company = { claude: 'Anthropic', gemini: 'Google' }[provider];
+    composerNote.hidden = !company;
+    composerNote.textContent = company ? `Your prompt and the live context, including host and service names, go to ${company}.` : '';
   }
 
   async function loadModels() {
     const ai = live.ai || await refreshAi();
-    const [ollama, claude] = await Promise.all([
+    const [ollama, claude, gemini] = await Promise.all([
       api('/api/ai/providers/ollama/models').catch(() => ({ models: [] })),
       api('/api/ai/providers/claude/models').catch(() => ({ models: [] })),
+      api('/api/ai/providers/gemini/models').catch(() => ({ models: [] })),
     ]);
     if (disposed) return;
-    modelOptions = { ollama: ollama.models || [], claude: claude.models || [] };
+    modelOptions = { ollama: ollama.models || [], claude: claude.models || [], gemini: gemini.models || [] };
     const claudeReady = ai.claude.key_configured && ai.claude.consent;
+    const geminiReady = Boolean(ai.gemini?.key_configured && ai.gemini?.consent);
     const options = [];
     const ollamaIds = modelOptions.ollama.map((item) => item.id);
     if (ai.ollama.model && !ollamaIds.includes(ai.ollama.model)) modelOptions.ollama.unshift({ id: ai.ollama.model, label: ai.ollama.model });
@@ -101,6 +108,11 @@ export function mount(container, params) {
     if (ai.claude.model && !claudeIds.includes(ai.claude.model)) modelOptions.claude.unshift({ id: ai.claude.model, label: ai.claude.model });
     options.push(h('optgroup', { label: claudeReady ? 'Claude, over the internet' : can('admin') ? 'Claude: set up in Connections' : 'Claude: not set up' },
       modelOptions.claude.map((item) => h('option', { value: `claude::${item.id}`, disabled: !claudeReady }, item.label))));
+    if (ai.gemini?.model && !modelOptions.gemini.some((item) => item.id === ai.gemini.model)) modelOptions.gemini.unshift({ id: ai.gemini.model, label: ai.gemini.model });
+    if (modelOptions.gemini.length || geminiReady) {
+      options.push(h('optgroup', { label: geminiReady ? 'Gemini, over the internet' : can('admin') ? 'Gemini: set up in Connections' : 'Gemini: not set up' },
+        modelOptions.gemini.map((item) => h('option', { value: `gemini::${item.id}`, disabled: !geminiReady }, item.label))));
+    }
     clear(modelSelect, options);
     const preferred = remembered || `${ai.provider}::${ai[ai.provider].model}`;
     modelSelect.value = preferred;
@@ -492,18 +504,20 @@ export function mount(container, params) {
     const anomalies = context.anomalies || [];
     const events = (context.events || []).slice(0, 6);
     const stale = health.status === 'unreachable' || health.status === 'partial';
+    const metrics = context.coverage?.has_metrics !== false;
     const scroll = rail.scrollTop;
     clear(rail,
       h('div', { class: 'rail-head' }, h('h2', {}, 'Live context')),
-      h('p', { class: 'small muted' }, health.status === 'not_configured' ? 'No metric source connected.' : `Version ${context.version}, updated ${timeAgo(context.as_of)}${context.sources?.length ? ` from ${context.sources.map((item) => item.name).join(', ')}` : ''}.`),
+      h('p', { class: 'small muted' }, health.status === 'not_configured' ? 'Nothing connected yet.' : `Version ${context.version}, updated ${timeAgo(context.as_of)}${context.sources?.length ? ` from ${context.sources.map((item) => item.name).join(', ')}` : ''}.`),
       stale ? h('p', { class: 'stale-banner small', style: 'margin:10px 0 0' }, `A source isn't answering. The model will be told this data is from ${timeAgo(health.last_ok)}.`) : null,
-      health.status === 'not_configured' ? h('p', { class: 'setup-banner small' }, can('admin') ? h('a', { href: '#/connections' }, 'Connect a metric source') : 'Ask an admin to connect a metric source', ' so the model has data to work with.') : null,
-      railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name), h('small', {}, alert.summary || labelText(alert.labels))))),
-      railGroup(`Down targets (${down.length})`, down.map((target) => h('div', { class: 'rail-item' }, h('b', {}, target.instance), h('small', {}, `Job ${target.job}`)))),
-      railGroup(`Out-of-range signals (${anomalies.length})`, anomalies.slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, `${item.title}: ${formatValue(item.value, item.unit)}`), h('small', {}, labelText(item.labels))))),
+      health.status === 'not_configured' ? h('p', { class: 'setup-banner small' }, can('admin') ? h('a', { href: '#/connections' }, 'Add a connection') : 'Ask an admin to add a connection', ' so the model has data to work with.') : null,
+      railGroup(`Problems right now (${(context.problems || []).length})`, (context.problems || []).slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, item.title), h('small', {}, item.detail?.diagnosis?.cause || item.kind)))),
+      metrics ? railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name), h('small', {}, alert.summary || labelText(alert.labels))))) : null,
+      metrics ? railGroup(`Down targets (${down.length})`, down.map((target) => h('div', { class: 'rail-item' }, h('b', {}, target.instance), h('small', {}, `Job ${target.job}`)))) : null,
+      metrics ? railGroup(`Out-of-range signals (${anomalies.length})`, anomalies.slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, `${item.title}: ${formatValue(item.value, item.unit)}`), h('small', {}, labelText(item.labels))))) : null,
       railGroup('Recorded changes', (context.changes || []).slice(0, 5).map((change) => h('div', { class: 'rail-item' }, change.title, h('small', {}, `${change.origin}, ${timeAgo(change.ts)}`)))),
       railGroup('State changes', events.map((event) => h('div', { class: 'rail-item' }, event.title, h('small', {}, timeAgo(event.ts))))),
-      h('p', { class: 'small muted', style: 'margin-top:16px' }, `Not available to the model: ${[...(context.coverage?.missing || []), context.coverage?.has_logs ? null : 'logs', 'traces', context.coverage?.has_kubernetes ? null : 'the Kubernetes API'].filter(Boolean).join(', ')}.`),
+      h('p', { class: 'small muted', style: 'margin-top:16px' }, `Not available to the model: ${[...(context.coverage?.missing || []), context.coverage?.has_metrics === false ? 'metrics' : null, context.coverage?.has_logs ? null : 'logs', 'traces', context.coverage?.has_kubernetes ? null : 'the Kubernetes API'].filter(Boolean).join(', ')}.`),
       h('div', { class: 'form-actions' }, h('button', { class: 'button compact', type: 'button', onClick: showExact }, 'Show exact text sent')));
     rail.scrollTop = scroll;
   }

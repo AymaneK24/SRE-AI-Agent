@@ -181,11 +181,17 @@ async def test_report_is_a_fixed_snapshot_with_a_readable_pdf(console, prom_serv
 
     settings = (await admin.get("/api/ai/settings")).json()
     settings["ollama"]["url"] = fake_models
-    settings["ollama"]["model"] = "llama3.2:latest"
+    settings["ollama"]["model"] = "slow-llama3.2:latest"
     assert (await admin.put("/api/ai/settings", json={"provider": "ollama", "max_rounds": 3, "ollama": settings["ollama"], "claude": settings["claude"]})).status_code == 200
     noted = await admin.post(f"/api/projects/{project_id}/reports/{report['id']}/notes", json={})
-    assert noted.status_code == 200, noted.text
-    assert noted.json()["ai_model"] == "llama3.2:latest" and noted.json()["ai_notes"]
+    assert noted.status_code == 202, noted.text
+    assert noted.json()["notes_status"] == "pending"
+    # A report waiting for its notes can't be downloaded yet, so nobody gets a PDF without them.
+    waiting = await admin.get(f"/api/projects/{project_id}/reports/{report['id']}/pdf")
+    assert waiting.status_code == 409 and "still being written" in waiting.text
+    assert (await admin.post(f"/api/projects/{project_id}/reports/{report['id']}/notes", json={})).status_code == 409
+    noted = await _wait_for_notes(admin, project_id, report["id"])
+    assert noted["notes_status"] == "done" and noted["ai_model"] == "slow-llama3.2:latest" and noted["ai_notes"]
     # Every prompt is logged, including this one.
     calls = (await admin.get("/api/llm-calls")).json()
     calls = calls["items"] if isinstance(calls, dict) else calls
@@ -197,7 +203,31 @@ async def test_report_is_a_fixed_snapshot_with_a_readable_pdf(console, prom_serv
     text = " ".join(page.extract_text() for page in PdfReader(io.BytesIO(response.content)).pages)
     for expected in ("Payments", "Recurring issues", "Alert firing: HighErrorRate", "Patterns", "AI notes", "llama3.2:latest", "Data and method", "<b>Odd & name</b>"):
         assert expected in text, expected
+
+    # Asking for notes when generating gives the same result in one step.
+    second = (await admin.post(f"/api/projects/{project_id}/reports", json={"days": 30, "ai_notes": True})).json()
+    assert second["notes_status"] == "pending"
+    assert (await _wait_for_notes(admin, project_id, second["id"]))["notes_status"] == "done"
+
+    # A model that can't be reached leaves the report usable, without notes, and says why.
+    settings["ollama"]["url"] = "http://127.0.0.1:9"
+    await admin.put("/api/ai/settings", json={"provider": "ollama", "max_rounds": 3, "ollama": settings["ollama"], "claude": settings["claude"]})
+    third = (await admin.post(f"/api/projects/{project_id}/reports", json={"days": 30, "ai_notes": True})).json()
+    failed = await _wait_for_notes(admin, project_id, third["id"])
+    assert failed["notes_status"] == "failed" and failed["notes_error"]
+    assert (await admin.get(f"/api/projects/{project_id}/reports/{third['id']}/pdf")).status_code == 200
     await admin.aclose()
+
+
+async def _wait_for_notes(client, project_id, report_id):
+    import asyncio
+
+    for _ in range(100):
+        report = next(item for item in (await client.get(f"/api/projects/{project_id}/reports")).json() if item["id"] == report_id)
+        if report["notes_status"] != "pending":
+            return report
+        await asyncio.sleep(0.1)
+    raise AssertionError("the notes never finished")
 
 
 async def test_viewers_can_read_but_not_change_projects(console, prom_server):
@@ -247,7 +277,8 @@ def test_pdf_handles_empty_data_and_hostile_text():
 def _old_sqlite_schema(version):
     """The tables as version 2 or 3 of the app created them."""
     from app import schema
-    old = schema.sqlite_statements().replace(schema.V4_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V5_TABLES.format(**schema.SQLITE_TYPES), "")
+    old = (schema.sqlite_statements().replace(schema.V4_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V5_TABLES.format(**schema.SQLITE_TYPES), "")
+           .replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, ""))
     for new, previous in (("  username TEXT NOT NULL UNIQUE,\n  email TEXT NOT NULL UNIQUE,\n  name TEXT NOT NULL,\n  pending_email TEXT,\n", "  username TEXT UNIQUE,\n  email TEXT UNIQUE,\n  name TEXT NOT NULL DEFAULT '',\n"),
                           ("  owner_id BIGINT,\n  visibility TEXT NOT NULL DEFAULT 'private',\n  shared_by TEXT NOT NULL DEFAULT '',\n  shared_at TEXT,\n", "")):
         assert new in old
@@ -294,3 +325,21 @@ def test_upgrading_keeps_existing_data(tmp_path, version):
 def test_public_address_is_accepted_automatically():
     config = Config(public_url="http://10.1.2.3:8000", allowed_hosts=["localhost"])
     assert "10.1.2.3" in config.accepted_hosts and json.dumps(config.accepted_hosts)
+
+
+def test_upgrading_from_version_5_adds_project_namespaces(tmp_path):
+    from app import schema
+    path = tmp_path / "console.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(schema.sqlite_statements().replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, ""))
+    conn.execute("INSERT INTO organizations(name, slug, contact_email, policies, created_at) VALUES ('Kept', 'kept', '', '{}', 'now')")
+    conn.execute("INSERT INTO projects(org_id, name, created_at, updated_at) VALUES (1, 'Payments', 'now', 'now')")
+    conn.execute("PRAGMA user_version=5")
+    conn.commit()
+    conn.close()
+    db = Database(path, "")
+    assert db._all("SELECT name FROM projects")[0]["name"] == "Payments"
+    assert db._all("SELECT count(*) AS n FROM project_namespaces")[0]["n"] == 0
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+    assert db._all("SELECT notes_status FROM project_reports") == [] and db._all("SELECT targets FROM workflows WHERE id = 0") == []
+    db.close()

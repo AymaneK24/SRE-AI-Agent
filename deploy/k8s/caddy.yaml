@@ -1,4 +1,5 @@
-# HTTPS entry point. It uses the same Caddyfile as the VM setup and gets its own Let's Encrypt certificate.
+# HTTPS entry point, on an internal load balancer by default. Its certificate comes from the caddyfile ConfigMap:
+# a company certificate in the rcc-tls Secret (Caddyfile.internal, recommended), Caddy's own, or Let's Encrypt.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -53,10 +54,21 @@ spec:
               subPath: Caddyfile
             - name: data
               mountPath: /data
+            # A company certificate, or one from cert-manager, for deploy/Caddyfile.internal. Optional.
+            - name: certs
+              mountPath: /certs
+              readOnly: true
       volumes:
         - name: caddyfile
           configMap:
             name: caddyfile
+        - name: certs
+          secret:
+            secretName: rcc-tls
+            optional: true
+            items:
+              - { key: tls.crt, path: cert.pem }
+              - { key: tls.key, path: key.pem }
         - name: data
           persistentVolumeClaim:
             claimName: caddy-data
@@ -67,6 +79,9 @@ metadata:
   name: caddy
   namespace: rcc
   annotations:
+    # Private by default: the load balancer gets an address in the cluster's VNet, not on the internet.
+    # Remove this line only for a public console (with Let's Encrypt over the internet and single sign-on).
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
     # Live updates can be quiet for a while, so allow longer than Azure's default 4 minutes.
     service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout: "30"
 spec:

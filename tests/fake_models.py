@@ -60,6 +60,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}, 401)
                 return
             self._json({"data": [{"id": "claude-test-1", "display_name": "Claude Test 1", "type": "model"}], "has_more": False})
+        elif self.path.startswith("/v1beta/models"):
+            if self.headers.get("x-goog-api-key") != "gemini-test-key":
+                self._json({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}, 400)
+                return
+            self._json({"models": [
+                {"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+                {"name": "models/text-embedding-005", "displayName": "Embedding", "supportedGenerationMethods": ["embedContent"]},
+            ]})
         elif self.path == "/_received":
             self._json(received)
         else:
@@ -72,6 +80,8 @@ class Handler(BaseHTTPRequestHandler):
             self._ollama(body)
         elif self.path == "/v1/messages":
             self._claude(body)
+        elif self.path.startswith("/v1beta/models/") and ":streamGenerateContent" in self.path:
+            self._gemini(body)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -85,6 +95,14 @@ class Handler(BaseHTTPRequestHandler):
         self._start_stream("application/x-ndjson")
         system = body["messages"][0]["content"]
         used_tool = any(message["role"] == "tool" for message in body["messages"])
+        if body["model"].startswith(("careless", "careful")):
+            self._replay(body, system, used_tool)
+            return
+        if body["model"].startswith("slow"):
+            time.sleep(1.5)  # Like a model on a CPU: long enough for a test to see work in progress.
+        if body["model"].startswith("stubborn"):
+            self._stubborn(body)
+            return
         if body.get("tools") and not used_tool:
             chunk = {"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {
                 "name": "run_range_query", "arguments": {"query": "sum(rate(http_requests_total[5m]))", "minutes": 10}}}]}, "done": False}
@@ -96,6 +114,82 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(0.01)
         self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop", "prompt_eval_count": 900, "eval_count": 120}) + "\n").encode())
+
+    def _gemini(self, body):
+        """generateContent streaming, as documented: SSE `data:` chunks of candidates[0].content.parts, then usage.
+        Like Gemini 3, a function call carries a thought signature, and a request that drops it is refused."""
+        if self.headers.get("x-goog-api-key") != "gemini-test-key":
+            self._json({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}, 400)
+            return
+        if "alt=sse" not in self.path or "store" in body or "systemInstruction" not in body:
+            self._json({"error": {"code": 400, "message": "bad request shape"}}, 400)
+            return
+        contents = body["contents"]
+        answered = any("functionResponse" in part for item in contents for part in item["parts"])
+        for item in contents:
+            for part in item["parts"]:
+                if item["role"] == "model" and "functionCall" in part and part.get("thoughtSignature") != "sig-abc":
+                    self._json({"error": {"code": 400, "message": "Function call is missing a thought_signature in functionCall parts."}}, 400)
+                    return
+        self._start_stream("text/event-stream")
+
+        def send(chunk):
+            self.wfile.write(f"data: {json.dumps(chunk)}\r\n\r\n".encode())
+            self.wfile.flush()
+
+        if body.get("tools") and not answered:
+            send({"candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "run_instant_query", "args": {"query": "up"}}, "thoughtSignature": "sig-abc"}]}, "index": 0}]})
+            send({"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+                  "usageMetadata": {"promptTokenCount": 640, "candidatesTokenCount": 12, "thoughtsTokenCount": 30}})
+            return
+        words = re.findall(r"\S+\s*", scripted_answer(body["systemInstruction"]["parts"][0]["text"]))
+        for index in range(0, len(words), 8):
+            send({"candidates": [{"content": {"role": "model", "parts": [{"text": "".join(words[index:index + 8])}]}, "index": 0}]})
+        send({"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "STOP", "index": 0}],
+              "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 140}})
+
+    def _stubborn(self, body):
+        """Calls the same tool on every round and never answers, even when it is given no tools, like the Gemini run on Nov 7."""
+        rounds = sum(1 for message in body["messages"] if message["role"] == "assistant")
+        call = {"function": {"name": "get_kubernetes_state", "arguments": {"resource": "pods" if rounds % 2 else "services"}}}
+        self.wfile.write((json.dumps({"message": {"role": "assistant", "content": "", "tool_calls": [call, call]}, "done": False}) + "\n").encode())
+        self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+                                      "prompt_eval_count": 500, "eval_count": 20}) + "\n").encode())
+
+    def _replay(self, body, system, used_tool):
+        """Two behaviours seen on Nov 6: a careless small model that queries the wrong system and ignores the crash,
+        and a careful one that reads the crashed container's logs."""
+        def done():
+            self.wfile.write((json.dumps({"message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+                                          "prompt_eval_count": 800, "eval_count": 60}) + "\n").encode())
+        if body.get("tools") and not used_tool:
+            names = {tool["function"]["name"] for tool in body["tools"]}
+            if body["model"].startswith("careless"):
+                name, arguments = ("run_instant_query", {"query": "kubernetes.pods{last_healthy_time≠''} | summarize count()"})
+                if name not in names:
+                    name = "query_logs"
+            else:
+                name, arguments = "get_pod_logs", {"namespace": "shop", "pod": "payment", "previous": True}
+            chunk = {"message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": arguments}}]}, "done": False}
+            self.wfile.write((json.dumps(chunk) + "\n").encode())
+            done()
+            return
+        tool_text = " ".join(message.get("content", "") for message in body["messages"] if message["role"] == "tool")
+        if body["model"].startswith("careless"):
+            answer = ("## Summary\nThere are no recent changes or anomalies that indicate a problem.\n\n## Likely root cause\nUnknown.\nConfidence: Unknown\n\n"
+                      "## Evidence\n- No recent errors in logs (Query: `invalid parameter \"query\"`).\n\n## Competing explanation\nUnknown.\n\n"
+                      "## Next checks\n- Run a log query.\n\n## Suggested remediation\n- Check disk health with `df -h`.")
+        else:
+            seen = "connection refused postgres:5432" in tool_text and "connection refused postgres:5432" in system
+            answer = ("## Summary\nThe payment deployment crashes on start because it can't reach postgres.\n\n"
+                      f"## Likely root cause\npayment exits with code 1: ERROR: connection refused postgres:5432.\nConfidence: {'High' if seen else 'Low'}\n\n"
+                      "## Evidence\n- The crashed container's last line: connection refused postgres:5432.\n- 12 restarts, exit code 1.\n\n"
+                      "## Competing explanation\nA bad image, ruled out because the app starts and logs before failing.\n\n"
+                      "## Next checks\n- `kubectl -n shop get svc postgres`\n\n## Suggested remediation\n- Start postgres or fix its address. Risk: low.")
+        for word in re.findall(r"\S+\s*", answer):
+            self.wfile.write((json.dumps({"message": {"role": "assistant", "content": word}, "done": False}) + "\n").encode())
+        done()
 
     def _claude(self, body):
         if self.headers.get("x-api-key") != "sk-ant-test-valid-key" or self.headers.get("anthropic-version") != "2023-06-01":

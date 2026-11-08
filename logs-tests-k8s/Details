@@ -1,0 +1,4 @@
+kubectl -n logging create token rcc-reader --duration=168h    to create the token
+
+
+kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d            to create the token CA certificate

@@ -51,19 +51,40 @@ BASE_TOOLS: list[dict[str, Any]] = [
 ]
 LOGS_TOOL = {
     "name": "query_logs",
-    "description": "Search logs for a recent window. Use LogQL when Loki is connected, otherwise the source's logs language shown in the context.",
+    "description": "Search a log store for a recent window. With Loki, write LogQL: a stream selector in braces, then filters, "
+                   "such as {namespace=\"shop\", app=\"payment\"} |= \"ERROR\". Otherwise use the source's logs language shown in the context.",
     "input_schema": {"type": "object", "properties": {
         "query": {"type": "string", "description": "The log query."},
         "minutes": {"type": "integer", "description": "Window length, 1 to 1440. Defaults to 30."}, **_SOURCE_PROP}, "required": ["query"]},
 }
 KUBERNETES_TOOL = {
     "name": "get_kubernetes_state",
-    "description": "Read Kubernetes state: warning events, unhealthy pods, or deployments and their images.",
+    "description": "Read Kubernetes state: the problems the console found (with diagnoses), warning events, unhealthy pods, deployments and their images, "
+                   "services and whether their selector reaches ready pods, or nodes.",
     "input_schema": {"type": "object", "properties": {
-        "resource": {"type": "string", "enum": ["events", "pods", "deployments"]},
+        "resource": {"type": "string", "enum": ["problems", "events", "pods", "deployments", "services", "nodes"]},
         "namespace": {"type": "string", "description": "Optional namespace."}}, "required": ["resource"]},
 }
-TOOL_DEFINITIONS = BASE_TOOLS + [LOGS_TOOL, KUBERNETES_TOOL]
+POD_LOGS_TOOL = {
+    "name": "get_pod_logs",
+    "description": "Read the last lines a pod wrote, straight from Kubernetes. Set previous=true to read the container that crashed, "
+                   "which is where a crash-looping pod's error is. Give a pod name, or a workload name to pick its worst pod.",
+    "input_schema": {"type": "object", "properties": {
+        "namespace": {"type": "string"},
+        "pod": {"type": "string", "description": "Pod name, or the name of its Deployment, StatefulSet, DaemonSet, or Job."},
+        "container": {"type": "string", "description": "Optional container name."},
+        "previous": {"type": "boolean", "description": "Read the previous, crashed container. Defaults to false."},
+        "lines": {"type": "integer", "description": "How many lines from the end, 1 to 200. Defaults to 80."}}, "required": ["namespace", "pod"]},
+}
+DESCRIBE_TOOL = {
+    "name": "describe_object",
+    "description": "Status, containers, restarts, exit codes, limits, and recent events for one Kubernetes pod or workload, like kubectl describe.",
+    "input_schema": {"type": "object", "properties": {
+        "namespace": {"type": "string"},
+        "name": {"type": "string", "description": "Pod name, or a Deployment, StatefulSet, DaemonSet, or Job name."}}, "required": ["namespace", "name"]},
+}
+METRIC_TOOL_NAMES = {"run_instant_query", "run_range_query", "list_metrics"}
+TOOL_DEFINITIONS = BASE_TOOLS + [LOGS_TOOL, KUBERNETES_TOOL, POD_LOGS_TOOL, DESCRIBE_TOOL]
 
 
 class ToolRunner:
@@ -71,15 +92,37 @@ class ToolRunner:
         self.engine, self.db, self.box, self.config = engine, db, box, config
         self.owner_id = owner_id
 
-    async def definitions(self) -> list[dict[str, Any]]:
-        tools = list(BASE_TOOLS)
+    async def _kinds(self) -> set[str]:
         rows = await self.db.all("SELECT kind FROM integrations WHERE org_id = ? AND enabled = 1", (self.engine.org_id,))
-        kinds = {row["kind"] for row in rows}
+        return {row["kind"] for row in rows}
+
+    async def definitions(self) -> list[dict[str, Any]]:
+        """Only the tools that can work here, so a model isn't offered queries against something that isn't connected."""
+        kinds = await self._kinds()
+        tools = [tool for tool in BASE_TOOLS if self.engine.states or tool["name"] not in METRIC_TOOL_NAMES]
         if "loki" in kinds or any(state.source.logs_language for state in self.engine.states.values()):
             tools.append(LOGS_TOOL)
         if "kubernetes" in kinds:
-            tools.append(KUBERNETES_TOOL)
+            tools += [KUBERNETES_TOOL, POD_LOGS_TOOL, DESCRIBE_TOOL]
         return tools
+
+    async def _hint(self, name: str) -> str:
+        """One sentence that points a model to the right tool and language, because small models often guess wrong."""
+        kinds = await self._kinds()
+        parts = []
+        if name in METRIC_TOOL_NAMES:
+            languages = sorted({state.source.query_language for state in self.engine.states.values()})
+            if languages:
+                parts.append(f"Metric queries here use {', '.join(languages)}.")
+            else:
+                parts.append("No metric source is connected, so metric queries can't run.")
+        if name == "query_logs" and "loki" in kinds:
+            parts.append('Loki uses LogQL: a stream selector in braces, then filters, such as {namespace="shop"} |= "error".')
+        if "kubernetes" in kinds and name not in {"get_kubernetes_state", "describe_object", "get_pod_logs"}:
+            parts.append("For pods, crashes, and restarts use get_kubernetes_state, describe_object, or get_pod_logs with previous=true.")
+        if ("loki" in kinds or any(state.source.logs_language for state in self.engine.states.values())) and name != "query_logs":
+            parts.append("For log lines use query_logs.")
+        return " ".join(parts)
 
     async def run(self, name: str, arguments: dict[str, Any]) -> tuple[bool, str]:
         """Return (ok, text). Errors go back to the model so it can correct its query."""
@@ -88,15 +131,17 @@ class ToolRunner:
                 "run_instant_query": self._instant, "run_range_query": self._range, "list_metrics": self._metrics,
                 "get_recent_changes": self._changes, "search_past_investigations": self._past,
                 "query_logs": self._logs, "get_kubernetes_state": self._kubernetes,
+                "get_pod_logs": self._pod_logs, "describe_object": self._describe,
             }.get(name)
             if handler is None:
-                return False, f"Unknown tool: {name}"
+                available = ", ".join(tool["name"] for tool in await self.definitions())
+                return False, f"Unknown tool: {name}. The tools you can use are: {available}."
             result = await handler(arguments)
             return True, _limit(scrub(json.dumps(result, ensure_ascii=False, default=str)))
         except (SourceError, BlockedTarget) as error:
-            return False, scrub(f"Query error: {getattr(error, 'message', error)}")
+            return False, scrub(f"Query error: {getattr(error, 'message', error)} {await self._hint(name)}".strip())
         except (TypeError, ValueError, KeyError) as error:
-            return False, f"Invalid arguments: {error}"
+            return False, f"Invalid arguments: {error} {await self._hint(name)}".strip()
 
     def _source(self, arguments: dict[str, Any]) -> Any:
         raw = arguments.get("source_id")
@@ -167,19 +212,81 @@ class ToolRunner:
         return await self._source(arguments).logs(query, minutes)
 
     async def _kubernetes(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        client = await self._integration("kubernetes")
-        if not client:
-            raise SourceError("No Kubernetes connection is set up.")
+        resource = arguments.get("resource")
         namespace = arguments.get("namespace") or None
+        if resource == "problems":
+            problems = [item for item in self.engine.k8s_problems if not namespace or item["namespace"] == namespace]
+            return {"problems": [{key: item.get(key) for key in ("title", "severity", "object", "pods", "facts", "diagnosis")} for item in problems]}
+        client = await self._kube_client()
         try:
-            resource = arguments.get("resource")
             if resource == "events":
                 return {"events": await client.warning_events(namespace)}
             if resource == "pods":
                 return {"unhealthy_pods": await client.unhealthy_pods(namespace)}
             if resource == "deployments":
                 return {"deployments": await client.rollouts(namespace)}
-            raise ValueError("resource must be events, pods, or deployments")
+            if resource == "services":
+                try:
+                    return {"services": await client.services(namespace)}
+                except SourceError as error:
+                    if error.kind == "forbidden":
+                        return {"services": [], "note": "This token may not list services. Add get and list on services to its role."}
+                    raise
+            if resource == "nodes":
+                snapshot = self.engine.k8s_snapshot or await client.snapshot()
+                return {"nodes": snapshot.get("nodes", []), "note": "Node access is forbidden for this token." if "nodes" in snapshot.get("forbidden", []) else ""}
+            raise ValueError("resource must be problems, events, pods, deployments, services, or nodes")
+        finally:
+            await client.close()
+
+    async def _kube_client(self) -> Any:
+        client = await self._integration("kubernetes")
+        if not client:
+            raise SourceError("No Kubernetes connection is set up.")
+        return client
+
+    def _pods_for(self, namespace: str, name: str, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        exact = [pod for pod in pods if pod["namespace"] == namespace and pod["name"] == name]
+        if exact:
+            return exact
+        owned = [pod for pod in pods if pod["namespace"] == namespace and pod["workload"] == name]
+        owned.sort(key=lambda pod: (-pod["restarts"], pod["ready"], pod["name"]))
+        return owned
+
+    async def _pod_logs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        namespace, name = str(arguments.get("namespace", "")).strip(), str(arguments.get("pod", "")).strip()
+        if not namespace or not name:
+            raise ValueError("namespace and pod are required")
+        lines = max(1, min(int(arguments.get("lines") or 80), 200))
+        client = await self._kube_client()
+        try:
+            pods = self._pods_for(namespace, name, await client.pods(namespace))
+            if not pods:
+                raise SourceError(f"No pod or workload named {name} in namespace {namespace}.", "not_found")
+            pod = pods[0]
+            result = await client.pod_logs(namespace, pod["name"], str(arguments.get("container") or ""), bool(arguments.get("previous")), lines)
+            return {"pod": pod["name"], "previous": bool(arguments.get("previous")), "restarts": pod["restarts"], **result}
+        finally:
+            await client.close()
+
+    async def _describe(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        namespace, name = str(arguments.get("namespace", "")).strip(), str(arguments.get("name", "")).strip()
+        if not namespace or not name:
+            raise ValueError("namespace and name are required")
+        client = await self._kube_client()
+        try:
+            pods = self._pods_for(namespace, name, await client.pods(namespace))
+            deployments = [row for row in await client.rollouts(namespace) if row["name"] == name]
+            if not pods and not deployments:
+                raise SourceError(f"No pod or workload named {name} in namespace {namespace}.", "not_found")
+            events = await client.object_events(namespace, pods[0]["name"] if pods else name)
+            problems = [item for item in self.engine.k8s_problems if item["namespace"] == namespace and (item["workload"] == name or name in item["pods"])]
+            return {
+                "deployment": deployments[0] if deployments else None,
+                "pods": [{key: pod[key] for key in ("name", "phase", "ready", "restarts", "node", "containers", "limits", "schedule_message")} for pod in pods[:5]],
+                "events": events,
+                "problems": [{key: item.get(key) for key in ("title", "severity", "facts", "diagnosis")} for item in problems],
+            }
         finally:
             await client.close()
 

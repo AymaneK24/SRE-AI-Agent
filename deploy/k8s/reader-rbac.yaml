@@ -1,0 +1,43 @@
+# A read-only account for Root Cause Console to watch this cluster.
+# It can get and list pods, their logs, events, nodes, Services, and Deployments. It can't read Secrets
+# or ConfigMaps, and it can't change anything.
+#
+#   kubectl apply -f deploy/k8s/reader-rbac.yaml
+#   kubectl -n rcc create token rcc-reader --duration=720h     # when the console runs outside the cluster
+#
+# When the console runs inside this cluster, run its Deployment as this ServiceAccount instead of using a token.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rcc
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rcc-reader
+  namespace: rcc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rcc-reader
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, nodes, services]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rcc-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rcc-reader
+subjects:
+  - kind: ServiceAccount
+    name: rcc-reader
+    namespace: rcc

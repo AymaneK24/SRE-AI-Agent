@@ -1,0 +1,17 @@
+Root Cause Console
+Copyright (c) 2026 Aymane KENBOUCH. All rights reserved.
+
+This software and its documentation are proprietary. They are licensed, not sold.
+
+You may use this software only under a written license from the copyright holder, and only within the
+scope of that license. Without one, you may not use, copy, modify, merge, publish, distribute,
+sublicense, sell, or reverse engineer it, in whole or in part, except as applicable law expressly allows.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT, TO
+THE EXTENT APPLICABLE LAW ALLOWS. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES,
+OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE, TO THE EXTENT APPLICABLE LAW ALLOWS.
+
+Third-party components keep their own licenses. See app/static/vendor/THIRD-PARTY-LICENSES.txt.
+
+Licensing questions: Aymane KENBOUCH, aymanekenbouch@gmail.com
