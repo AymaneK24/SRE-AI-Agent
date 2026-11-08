@@ -1,6 +1,6 @@
 # Root Cause Console
 
-Created by Aymane KENBOUCH.
+Created by Aymane KENBOUCH. Proprietary software, all rights reserved: see [LICENSE](LICENSE).
 
 Connect your metrics, keep a live picture of your systems, and ask an AI model why something broke.
 Each installation serves one company, with its own server and database. Each answer is checked against your data. Remediation workflows are instructions for people, and alerts are read-only, so this software never changes your systems.

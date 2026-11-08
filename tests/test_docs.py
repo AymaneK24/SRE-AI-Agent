@@ -120,3 +120,44 @@ def test_ip_address_access_has_a_default_certificate():
         assert "default_sni {$RCC_DEFAULT_SNI:localhost}" in (root / "deploy" / name).read_text()
     assert 'RCC_DEFAULT_SNI: "${RCC_DEFAULT_SNI:-localhost}"' in (root / "docker-compose.yml").read_text()
     assert "RCC_DEFAULT_SNI=$domain" in (root / "deploy/setup-env.sh").read_text()
+
+
+async def test_removing_someone_can_delete_their_private_investigations(console):
+    from test_security import _invite
+
+    admin = await console.admin()
+    engineer = await _invite(console, admin, "leaver@docs.example", "engineer")
+    me = (await engineer.get("/api/auth/me")).json()
+    db = console.ctx.db
+    insert = "INSERT INTO conversations(org_id, created_by, owner_id, visibility, title, created_at, updated_at) VALUES (?, 'Leaver', ?, ?, ?, 'now', 'now')"
+    private = await db.insert(insert, (me["org_id"], me["id"], "private", "mine"))
+    shared = await db.insert(insert, (me["org_id"], me["id"], "team", "ours"))
+
+    response = await admin.delete(f"/api/org/members/{me['id']}?delete_investigations=true")
+    assert response.status_code == 204, response.text
+    assert await db.one("SELECT id FROM conversations WHERE id = ?", (private,)) is None
+    assert await db.one("SELECT id FROM conversations WHERE id = ?", (shared,)) is not None, "team work stays"
+    entry = await db.one("SELECT detail FROM audit_log WHERE action = 'member_removed' ORDER BY id DESC LIMIT 1")
+    assert '"private_investigations_deleted": 1' in entry["detail"]
+    await engineer.aclose()
+    await admin.aclose()
+
+
+def test_alert_emails_say_why_they_arrived_and_how_to_stop_them():
+    from app.config import Config
+    from app.mailer import Mailer
+    from app.notifications import ALERT_EMAIL_REASON
+
+    reason = ALERT_EMAIL_REASON.format(company="Shop")
+    notices = Mailer(Config())._notices("Shop", False, reason)
+    assert notices[0] == reason and "To stop these emails" in reason
+
+
+def test_the_software_is_licensed_and_credits_its_creator():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    license_text = (root / "LICENSE").read_text()
+    assert "All rights reserved" in license_text and "Aymane KENBOUCH" in license_text
+    about = _pages()["about"]["markdown"]
+    assert "aymanekenbouch@gmail.com" in about and "github.com/AymaneK24" in about

@@ -68,8 +68,10 @@ class Mailer:
         except (smtplib.SMTPException, OSError) as error:
             raise MailError(f"The email server didn't accept the message: {error}") from error
 
-    def _notices(self, company: str, security_notice: bool) -> list[str]:
+    def _notices(self, company: str, security_notice: bool, reason: str = "") -> list[str]:
         notices = []
+        if reason:
+            notices.append(reason)
         if security_notice:
             # Only for emails about an account. An alert has nothing to do with passwords.
             notices.append(f"Security: {company} will never ask for your password by email. If you weren't expecting this message, don't use its links, and tell your administrator.")
@@ -113,10 +115,11 @@ class Mailer:
         self, to: str, subject: str, text: str, link: str | None = None, link_label: str = "", *,
         security_notice: bool = False, tone: str = "default", subtitle: str = "", title: str = "",
         body_html: str = "", images: dict[str, bytes] | None = None, attachments: list[dict[str, Any]] | None = None,
+        reason: str = "",
     ) -> None:
         """`text` is the plain version, and also the styled one unless `body_html` is given. `body_html` must already be escaped."""
         company = self.config.company_name or "your organization"
-        notices = self._notices(company, security_notice)
+        notices = self._notices(company, security_notice, reason)
         message = EmailMessage()
         message["From"] = f"Root Cause Console <{self.config.smtp_from or 'no-reply@localhost'}>"
         message["To"] = to

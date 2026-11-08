@@ -239,12 +239,13 @@ export function dialogHead(title) {
     h('button', { class: 'button compact', type: 'button', onClick: closeDialog }, 'Close'));
 }
 
-export function confirmDialog({ title, body, action, danger = true }) {
+export function confirmDialog({ title, body, action, danger = true, extra = null }) {
   return new Promise((resolve) => {
     let result = false;
     openDialog(h('div', {},
       dialogHead(title),
       h('p', { class: 'body-text' }, body),
+      extra,
       h('div', { class: 'form-actions' },
         h('button', { class: `button ${danger ? 'danger' : 'primary'}`, type: 'button', onClick: () => { result = true; closeDialog(); } }, action),
         h('button', { class: 'button', type: 'button', onClick: closeDialog }, 'Cancel'))),

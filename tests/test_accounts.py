@@ -24,7 +24,9 @@ async def test_api_requires_sign_in(console):
     client = console.client()
     for path in ["/api/context", "/api/sources", "/api/conversations", "/api/audit", "/api/org", "/api/projects", "/api/workflows", "/metrics"]:
         assert (await client.get(path)).status_code == 401, path
-    assert (await client.get("/api/public/info")).json()["creator"] == "Aymane KENBOUCH"
+    info = (await client.get("/api/public/info")).json()
+    # No operator is built in: each installation names its own, so the policy pages never name the wrong company.
+    assert info["operator"] == "" and "creator" not in info
     assert (await client.get("/healthz")).status_code == 200
 
 

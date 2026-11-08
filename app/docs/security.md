@@ -83,4 +83,4 @@ The console holds read access to your monitoring and, through it, a detailed map
 
 ## Report a vulnerability
 
-Email the contact address on your installation's site, or the repository owner, with steps to reproduce it. Please allow time for a fix before sharing details. The project's `SECURITY.md` has the full policy, and `docs/PENTEST-RESPONSE.md` lists how each finding of the last independent test was addressed.
+For a problem in one installation, email the contact address on its legal notice. For a problem in the software itself, email its creator at [aymanekenbouch@gmail.com](mailto:aymanekenbouch@gmail.com). Include steps to reproduce it. Please allow time for a fix before sharing details. The project's `SECURITY.md` has the full policy, and `docs/PENTEST-RESPONSE.md` lists how each finding of the last independent test was addressed.

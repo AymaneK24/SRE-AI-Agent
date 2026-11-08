@@ -47,7 +47,9 @@ class Config:
     admin_email: str = field(default_factory=lambda: _env("RCC_ADMIN_EMAIL").strip().lower())
     admin_name: str = field(default_factory=lambda: _env("RCC_ADMIN_NAME", "Administrator"))
     signup_open: bool = field(default_factory=lambda: _bool("RCC_SIGNUP_OPEN", True))
-    product_operator: str = field(default_factory=lambda: _env("RCC_OPERATOR_NAME", "Aymane KENBOUCH"))
+    # Who runs this installation and answers for its data: usually the company that installed it.
+    product_operator: str = field(default_factory=lambda: _env("RCC_OPERATOR_NAME"))
+    operator_address: str = field(default_factory=lambda: _env("RCC_OPERATOR_ADDRESS"))
     contact_email: str = field(default_factory=lambda: _env("RCC_CONTACT_EMAIL"))
     legal_reviewed: bool = field(default_factory=lambda: _bool("RCC_LEGAL_REVIEWED"))
 

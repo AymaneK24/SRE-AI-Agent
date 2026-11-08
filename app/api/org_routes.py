@@ -187,7 +187,8 @@ async def update_member(member_id: int, body: MemberPatch, user: Admin, ctx: Ctx
 
 
 @router.delete("/org/members/{member_id}", status_code=204)
-async def remove_member(member_id: int, user: Admin, ctx: Ctx) -> Response:
+async def remove_member(member_id: int, user: Admin, ctx: Ctx, delete_investigations: bool = False) -> Response:
+    """Removes a person. With delete_investigations, also deletes their private investigations, for a deletion request."""
     target = await ctx.db.one("SELECT * FROM users WHERE id = ? AND org_id = ?", (member_id, user.org_id))
     if not target:
         raise HTTPException(404, "This member no longer exists.")
@@ -195,8 +196,19 @@ async def remove_member(member_id: int, user: Admin, ctx: Ctx) -> Response:
         raise HTTPException(409, "The platform administrator can't be removed.")
     if target["role"] == "owner" and (not user.can("owner") or not await _other_owners(ctx, user.org_id, member_id)):
         raise HTTPException(409, "An organization needs at least one active owner.")
+    deleted = 0
+    if delete_investigations:
+        private = await ctx.db.all(
+            "SELECT id FROM conversations WHERE org_id = ? AND owner_id = ? AND visibility = 'private' AND trigger = 'manual'", (user.org_id, member_id))
+        for row in private:
+            if ctx.investigations.active_run(row["id"]):
+                raise HTTPException(409, "One of their investigations is still running. Stop it first.")
+        for row in private:
+            await ctx.db.unindex(row["id"])
+            await ctx.db.execute("DELETE FROM conversations WHERE id = ? AND org_id = ?", (row["id"], user.org_id))
+        deleted = len(private)
     await ctx.db.execute("DELETE FROM users WHERE id = ? AND org_id = ?", (member_id, user.org_id))
-    await ctx.db.audit(user.org_id, "member_removed", f"user:{member_id}", {"email": target["email"]}, actor=user.actor)
+    await ctx.db.audit(user.org_id, "member_removed", f"user:{member_id}", {"email": target["email"], "private_investigations_deleted": deleted}, actor=user.actor)
     return Response(status_code=204)
 
 

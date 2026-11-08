@@ -97,7 +97,8 @@ async def _company_name(ctx: AppContext) -> str:
 async def public_info(ctx: Ctx) -> dict[str, Any]:
     signup = await ctx.db.get_setting(PLATFORM_ORG, "signup_open", ctx.config.signup_open)
     return {
-        "product": "Root Cause Console", "creator": ctx.config.product_operator, "contact_email": ctx.config.contact_email,
+        "product": "Root Cause Console", "operator": ctx.config.product_operator, "operator_address": ctx.config.operator_address,
+        "contact_email": ctx.config.contact_email,
         "signup_open": bool(signup) and not ctx.config.single_company,
         "single_company": ctx.config.single_company, "company": await _company_name(ctx), "email_configured": ctx.mailer.configured,
         "legal_reviewed": ctx.config.legal_reviewed,
