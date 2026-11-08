@@ -54,6 +54,8 @@ services:
     image: ${RCC_CADDY_IMAGE:-caddy:2-alpine}
     environment:
       RCC_DOMAIN: "${RCC_DOMAIN:?Run sh deploy/setup-env.sh first}"
+      # The certificate to use when a client sends no server name, as happens with https://IP-ADDRESS.
+      RCC_DEFAULT_SNI: "${RCC_DEFAULT_SNI:-localhost}"
       # Only used by deploy/Caddyfile.azure-dns. The VM's managed identity signs in, so no secret is needed.
       AZURE_SUBSCRIPTION_ID: "${AZURE_SUBSCRIPTION_ID:-}"
       AZURE_RESOURCE_GROUP_NAME: "${AZURE_RESOURCE_GROUP_NAME:-}"

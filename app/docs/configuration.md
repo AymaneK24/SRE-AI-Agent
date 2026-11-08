@@ -9,6 +9,7 @@ Everything else, such as connections, AI models, alert channels, roles, and poli
 | Variable | Default | Meaning |
 |---|---|---|
 | `RCC_DOMAIN` | None | The host name or IP address Caddy serves, such as `rcc.company.com` |
+| `RCC_DEFAULT_SNI` | `localhost` | The certificate Caddy uses when a client sends no server name. Browsers and Windows send none when you open `https://IP-ADDRESS`, so set it to that IP address. `setup-env.sh` sets it to your address |
 | `RCC_PUBLIC_URL` | `http://localhost:8000` | The full address people use. Links in emails use it. Must be `https://` in production mode |
 | `RCC_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Host names the console answers to, separated by commas. The public address's host is always added. Requests for any other host get `400` |
 | `RCC_HTTPS_PORT`, `RCC_HTTP_PORT` | `443`, `80` | Ports Caddy publishes |
