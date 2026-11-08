@@ -1,0 +1,17 @@
+# Use a managed PostgreSQL, such as Azure Database for PostgreSQL, instead of the bundled container.
+# Add these two lines to .env, and plain `docker compose up -d` uses this file too:
+#
+#   COMPOSE_FILE=docker-compose.yml:deploy/compose.external-db.yml
+#   RCC_DATABASE_URL=postgresql://rcc:PASSWORD@NAME.postgres.database.azure.com:5432/rcc?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt
+#
+# On Windows, separate the two files with ; instead of :. See the "External database" section of the
+# Configuration page in the docs.
+services:
+  console:
+    environment:
+      RCC_DATABASE_URL: "${RCC_DATABASE_URL:?Set RCC_DATABASE_URL to your PostgreSQL address in .env}"
+    # The bundled database isn't started, so the console doesn't wait for it.
+    depends_on: !reset {}
+  postgres:
+    # Never started with this file: only the console's own database settings are used.
+    profiles: [bundled-database]

@@ -161,3 +161,17 @@ def test_the_software_is_licensed_and_credits_its_creator():
     assert "All rights reserved" in license_text and "Aymane KENBOUCH" in license_text
     about = _pages()["about"]["markdown"]
     assert "aymanekenbouch@gmail.com" in about and "github.com/AymaneK24" in about
+
+
+def test_an_external_database_replaces_the_bundled_one():
+    import pathlib
+
+    import yaml
+
+    class ComposeLoader(yaml.SafeLoader):
+        """Reads Compose's own tags, such as !reset, as plain values."""
+
+    ComposeLoader.add_multi_constructor("!", lambda loader, tag, node: None)
+    override = yaml.load((pathlib.Path(__file__).resolve().parent.parent / "deploy/compose.external-db.yml").read_text(), Loader=ComposeLoader)  # noqa: S506
+    assert override["services"]["postgres"]["profiles"], "the bundled database must not start"
+    assert "RCC_DATABASE_URL:?" in override["services"]["console"]["environment"]["RCC_DATABASE_URL"]
