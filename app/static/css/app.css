@@ -157,6 +157,9 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .cluster-stats .stat.is-bad b { color: var(--critical); }
 .cluster-subhead { margin-top: 22px; }
 .hero-switch { margin-bottom: 14px; }
+/* The panel starts at the top of the hero, whatever the view, so the switch stays in the same place.
+   Centering it moved the switch every time a view of another height was chosen. */
+.hero-panel { align-self: start; min-height: 380px; }
 .watched-head { margin: 22px 0 8px; font-size: 16px; font-weight: 600; }
 .watched-head:first-child { margin-top: 0; }
 .workflow-filters { margin: 4px 0 16px; gap: 10px; }

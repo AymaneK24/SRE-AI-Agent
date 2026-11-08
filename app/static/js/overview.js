@@ -57,7 +57,7 @@ export function mount(container) {
     staleBanner,
     h('section', { class: `hero${can('engineer') ? '' : ' hero-solo'}`, 'aria-labelledby': 'hero-title' },
       h('div', {}, heroTitle, heroCopy, heroActions),
-      h('div', {}, viewSwitch, can('engineer') ? metricsHost : null, clusterHost, logsHost)),
+      h('div', { class: 'hero-panel' }, viewSwitch, can('engineer') ? metricsHost : null, clusterHost, logsHost)),
     goldenSection,
     h('section', { class: 'section status-grid' },
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Needs attention')), attention),
@@ -140,6 +140,8 @@ export function mount(container) {
       .filter((signal) => signal.series.length)
       .sort((a, b) => (GROUP_RANK[a.group] ?? 9) - (GROUP_RANK[b.group] ?? 9) || a.panel_priority - b.panel_priority)[0];
     if (preferred) return { title: preferred.title, query: preferred.query, unit: preferred.unit, limit: preferred.limit, source_id: preferred.source_id, reason: 'Key signal' };
+    // No key signal yet: whether each target answers is always worth showing, so the view is never empty.
+    if (prom) return { title: 'Targets answering scrapes', query: 'up', unit: 'short', limit: null, source_id: prom.id, reason: 'No key signal was found yet. 1 means the target is up, 0 that it is down' };
     return null;
   }
 
@@ -223,6 +225,13 @@ export function mount(container) {
       }
     } else if (heroChart) {
       fetchHero(heroChart.signal);
+    }
+    // Nothing to chart: say so, rather than leaving the view empty.
+    if (!signal && view === 'metrics' && can('engineer')) {
+      const targets = context.targets || {};
+      clear(heroLabel, h('b', {}, 'Metrics'), targets.total
+        ? `: ${targets.up || 0} of ${plural(targets.total, 'target', 'targets')} answering. No key signal to chart yet.`
+        : ': no key signal to chart yet. One appears when a source collects request, error, or saturation metrics.');
     }
   }
 
