@@ -34,9 +34,90 @@ Everything else, such as connections, AI models, alert channels, roles, and poli
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RCC_DATABASE_URL` | Empty, meaning SQLite in `RCC_DATA_DIR` | PostgreSQL address, such as `postgresql://rcc:PASSWORD@postgres:5432/rcc`. Add `?sslmode=require` for a managed database. Production mode requires PostgreSQL |
+| `RCC_DATABASE_URL` | Empty, meaning SQLite in `RCC_DATA_DIR` | PostgreSQL address, such as `postgresql://rcc:PASSWORD@postgres:5432/rcc`. For a managed database, see [External database](#external-database). Production mode requires PostgreSQL |
 | `POSTGRES_PASSWORD` | None | Password of the bundled PostgreSQL container |
 | `RCC_DATA_DIR` | `/data` in the image | Where SQLite and temporary files go |
+
+## External database
+
+The bundled PostgreSQL container is fine for one server. A company may prefer a managed database, such as **Azure Database for PostgreSQL**, for automatic backups, high availability, and patching. The console works with any PostgreSQL 14 or later: everything it needs is in `RCC_DATABASE_URL`.
+
+### With Docker Compose
+
+`docker-compose.yml` points the console at the bundled database, and Compose's own settings win over `.env`. So switching needs the override file `deploy/compose.external-db.yml`, which uses your `RCC_DATABASE_URL` and doesn't start the bundled container. Add to `.env`:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:deploy/compose.external-db.yml
+RCC_DATABASE_URL=postgresql://rcc:PASSWORD@rcc-db.postgres.database.azure.com:5432/rcc?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt
+```
+
+On Windows, separate the two files with `;` instead of `:`. Then `docker compose up -d`, and `docker compose ps` shows only `console` and `caddy`. Keep `POSTGRES_PASSWORD` in `.env`: the main file still reads it, though it's no longer used. The override needs Docker Compose 2.24 or later (`docker compose version`).
+
+On Kubernetes, put the same `RCC_DATABASE_URL` in the `rcc-secrets` Secret and skip `postgres.yaml`.
+
+### Create it on Azure
+
+Use private access, inside the VNet the console runs in, so the database has no public address:
+
+```bash
+RG=rg-rcc
+az network vnet subnet create -g $RG --vnet-name rcc-vnet -n db --address-prefixes 10.50.2.0/24 \
+  --delegations Microsoft.DBforPostgreSQL/flexibleServers
+az postgres flexible-server create -g $RG -n rcc-db --version 16 \
+  --tier Burstable --sku-name Standard_B2s --storage-size 32 \
+  --vnet rcc-vnet --subnet db --private-dns-zone rcc-db.private.postgres.database.azure.com \
+  --admin-user rccadmin --admin-password "$(openssl rand -hex 24)" \
+  --backup-retention 14
+```
+
+`Burstable B2s` is enough for one console. Choose `GeneralPurpose` and `--high-availability ZoneRedundant` when the console is critical to your team. Keep the admin password in your vault.
+
+### Give the console its own account
+
+Don't use the admin account in `RCC_DATABASE_URL`. Create an account that owns only the console's database, from a machine in the VNet (the console's VM works):
+
+```bash
+psql "host=rcc-db.postgres.database.azure.com user=rccadmin dbname=postgres sslmode=require"
+```
+
+```sql
+CREATE ROLE rcc LOGIN PASSWORD 'A-LONG-RANDOM-PASSWORD';
+CREATE DATABASE rcc OWNER rcc;
+REVOKE ALL ON DATABASE rcc FROM PUBLIC;
+```
+
+The console creates and upgrades its own tables on start, so it must own its database. It needs no extensions and no admin rights.
+
+### The connection address
+
+```
+postgresql://rcc:PASSWORD@rcc-db.postgres.database.azure.com:5432/rcc?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt
+```
+
+- **`sslmode=verify-full`** encrypts the connection and checks the server's certificate and name, so nothing can pretend to be your database. Azure requires TLS anyway. `sslmode=require` only encrypts, without checking who answers.
+- **`sslrootcert`** points at the trusted authorities included in the console's image, which Azure's certificates chain to.
+- **Special characters** in the password must be URL-encoded: `@` as `%40`, `:` as `%3A`, `/` as `%2F`, `#` as `%23`, `%` as `%25`. A password of letters and digits avoids this: `openssl rand -hex 24`.
+
+### What changes
+
+| | Bundled container | Azure Database for PostgreSQL |
+|---|---|---|
+| Backups | `deploy/backup.sh` | Automatic, with point-in-time restore for the retention you set. `backup.sh` doesn't apply |
+| Updates and patches | Rebuild with `--pull` | Azure applies minor versions in its maintenance window |
+| Connections | | The console opens at most 12. Every tier allows more |
+| Sign-in | Password | Password. Microsoft Entra ID sign-in to the database isn't supported yet, because its tokens expire every hour |
+
+### Move existing data
+
+From the server running the bundled database, with the console stopped:
+
+```bash
+docker compose stop console
+docker compose exec -T postgres pg_dump -U rcc -d rcc --no-owner | \
+  psql "host=rcc-db.postgres.database.azure.com user=rcc dbname=rcc sslmode=require"
+```
+
+Then switch to the override, start the console, and check everything is there before removing the old volume. `RCC_SECRET_KEY` must stay the same, or saved credentials can't be read.
 
 ## The first administrator
 
