@@ -87,7 +87,7 @@ function route() {
   chip.hidden = !me || me.must_change_password || !can('engineer');
   if (can('admin')) chip.setAttribute('href', '#/connections');
   else chip.removeAttribute('href');
-  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Start your trial', legal: 'Policies' };
+  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Create an account', legal: 'Policies' };
   document.title = titles[name] ? `${titles[name]}, Root Cause Console` : 'Root Cause Console';
   const render = APP_ROUTES[name]?.[1] || PUBLIC_ROUTES[name];
   unmount = render(view, params);

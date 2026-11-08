@@ -11,6 +11,11 @@ printf 'Your name: '
 read -r admin_name
 printf 'Your email, which you will sign in with: '
 read -r admin_email
+printf 'Contact email for privacy and legal questions, shown on the policy pages [%s]: ' "$admin_email"
+read -r contact_email
+contact_email="${contact_email:-$admin_email}"
+printf 'Company postal address for the legal notice (optional): '
+read -r operator_address
 printf 'Address people will use, without https:// (a host name or IP address): '
 read -r domain
 echo 'Which HTTPS certificate? A private server, reached over VPN or your network, is recommended.'
@@ -84,7 +89,10 @@ RCC_SMTP_USERNAME=$smtp_user
 RCC_SMTP_PASSWORD=$smtp_password
 RCC_SMTP_FROM=$smtp_from
 RCC_SMTP_TLS=starttls
-RCC_OPERATOR_NAME=Aymane KENBOUCH
+# The company that runs this installation, shown on the privacy notice, terms, and legal notice.
+RCC_OPERATOR_NAME=$company
+RCC_OPERATOR_ADDRESS=$operator_address
+RCC_CONTACT_EMAIL=$contact_email
 RCC_LEGAL_REVIEWED=false
 ENV
 echo

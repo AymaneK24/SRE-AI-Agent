@@ -114,10 +114,15 @@ export function mount(container, params) {
   }
 
   async function remove(member) {
-    const ok = await confirmDialog({ title: `Remove ${member.email}?`, body: 'They lose access immediately. Their logged actions stay in the audit trail.', action: 'Remove person' });
+    const purge = h('input', { type: 'checkbox' });
+    const ok = await confirmDialog({
+      title: `Remove ${member.email}?`,
+      body: 'They lose access immediately. Their logged actions stay in the audit trail, which is kept for security.',
+      extra: h('label', { class: 'check', style: 'margin-top:12px' }, purge, h('span', {}, 'Also delete their private investigations. Use this when they ask for their data to be deleted.')),
+      action: 'Remove person' });
     if (!ok) return;
     try {
-      await api(`/api/org/members/${member.id}`, { method: 'DELETE' });
+      await api(`/api/org/members/${member.id}${purge.checked ? '?delete_investigations=true' : ''}`, { method: 'DELETE' });
       toast('Person removed');
     } catch (error) { toast(error.message); }
     load();

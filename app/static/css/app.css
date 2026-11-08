@@ -364,8 +364,6 @@ textarea.query-input { font: 400 13px/1.45 var(--mono); }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px 56px; }
 .plain-list li { padding: 10px 0; border-top: 1px solid var(--line); color: var(--body); }
 .plain-list b { color: var(--ink); }
-.creator { padding: 44px 0 8px; font-size: clamp(22px, 2.6vw, 32px); font-weight: 600; letter-spacing: -.025em; }
-.creator span { display: block; margin-top: 6px; color: var(--body); font-size: 16px; font-weight: 400; letter-spacing: 0; }
 .site-footer { flex: none; border-top: 1px solid var(--line); color: var(--muted); font-size: 13.5px; }
 .site-footer-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 24px; max-width: 1520px; margin: 0 auto; padding: 16px clamp(16px, 4vw, 56px); }
 .site-footer nav { display: flex; flex-wrap: wrap; gap: 6px 20px; }

@@ -20,8 +20,8 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ("Connections", ["connections", "prometheus", "loki", "kubernetes", "cloud-sources", "finding-connection-details"]),
     ("AI models", ["ai-models", "accuracy-benchmark"]),
     ("Deploy", ["deploy-localhost", "deploy-azure-vm", "deploy-aks", "certificates", "configuration", "operations"]),
-    ("Access and security", ["roles-and-permissions", "single-sign-on", "security"]),
-    ("Help", ["troubleshooting"]),
+    ("Access and security", ["roles-and-permissions", "single-sign-on", "security", "legal-and-privacy"]),
+    ("Help", ["troubleshooting", "about"]),
 ]
 SLUG_RE = re.compile(r"^[a-z0-9-]{1,60}$")
 

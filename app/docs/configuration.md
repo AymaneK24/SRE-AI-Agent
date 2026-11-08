@@ -77,9 +77,10 @@ Keys entered in the app are encrypted with `RCC_SECRET_KEY` instead. Prefer that
 | Variable | Meaning |
 |---|---|
 | `RCC_IMAGE` | The image name Compose builds and runs. Default `root-cause-console:latest` |
-| `RCC_CONTACT_EMAIL` | A contact address shown on public pages. Empty means none is shown |
-| `RCC_OPERATOR_NAME` | Who operates this installation, shown on public pages |
-| `RCC_LEGAL_REVIEWED` | Set to `true` once your legal team has reviewed the terms pages |
+| `RCC_OPERATOR_NAME` | The company that runs this installation and is responsible for its data. Shown on the privacy notice, terms, and legal notice. See [Legal and privacy](/docs/legal-and-privacy) |
+| `RCC_OPERATOR_ADDRESS` | Its postal address, shown on the legal notice. Optional |
+| `RCC_CONTACT_EMAIL` | Where people send privacy, legal, and security questions, shown on the policy pages and in the footer. Use a shared address such as `privacy@company.com` |
+| `RCC_LEGAL_REVIEWED` | Set to `true` once your lawyer has reviewed the policy pages. Until then they show a *Draft* note |
 
 ## Settings in the app
 
