@@ -31,6 +31,7 @@ METADATA_HOSTS = {"metadata.google.internal", "metadata", "instance-data"}
 # These public services answer any name with whatever address is written inside the name.
 REBINDING_SUFFIXES = (".nip.io", ".sslip.io", ".xip.io", ".localtest.me", ".lvh.me", ".vcap.me", ".traefik.me", ".lacolhost.com", ".rebind.it", ".rbndr.us", ".1u.ms")
 _NUMERIC_HOST = re.compile(r"^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$")
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _CANONICAL_IPV4 = re.compile(r"^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$")
 
 
@@ -64,7 +65,11 @@ def _check_address(address: str, policy: TargetPolicy, name: str = "") -> None:
     ip = ipaddress.ip_address(address.split("%")[0])
     if getattr(ip, "ipv4_mapped", None):
         ip = ip.ipv4_mapped
-    label = name or address
+    elif ip.version == 6 and ip in _NAT64:
+        # IPv6-only networks with DNS64 return public IPv4 services inside this prefix. Check the IPv4 address it carries.
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    # Say which address a name resolved to, so a DNS problem on this server is easy to spot.
+    label = f"{name} (resolved to {address})" if name and name != address.split("%")[0] else (name or address)
     # Link-local addresses include cloud metadata services, which hold server credentials. No setting allows these.
     if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         raise BlockedTarget(f"{label} is a reserved address and can't be used as a target.")
@@ -126,8 +131,22 @@ async def check_host(host: str, policy: TargetPolicy | bool) -> None:
         addresses = await _resolve(name)
     except socket.gaierror:
         return  # An unknown name fails later with a clearer connection error.
+    _usable(addresses, rules, name)
+
+
+def _usable(addresses: list[str], rules: TargetPolicy, name: str) -> list[str]:
+    """The resolved addresses that pass the checks. Fails only when none do, with the first reason.
+    Connections go to a checked address, never to the name, so an extra unsafe record can't be reached."""
+    allowed, first_error = [], None
     for address in addresses:
-        _check_address(address, rules, name)
+        try:
+            _check_address(address, rules, name)
+            allowed.append(address)
+        except BlockedTarget as error:
+            first_error = first_error or error
+    if not allowed and first_error:
+        raise first_error
+    return allowed or addresses
 
 
 async def check_url(url: str, policy: TargetPolicy | bool) -> None:
@@ -155,10 +174,9 @@ class _GuardedBackend(httpcore.AsyncNetworkBackend):
             except socket.gaierror as error:
                 raise httpcore.ConnectError(str(error)) from error
         try:
-            for address in addresses:
-                _check_address(address, self._policy, name)
+            addresses = _usable(addresses, self._policy, name)
         except BlockedTarget as error:
-            raise httpcore.ConnectError(str(error)) from error
+            raise httpcore.ConnectError(f"{error} If this name works from a terminal, check the DNS server this installation uses.") from error
         return await self._inner.connect_tcp(addresses[0], port, timeout=timeout, local_address=local_address, socket_options=socket_options)
 
     async def connect_unix_socket(self, path: str, timeout: float | None = None, socket_options: Iterable[Any] | None = None) -> Any:
