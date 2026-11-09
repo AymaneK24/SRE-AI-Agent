@@ -169,7 +169,7 @@ az postgres flexible-server create -g $RG -n rcc-db --version 16 --tier GeneralP
   --admin-user rccadmin --admin-password "$(openssl rand -hex 24)"
 ```
 
-Then set `RCC_DATABASE_URL=postgresql://rccadmin:PASSWORD@rcc-db.postgres.database.azure.com:5432/postgres?sslmode=require` in the Secret, and skip `postgres.yaml`.
+Then create the console's own account and database, and set `RCC_DATABASE_URL` in the Secret, as described in [External database](/docs/configuration#external-database). Skip `postgres.yaml`.
 
 ## Operate it
 
