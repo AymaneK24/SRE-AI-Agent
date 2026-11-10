@@ -20,8 +20,9 @@ need helm "https://helm.sh/docs/intro/install/"
 echo "Cluster: $(kubectl config current-context)"
 kubectl get nodes >/dev/null || { echo "kubectl can't reach the cluster. Start it, or choose another context." >&2; exit 1; }
 
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
-helm repo update prometheus-community >/dev/null
+# --force-update makes this work whether or not the repository was added before. Errors are shown, not hidden.
+helm repo add --force-update prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update prometheus-community
 
 echo "Installing kube-prometheus-stack ${chart_version:-(latest)} as '${release}' in namespace '${namespace}'. This takes a few minutes."
 helm upgrade --install "$release" prometheus-community/kube-prometheus-stack \
