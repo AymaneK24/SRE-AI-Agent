@@ -194,9 +194,14 @@ class Notifier:
         worst = items[0][0]
         changes = noise.changes_since(await self.db.all("SELECT ts, title FROM change_events WHERE org_id = ? ORDER BY ts DESC LIMIT 20", (org_id,)))
         hints = noise.common_causes(items, changes)
-        lines = [f"- {event['title']}" for event, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        prefix = "Already active when the console connected. "
+        at_connect = all(item["title"].startswith(prefix) for item, _ in items)
+        lines = [f"- {item['title'].removeprefix(prefix)}" for item, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        if at_connect:
+            hints = ["They were already running when the console connected, so their start time is unknown.", *hints]
         summary = "\n".join(lines + ([""] + hints if hints else []))
-        event = {**worst, "title": f"{len(items)} problems started together: {worst['title']}" + (" and others" if len(items) > 1 else ""),
+        together = "problems found when the console connected" if at_connect else "problems started together"
+        event = {**worst, "title": f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""),
                  "fingerprint": f"group:{worst['fingerprint']}", "group": [item["fingerprint"] for item, _ in items]}
         detail = {"summary": summary, "group": [{"title": item["title"], "fingerprint": item["fingerprint"]} for item, _ in items], "hints": hints}
         prepared = None
