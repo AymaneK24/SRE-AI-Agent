@@ -390,7 +390,8 @@ export function mount(container) {
 
   function renderAttention(context) {
     const rows = [];
-    for (const alert of context.alerts?.firing || []) {
+    // An alert about a workload the console already reports is shown on that row, not as a second problem.
+    for (const alert of (context.alerts?.firing || []).filter((item) => !item.merged_into)) {
       const severe = ['critical', 'page', 'error'].includes(String(alert.severity).toLowerCase());
       rows.push(h('li', { class: 'row' }, icon(severe ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, alert.name, ' ', h('span', { class: 'muted small' }, `${alert.severity} alert`)),
@@ -409,7 +410,8 @@ export function mount(container) {
       rows.push(h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, item.title),
         h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail), item.fingerprint)),
-        h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem')));
+        h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem',
+          detail.also_firing?.length ? h('span', { class: 'also-firing' }, `Also firing in Prometheus: ${detail.also_firing.join(', ')}`) : null)));
     }
     for (const rule of context.rules?.failing || []) {
       rows.push(h('li', { class: 'row' }, icon('warning'),

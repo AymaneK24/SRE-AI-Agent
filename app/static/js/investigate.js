@@ -599,7 +599,8 @@ export function mount(container, params) {
           h('span', {}, h('b', {}, item.title), h('small', {}, item.detail?.diagnosis?.cause || item.kind)));
         return row;
       }), (context.problems || []).length ? 'Tick the problems to investigate. Only they, and their logs, metrics and cluster state, go to the model.' : ''),
-      metrics ? railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name), h('small', {}, alert.summary || labelText(alert.labels))))) : null,
+      metrics ? railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name),
+        h('small', {}, alert.merged_into ? 'Same problem as one above, found in the cluster' : alert.summary || labelText(alert.labels))))) : null,
       metrics ? railGroup(`Down targets (${down.length})`, down.map((target) => h('div', { class: 'rail-item' }, h('b', {}, target.instance), h('small', {}, `Job ${target.job}`)))) : null,
       metrics ? railGroup(`Out-of-range signals (${anomalies.length})`, anomalies.slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, `${item.title}: ${formatValue(item.value, item.unit)}`), h('small', {}, labelText(item.labels))))) : null,
       railGroup('Recorded changes', (context.changes || []).slice(0, 5).map((change) => h('div', { class: 'rail-item' }, change.title, h('small', {}, `${change.origin}, ${timeAgo(change.ts)}`)))),

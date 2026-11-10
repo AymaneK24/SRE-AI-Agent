@@ -673,20 +673,33 @@ class ContextEngine:
     def _current_problems(self, targets: dict[str, Any], alerts: dict[str, Any], rules: dict[str, Any], anomalies: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Everything wrong right now, from every connection, keyed by a fingerprint that stays the same while it lasts."""
         current: dict[str, dict[str, Any]] = {}
+        workloads = self._k8s_problem_index()
         for alert in alerts["firing"]:
+            # A Prometheus alert about a workload the console already reports, such as KubePodCrashLooping for a
+            # crash loop it found itself, is the same problem. It joins that problem instead of becoming a second one.
+            merged_into = workloads.get(_alert_workload(alert, self._pod_owners()))
+            alert.pop("merged_into", None)
+            if merged_into:
+                alert["merged_into"] = merged_into
             current[alert["fingerprint"]] = {
                 "kind": "alert", "severity": _severity(alert), "title": f"Alert firing: {alert['name']}",
-                "clear": f"Alert resolved: {alert['name']}", "detail": alert,
+                "clear": f"Alert resolved: {alert['name']}", "detail": alert, "merged_into": merged_into,
             }
         for target in targets["down_list"]:
             current[target["fingerprint"]] = {
                 "kind": "target", "severity": "critical", "title": f"Target down: {target['instance']} ({target['job']})",
                 "clear": f"Target back up: {target['instance']} ({target['job']})", "detail": target,
             }
+        also_firing: dict[str, list[str]] = {}
+        for alert in alerts["firing"]:
+            if alert.get("merged_into"):
+                also_firing.setdefault(alert["merged_into"], []).append(alert["name"])
         for problem in self.k8s_problems:
             detail = {key: value for key, value in problem.items() if key not in {"title", "clear"}}
             if problem.get("diagnosis"):
                 detail["summary"] = problem["diagnosis"]["cause"]
+            if problem["fingerprint"] in also_firing:
+                detail["also_firing"] = sorted(set(also_firing[problem["fingerprint"]]))
             current[problem["fingerprint"]] = {
                 "kind": "k8s", "severity": problem["severity"], "title": problem["title"], "clear": problem["clear"], "detail": detail,
             }
@@ -712,14 +725,19 @@ class ContextEngine:
         self._state_known = True
         if first_poll:
             await self._close_problems_that_ended_offline(current)
+        # One problem, one notification: a problem already announced under another name isn't announced again.
+        announced_alerts = {key for key, value in current.items() if value.get("merged_into") and key in self._active and not self._active[key].get("silent")}
+        covered = {current[key]["merged_into"] for key in announced_alerts}
         for fingerprint, item in current.items():
             self._k8s_missing_since.pop(fingerprint, None)
             if fingerprint not in self._active:
-                self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id")}
+                silent = bool(item.get("merged_into")) or fingerprint in covered
+                self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id"), "silent": silent}
                 title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
                 # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
                 detail = {key: value for key, value in item["detail"].items() if key != "logs"}
-                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"), notify=not first_poll)
+                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
+                                         notify=not first_poll and not silent)
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.
@@ -737,7 +755,27 @@ class ContextEngine:
             title = item["clear"]
             if item.get("kind") == "target" and fingerprint not in self._targets_up:
                 title = title.replace("Target back up:", "Target no longer reported:")
-            await self._record_event(f"{item['kind']}_cleared", "info", fingerprint, title, {}, item.get("source_id"))
+            await self._record_event(f"{item['kind']}_cleared", "info", fingerprint, title, {}, item.get("source_id"), notify=not item.get("silent"))
+
+    def _pod_owners(self) -> dict[tuple[str, str], str]:
+        owners: dict[tuple[str, str], str] = {}
+        for snapshot in self.k8s_snapshots.values():
+            for pod in snapshot.get("pods", []):
+                if pod.get("workload"):
+                    owners[(pod["namespace"], pod["name"])] = pod["workload"]
+        return owners
+
+    def _k8s_problem_index(self) -> dict[tuple[str, str], str]:
+        """The console's own Kubernetes problems by (namespace, workload), and nodes by ("node", name)."""
+        index: dict[tuple[str, str], str] = {}
+        for problem in self.k8s_problems:
+            fingerprint = problem["fingerprint"]
+            if fingerprint.startswith("k8s:node/") or "/node/" in fingerprint.split(":", 1)[-1][:12]:
+                name = fingerprint.split("node/", 1)[1].split(":", 1)[0]
+                index.setdefault(("node", name), fingerprint)
+            elif problem.get("namespace") and problem.get("workload"):
+                index.setdefault((problem["namespace"], problem["workload"]), fingerprint)
+        return index
 
     async def _close_problems_that_ended_offline(self, current: dict[str, Any]) -> None:
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
@@ -977,7 +1015,8 @@ def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], a
         return {"tone": "idle", "text": "Connect a metric source, a log store, or a Kubernetes cluster to start."}
     if status == "unreachable":
         return {"tone": "critical", "text": "Your connections aren't answering. These numbers are out of date."}
-    firing = len(alerts.get("firing", []))
+    # Alerts about a workload already counted below aren't counted twice.
+    firing = len([alert for alert in alerts.get("firing", []) if not alert.get("merged_into")])
     down = targets.get("down", 0)
     k8s = k8s_problems or []
     k8s_critical = [item for item in k8s if item["severity"] == "critical"]
@@ -1003,10 +1042,26 @@ def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], a
 KIND_ORDER = {"alert": 0, "target": 1, "k8s": 2, "log": 3, "rule": 4, "signal": 5}
 
 
+def _alert_workload(alert: dict[str, Any], pod_owners: dict[tuple[str, str], str]) -> tuple[str, str] | None:
+    """Which workload or node a Prometheus alert is about, from the labels kube-state-metrics rules use."""
+    labels = alert.get("labels") or {}
+    namespace = labels.get("namespace", "")
+    for key in ("deployment", "statefulset", "daemonset", "job_name", "replicaset"):
+        if namespace and labels.get(key):
+            return (namespace, labels[key])
+    if namespace and labels.get("pod"):
+        owner = pod_owners.get((namespace, labels["pod"]))
+        if owner:
+            return (namespace, owner)
+    if labels.get("node") and not namespace:
+        return ("node", labels["node"])
+    return None
+
+
 def ranked_problems(current: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """One list of what is wrong, worst first, for the page and for the model."""
+    """One list of what is wrong, worst first, for the page and for the model. An alert merged into another problem shows there."""
     rows = [{"fingerprint": fingerprint, "kind": item["kind"], "severity": item["severity"], "title": item["title"],
-             "detail": item["detail"]} for fingerprint, item in current.items()]
+             "detail": item["detail"]} for fingerprint, item in current.items() if not item.get("merged_into")]
     rows.sort(key=lambda row: (-SEVERITY_RANK.get(row["severity"], 0), KIND_ORDER.get(row["kind"], 9), row["title"]))
     return rows
 
