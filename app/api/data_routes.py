@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 from .. import ai_settings
 from ..access import context_for, live_message_for
 from ..context.engine import build_integration
-from ..context.render import render_context
+from ..context.render import focus_context, render_context
 from ..db import utcnow
-from ..investigation.prompts import build_system
+from ..investigation.prompts import build_system, system_text
 from ..net_guard import BlockedTarget, check_host, check_url
 from ..secrets_store import scrub
 from ..sources.base import SourceError
@@ -50,10 +50,17 @@ class IntegrationBody(BaseModel):
     name: Label = Field(max_length=80)
     config: dict[str, Any] = Field(default_factory=dict)
     secrets: dict[str, str] = Field(default_factory=dict)
+    # Set to change a saved connection. Without it, a new one is added next to the others.
+    id: int | None = None
 
 
 class IntegrationTestBody(IntegrationBody):
-    id: int | None = None
+    pass
+
+
+class MainBody(BaseModel):
+    kind: Literal["metrics", "loki", "kubernetes"]
+    id: int
 
 
 class EnableBody(BaseModel):
@@ -291,8 +298,9 @@ def _keep_saved_ca(config: dict[str, Any], body_config: dict[str, Any], saved: d
 async def k8s_namespaces(user: Engineer, ctx: Ctx) -> dict[str, Any]:
     """Namespaces seen in the cluster's last snapshot, for choosing what a project covers."""
     engine = await ctx.engines.get(user.org_id)
-    snapshot = engine.k8s_snapshot or {}
-    names = {pod["namespace"] for pod in snapshot.get("pods", [])} | {row["namespace"] for row in snapshot.get("deployments", [])}
+    names: set[str] = set()
+    for snapshot in engine.k8s_snapshots.values():
+        names |= {pod["namespace"] for pod in snapshot.get("pods", [])} | {row["namespace"] for row in snapshot.get("deployments", [])}
     return {"connected": "kubernetes" in engine.integration_kinds, "namespaces": sorted(name for name in names if name)}
 
 
@@ -331,18 +339,48 @@ async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> di
     except BlockedTarget as error:
         raise HTTPException(422, str(error)) from error
     now = utcnow()
+    if body.id is not None:
+        saved = await ctx.db.one("SELECT * FROM integrations WHERE id = ? AND org_id = ? AND kind = ?", (body.id, user.org_id, body.kind))
+        if not saved:
+            raise HTTPException(404, "That connection doesn't exist anymore. Reload the page.")
+        duplicate = await ctx.db.one("SELECT id FROM integrations WHERE org_id = ? AND kind = ? AND name = ? AND id != ?", (user.org_id, body.kind, body.name, body.id))
+        if duplicate:
+            raise HTTPException(409, f"Another connection is already named {body.name}. Give each one its own name.")
+    else:
+        # Without an id, a connection's name identifies it: saving the same name again updates it.
+        saved = await ctx.db.one("SELECT * FROM integrations WHERE org_id = ? AND kind = ? AND name = ?", (user.org_id, body.kind, body.name))
     # Saving again without retyping the token or pasting the CA keeps the saved ones.
-    saved = await ctx.db.one("SELECT kind, config, secret_enc FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
     secrets = merged_secrets(ctx, body.secrets, saved["secret_enc"] if saved else "")
     config = _keep_saved_ca(config, body.config, saved)
-    await ctx.db.execute("DELETE FROM integrations WHERE org_id = ? AND kind = ?", (user.org_id, body.kind))
-    new_id = await ctx.db.insert(
-        "INSERT INTO integrations(org_id, kind, name, config, secret_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json(secrets), now, now),
-    )
-    await ctx.db.audit(user.org_id, "integration_saved", f"integration:{new_id}", {"kind": body.kind}, actor=user.actor)
+    if saved:
+        new_id = saved["id"]
+        await ctx.db.execute("UPDATE integrations SET name = ?, config = ?, secret_enc = ?, updated_at = ? WHERE id = ? AND org_id = ?",
+                             (body.name, json.dumps(config), ctx.box.encrypt_json(secrets), now, new_id, user.org_id))
+    else:
+        new_id = await ctx.db.insert(
+            "INSERT INTO integrations(org_id, kind, name, config, secret_enc, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user.org_id, body.kind, body.name, json.dumps(config), ctx.box.encrypt_json(secrets), now, now),
+        )
+    await ctx.db.audit(user.org_id, "integration_saved", f"integration:{new_id}", {"kind": body.kind, "name": body.name}, actor=user.actor)
     await (await ctx.engines.get(user.org_id)).integrations_changed()
     return public_integration(await ctx.db.one("SELECT * FROM integrations WHERE id = ?", (new_id,)))
+
+
+@router.put("/connections/main")
+async def set_main_connection(body: MainBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
+    """Which connection of a kind the overview shows first, and investigations use when none is named."""
+    if body.kind == "metrics":
+        exists = await ctx.db.one("SELECT id FROM sources WHERE id = ? AND org_id = ?", (body.id, user.org_id))
+    else:
+        exists = await ctx.db.one("SELECT id FROM integrations WHERE id = ? AND org_id = ? AND kind = ?", (body.id, user.org_id, body.kind))
+    if not exists:
+        raise HTTPException(404, "That connection doesn't exist anymore. Reload the page.")
+    saved = dict(await ctx.db.get_setting(user.org_id, "main_connections", {}) or {})
+    saved[body.kind] = body.id
+    await ctx.db.set_setting(user.org_id, "main_connections", saved)
+    await ctx.db.audit(user.org_id, "main_connection_set", f"{body.kind}:{body.id}", {}, actor=user.actor)
+    await (await ctx.engines.get(user.org_id)).integrations_changed()
+    return {"main": saved}
 
 
 @router.delete("/integrations/{integration_id}", status_code=204)
@@ -470,17 +508,19 @@ async def refresh_context(user: Engineer, ctx: Ctx) -> dict[str, Any]:
 
 
 @router.get("/context/prompt-preview")
-async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None) -> dict[str, Any]:
+async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None, focus: str = "") -> dict[str, Any]:
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
+    savings = await ai_settings.load_savings(ctx.db, user.org_id)
     name = provider or settings["provider"]
     chars = int(settings["ollama"]["num_ctx"]) * 2 if name == "ollama" else 60000
     engine = await ctx.engines.get(user.org_id)
-    rendered = render_context(engine.context, chars)
+    chosen = [item for item in focus.split(",") if item][:20]
+    rendered = render_context(focus_context(engine.context, chosen) if chosen else engine.context, chars)
     section = settings[name]
     mode = section.get("small_model", "auto")
     compact = name == "ollama" and (mode == "on" or (mode == "auto" and ai_settings.is_small_model(section.get("model", ""))))
     return {"version": engine.context.get("version"), "as_of": engine.context.get("as_of"), "provider": name, "max_chars": chars,
-            "text": build_system(rendered, [], [], section["use_tools"], False, None, compact)}
+            "text": system_text(build_system(rendered, [], [], section["use_tools"], False, None, compact, savings["answer_style"]))}
 
 
 @router.get("/stream")

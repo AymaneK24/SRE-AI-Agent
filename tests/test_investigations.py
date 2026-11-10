@@ -229,9 +229,12 @@ class ScriptedProvider:
 
     def __init__(self, answers=None, on_first_tool=None, loop_forever=False):
         self.requests, self.answers, self.on_first_tool, self.loop_forever = [], list(answers or []), on_first_tool, loop_forever
+        self.parts = []
 
     def build_request(self, model, system, messages, tools, allow_tools=True):
-        return {"model": model, "system": system, "messages": [dict(m) for m in messages], "tools": bool(tools) and allow_tools}
+        # The system prompt comes in two parts: the stable start (cacheable) and what changed this round.
+        self.parts.append(system)
+        return {"model": model, "system": "\n\n".join(system) if isinstance(system, list) else system, "messages": [dict(m) for m in messages], "tools": bool(tools) and allow_tools}
 
     async def stream(self, request):
         self.requests.append(request)
@@ -269,6 +272,7 @@ async def test_context_updates_reach_the_model_between_rounds(console, prom_serv
     assert "HighErrorRate" not in provider.requests[0]["system"]
     assert "HighErrorRate" in provider.requests[-1]["system"]
     assert "Changed since this investigation started" in provider.requests[-1]["system"]
+    assert "Changed since" not in provider.parts[-1][0], "round-to-round changes stay out of the cacheable start"
 
 
 async def test_tool_rounds_are_limited(console, prom_server):
@@ -412,17 +416,28 @@ async def test_alerts_reach_channels_read_only_and_once(console, prom_server, ho
     assert hook_server not in json.dumps(channels)
 
 
-async def test_alerts_already_active_on_connect_are_not_sent(console, prom_server, hook_server):
+async def test_alerts_already_active_on_connect_are_sent_once(console, prom_server, hook_server):
+    """An alert already firing when the source is connected is an outage too: it is sent, and not again after a restart."""
     FakeProm.state.firing = True
     client = await console.company("EarlyCo", "o@early.example")
     await client.post("/api/org/channels", json={"kind": "slack", "name": "ops", "url": hook_server})
     await client.post("/api/sources", json={"name": "lab", "config": {"host": "127.0.0.1", "port": prom_server.server_address[1]}, "secrets": {}})
     org_id = (await client.get("/api/auth/me")).json()["org_id"]
-    await (await console.ctx.engines.get(org_id)).refresh_now()
-    await asyncio.sleep(0.2)
-    assert Hook.received == []
+    engine = await console.ctx.engines.get(org_id)
+    await engine.refresh_now()
+    for _ in range(50):
+        if Hook.received:
+            break
+        await asyncio.sleep(0.1)
+    assert len(Hook.received) == 1 and "HighErrorRate" in Hook.received[0]["text"]
     events = (await client.get("/api/events")).json()
-    assert any(event["title"].startswith("Already active") for event in events)
+    assert any(event["title"].startswith("Already active") for event in events), "the start time is unknown, and the title says so"
+    # A restart sees the same alert again. It was announced already.
+    console.ctx.notifier._sent.clear()
+    engine._reset_state()
+    await engine.refresh_now()
+    await asyncio.sleep(0.5)
+    assert len(Hook.received) == 1
 
 
 async def test_hosted_mode_only_accepts_official_webhooks(make_config, tmp_path):

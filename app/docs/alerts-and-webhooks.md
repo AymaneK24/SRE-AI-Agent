@@ -29,6 +29,36 @@ With **Investigate critical alerts automatically** on, a critical alert starts a
 
 **Most per hour** (5 by default) limits automatic investigations, because each one uses your AI budget.
 
+## One problem, one alert
+
+With both a Kubernetes connection and a Prometheus that has Kubernetes alert rules (such as kube-prometheus-stack), the same problem can be seen twice: the console finds a crash loop itself, and Prometheus fires `KubePodCrashLooping` for it a few minutes later. The console treats them as one problem:
+
+- A Prometheus alert whose labels name a workload the console already reports (`namespace` with `deployment`, `statefulset`, `daemonset`, `job_name`, or a `pod` of that workload), or a node it already reports (`node`), joins that problem. It shows on its row as *Also firing in Prometheus: KubePodCrashLooping*, and isn't counted again in the headline.
+- Only the first one to start is announced. The other starts and ends without a notification, and without a second automatic investigation.
+- Alerts about anything else, such as your own application rules, are announced as usual.
+
+## Noise control: fewer, better messages
+
+Every problem passes these checks before anyone is messaged. Nothing is hidden in the console; only the message is held back, and each held-back message is counted with its reason. Change them in **Connections → Alerts → Noise control** (administrators).
+
+| Step | What it does | Default |
+| --- | --- | --- |
+| False-alarm verdicts | A problem your team marked *false alarm* or *expected* in a project report is no longer messaged. | On |
+| Flapping | A problem that starts 3 times or more in an hour gets one message saying it keeps starting and stopping. Further starts stay quiet until it has been stable for 30 minutes. | On |
+| Grace period | The problem must still be there after a short wait. A blip that clears by itself is never sent and never starts an automatic investigation. | Critical 60 s, warning 5 min |
+| Grouping | Problems that start within the same window become one message, listing what they share: a node in trouble, the same namespace or cluster, a dependency they all mention (such as `postgres:5432`), or a change recorded in the 20 minutes before. One automatic investigation then looks at all of them. | 90 s |
+| Hourly limit | Each channel gets at most this many messages an hour. The rest arrive as one summary when the hour is up. | 12 |
+
+Problems already running when the console starts, or when a connection is added, are sent like any other: a deployment that can't pull its image is an outage whether it broke a minute ago or before the console looked. Their title starts with *Already active when the console connected*, because the start time isn't known. After a restart, problems that were already announced aren't sent again.
+
+Recovery messages skip these checks and go only to channels that heard about the problem.
+
+The panel also shows the last 7 days: problems started, messages sent, and how many were held back for each reason. If *held back* stays near zero while people complain about noise, shorten nothing and look at the alert rules themselves: a rule that fires for normal behaviour should be fixed at the source.
+
+**Why it matters for cost.** An email or chat message costs almost nothing. What costs money is the automatic investigation a critical message starts, since each one calls the AI model, and the hours people spend reading alerts that needed no action. The grace period stops investigations for blips, and grouping turns an incident with ten symptoms into one investigation instead of ten.
+
+Server-wide defaults: `RCC_ALERT_GRACE_SECONDS`, `RCC_ALERT_WARNING_GRACE_SECONDS`, `RCC_ALERT_GROUP_SECONDS`.
+
 ## Incoming webhooks
 
 Two addresses let other tools push to the console:

@@ -19,11 +19,13 @@ Any single connection is enough. The more you connect, the more evidence the mod
 
 **Metric sources** can be as many as you need: several Prometheus servers (one per cluster, per region, or per team), plus CloudWatch and Azure Monitor. Each has a display name, such as `prod-eu` or `staging`. Everywhere the console shows a target or an alert, it says which source it came from, and the model chooses the source for each query.
 
-**Loki and Kubernetes** are one each per installation for now. Saving a new one replaces the old one. For several clusters today:
+**Loki and Kubernetes** can also be several: one Loki per environment, or one cluster per region. Give each a name you'll recognise, such as `aks-prod-westeurope`, because that name appears wherever you choose between them. Use **Add another Loki** or **Add another cluster** under Logs and Kubernetes.
 
-- **Metrics:** add each cluster's Prometheus as its own source.
-- **Logs:** send every cluster's logs to one Loki, with a `cluster` label on each stream, then narrow with the [log selector](/docs/loki#the-log-selector) or in queries: `{cluster="prod-eu", namespace="shop"}`.
-- **Kubernetes state:** connect the cluster that matters most. For the others, their Prometheus alerts (such as kube-state-metrics rules) still reach the console.
+When a cluster's problem appears in Needs attention or What changed, its name follows in brackets, so the same workload in two clusters stays two separate problems.
+
+### The main connection
+
+With two or more of a kind, one is the **main** one. It's the one the overview shows first, and the one investigations use when the model doesn't name another. Until you choose, the oldest is main. An admin changes it with **Make main** next to the connection. Problems in the others are still found and announced; main only decides what's shown first.
 
 ## The network path
 

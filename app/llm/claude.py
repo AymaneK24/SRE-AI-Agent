@@ -22,8 +22,9 @@ class ClaudeProvider:
     name = "claude"
     is_remote = True
 
-    def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com", max_tokens: int = 4096) -> None:
+    def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com", max_tokens: int = 4096, prompt_caching: bool = True) -> None:
         self.api_key = api_key
+        self.prompt_caching = prompt_caching
         self.base_url = base_url.rstrip("/")
         self.endpoint = f"{self.base_url}/v1/messages"
         self.max_tokens = max_tokens
@@ -37,7 +38,7 @@ class ClaudeProvider:
     async def close(self) -> None:
         await self._client.aclose()
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
+    def build_request(self, model: str, system: str | list[str], messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
         converted: list[dict[str, Any]] = []
         for message in messages:
             if message["role"] == "tool":
@@ -64,6 +65,10 @@ class ClaudeProvider:
                     converted.append({"role": "assistant", "content": message["content"]})
             else:
                 converted.append({"role": "user", "content": message["content"]})
+        if isinstance(system, list):
+            # The first part stays the same for the whole investigation and is the one worth caching.
+            blocks = [{"type": "text", "text": part} for part in system if part]
+            system = blocks if len(blocks) > 1 else (blocks[0]["text"] if blocks else "")
         request: dict[str, Any] = {
             "model": model,
             "max_tokens": self.max_tokens,
@@ -72,9 +77,11 @@ class ClaudeProvider:
             "stream": True,
         }
         if tools:
-            request["tools"] = tools
+            request["tools"] = [dict(tool) for tool in tools]
             if not allow_tools:
                 request["tool_choice"] = {"type": "none"}
+        if self.prompt_caching:
+            _mark_cache_points(request)
         return request
 
     async def stream(self, request: dict[str, Any]) -> AsyncIterator[TextDelta | ToolCall | Finished]:
@@ -109,7 +116,10 @@ class ClaudeProvider:
                     kind = event.get("type")
                     if kind == "message_start":
                         usage = event.get("message", {}).get("usage", {})
-                        finished.input_tokens = usage.get("input_tokens")
+                        finished.cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
+                        finished.cache_write_tokens = int(usage.get("cache_creation_input_tokens") or 0)
+                        uncached = usage.get("input_tokens")
+                        finished.input_tokens = None if uncached is None else int(uncached) + finished.cache_read_tokens + finished.cache_write_tokens
                     elif kind == "content_block_start":
                         blocks[event["index"]] = dict(event.get("content_block", {}))
                     elif kind == "content_block_delta":
@@ -170,6 +180,30 @@ class ClaudeProvider:
             {"id": item.get("id"), "label": item.get("display_name") or item.get("id"), "detail": ""}
             for item in response.json().get("data", [])
         ]
+
+
+def _mark_cache_points(request: dict[str, Any]) -> None:
+    """Prompt caching: the tools, the instructions with the live context, and the conversation so far are sent again on
+    every round of an investigation. Marked like this, later rounds read them from Anthropic's cache at about a tenth
+    of the input price. Claude allows four marks; these use three."""
+    marker = {"type": "ephemeral"}
+    if request.get("tools"):
+        request["tools"][-1] = {**request["tools"][-1], "cache_control": marker}
+    if isinstance(request.get("system"), str) and request["system"]:
+        request["system"] = [{"type": "text", "text": request["system"], "cache_control": marker}]
+    elif isinstance(request.get("system"), list) and request["system"]:
+        request["system"][0] = {**request["system"][0], "cache_control": marker}
+    messages = request.get("messages") or []
+    if messages:
+        last = messages[-1]
+        content = last["content"]
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}] if content else []
+        else:
+            content = [dict(block) for block in content]
+        if content:
+            content[-1] = {**content[-1], "cache_control": marker}
+            messages[-1] = {**last, "content": content}
 
 
 def _status_error(status: int, body: str) -> ProviderError:

@@ -116,9 +116,13 @@ class ContextEngine:
         self.version = 0
         self.context: dict[str, Any] = self._empty_context("not_configured")
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=EVENT_MEMORY)
+        # The main connection of each kind, for what shows one of them. All of them are in integration_list.
         self.integration_summary: dict[str, Any] = {}
+        self.integration_list: list[dict[str, Any]] = []
         self.integration_kinds: set[str] = set()
+        self.main_connections: dict[str, int] = {}
         self.k8s_snapshot: dict[str, Any] | None = None
+        self.k8s_snapshots: dict[int, dict[str, Any]] = {}
         self.k8s_problems: list[dict[str, Any]] = []
         self._crash_logs: dict[str, dict[str, Any]] = {}
         self._integrations_at = 0.0
@@ -194,9 +198,9 @@ class ContextEngine:
         await self._load_integration_kinds()
         self._integrations_at = 0.0
         if "kubernetes" not in self.integration_kinds:
-            self.k8s_snapshot, self.k8s_problems = None, []
+            self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
         if not self.states and not self.integration_kinds:
-            self.integration_summary = {}
+            self.integration_summary, self.integration_list = {}, []
             self.context = self._empty_context("not_configured")
         self._wake.set()
 
@@ -213,8 +217,8 @@ class ContextEngine:
         self._snapshot_at = 0.0
         self._material_hash = ""
         self._last_ok_mono = None
-        self.integration_summary = {}
-        self.k8s_snapshot, self.k8s_problems = None, []
+        self.integration_summary, self.integration_list = {}, []
+        self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
         self._integrations_at = 0.0
         self.recent_events.clear()
 
@@ -270,7 +274,8 @@ class ContextEngine:
         if source_id is not None and source_id in self.states:
             return self.states[source_id].source
         if source_id is None and self.states:
-            return next(iter(self.states.values())).source
+            main = self.main_connections.get("metrics")
+            return (self.states[main] if main in self.states else next(iter(self.states.values()))).source
         if not self.states:
             raise SourceError("No metric source is connected, so metric queries can't run. Use the log and Kubernetes tools instead.", "bad_data")
         raise SourceError("That metric source isn't connected.", "bad_data")
@@ -404,51 +409,78 @@ class ContextEngine:
         if time.monotonic() - self._integrations_at < INTEGRATION_EVERY_S:
             return
         self._integrations_at = time.monotonic()
-        rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND enabled = 1", (self.org_id,))
+        rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND enabled = 1 ORDER BY id", (self.org_id,))
         self.integration_kinds = {row["kind"] for row in rows}
-        summary: dict[str, Any] = {}
+        self.main_connections = await main_connections(self.db, self.org_id)
+        clusters = [row for row in rows if row["kind"] == "kubernetes"]
+        main_cluster = pick_main(clusters, self.main_connections.get("kubernetes"))
+        items: list[dict[str, Any]] = []
+        snapshots: dict[int, dict[str, Any]] = {}
+        problems: list[dict[str, Any]] = []
+        wanted_logs: dict[str, dict[str, Any]] = {}
         for row in rows:
             client = None
+            base = {"id": row["id"], "kind": row["kind"], "name": row["name"]}
             try:
                 client = build_integration(row, self.box, self.config)
                 if row["kind"] == "kubernetes":
                     snapshot = await client.snapshot()
-                    self.k8s_snapshot = snapshot
-                    self.k8s_problems = find_problems(snapshot)
-                    await self._enrich_k8s_problems(client)
-                    kube = {"name": row["name"], "status": "ok", **summary_from_snapshot(snapshot), "problems": self.k8s_problems}
-                    for namespace in kube["namespaces"]:
-                        namespace["problems"] = sum(1 for item in self.k8s_problems if item["namespace"] == namespace["name"])
-                    summary["kubernetes"] = kube
+                    found = find_problems(snapshot)
+                    # A second cluster can hold a namespace with the same name, so its problems need their own fingerprints.
+                    if len(clusters) > 1:
+                        for problem in found:
+                            problem["cluster"], problem["integration_id"] = row["name"], row["id"]
+                            problem["title"] = f"{problem['title']} ({row['name']})"
+                            problem["clear"] = f"{problem['clear']} ({row['name']})"
+                            if row["id"] != main_cluster:
+                                problem["fingerprint"] = problem["fingerprint"].replace("k8s:", f"k8s:#{row['id']}/", 1)
+                    await self._enrich_k8s_problems(client, found, snapshot.get("events", []), wanted_logs)
+                    snapshots[row["id"]] = snapshot
+                    problems.extend(found)
+                    item = {**base, "status": "ok", **summary_from_snapshot(snapshot), "problems": found}
+                    for namespace in item["namespaces"]:
+                        namespace["problems"] = sum(1 for problem in found if problem["namespace"] == namespace["name"])
                 else:
-                    summary[row["kind"]] = {"name": row["name"], "status": "ok", **(await client.summary())}
+                    item = {**base, "status": "ok", **(await client.summary())}
             except (SourceError, BlockedTarget, ValueError) as error:
-                summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(getattr(error, "message", str(error)))}
+                item = {**base, "status": "error", "error": scrub(getattr(error, "message", str(error)))}
             except Exception as error:  # A bad answer from one connection must not stop the others.
                 log.exception("integration refresh failed for %s", row["kind"])
-                summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(f"Refresh failed: {error}")}
+                item = {**base, "status": "error", "error": scrub(f"Refresh failed: {error}")}
             finally:
                 if client:
                     await client.close()
-        if "kubernetes" not in summary:
-            self.k8s_snapshot, self.k8s_problems = None, []
+            items.append(item)
+        self._crash_logs = wanted_logs
+        self.k8s_snapshots = snapshots
+        self.k8s_snapshot = snapshots.get(main_cluster) if main_cluster else None
+        self.k8s_problems = problems
+        summary: dict[str, Any] = {}
+        for kind in ("loki", "kubernetes"):
+            of_kind = [item for item in items if item["kind"] == kind]
+            main_id = pick_main(of_kind, self.main_connections.get(kind))
+            for item in of_kind:
+                item["main"] = item["id"] == main_id
+                if item["main"]:
+                    summary[kind] = item
+        self.integration_list = items
         self.integration_summary = summary
 
-    async def _enrich_k8s_problems(self, client: Any) -> None:
+    async def _enrich_k8s_problems(self, client: Any, problems: list[dict[str, Any]], events: list[dict[str, Any]], wanted: dict[str, dict[str, Any]]) -> None:
         """Add the crashed container's last lines and a rule-based diagnosis to the worst problems.
 
         Logs are read again only when a pod restarts, so a crash loop costs one log call per restart, not per poll.
         A failure here never hides the problems themselves.
         """
-        events = (self.k8s_snapshot or {}).get("events", [])
-        wanted: dict[str, dict[str, Any]] = {}
-        for problem in self.k8s_problems:
+        read_here = 0
+        for problem in problems:
             logs = None
-            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and len(wanted) < CRASH_LOG_PROBLEMS:
+            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and read_here < CRASH_LOG_PROBLEMS:
+                read_here += 1
                 pod = problem["pods"][0]
                 container = problem["facts"].get("container", "")
                 previous = problem["problem"] != "not_ready"
-                key = f"{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
+                key = f"{problem.get('integration_id', '')}/{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
                 logs = self._crash_logs.get(key)
                 if logs is None:
                     try:
@@ -466,16 +498,19 @@ class ContextEngine:
                 problem["diagnosis"] = diagnose(problem, (logs or {}).get("lines"), events)
             except Exception:  # A rule that trips on odd data must not stop the poll.
                 log.exception("diagnosis failed for %s", problem["fingerprint"])
-        self._crash_logs = wanted
 
     def _integration_ok(self, kind: str) -> bool:
-        return self.integration_summary.get(kind, {}).get("status") == "ok"
+        """True when every connection of this kind answered."""
+        of_kind = [item for item in self.integration_list if item["kind"] == kind]
+        return bool(of_kind) and all(item.get("status") == "ok" for item in of_kind)
 
     # Combining sources ------------------------------------------------------
     async def _merge(self, results: list[dict[str, Any] | None], started: float) -> None:
         now_iso = utcnow()
         sources_info, targets_raw, alerts_raw, groups_raw, signals = [], [], [], [], []
-        any_ok = any(result is not None for result in results) or any(item.get("status") == "ok" for item in self.integration_summary.values())
+        any_ok = any(result is not None for result in results) or any(item.get("status") == "ok" for item in self.integration_list)
+        self.main_connections = await main_connections(self.db, self.org_id)
+        main_source = pick_main([{"id": state.source.id} for state in self.states.values()], self.main_connections.get("metrics"))
         for state in self.states.values():
             source = state.source
             sources_info.append({
@@ -484,6 +519,7 @@ class ContextEngine:
                 "query_language": source.query_language, "logs_language": source.logs_language,
                 "status": "ok" if state.failures == 0 else "unreachable", "error": state.error,
                 "last_ok": state.last_ok_iso, "stale": state.failures > 0 and state.last is not None,
+                "main": source.id == main_source,
             })
             if state.last:
                 multi = len(self.states) > 1
@@ -495,8 +531,8 @@ class ContextEngine:
                 signals.extend(state.last["signals"])
         sources_info.extend(self.source_errors)
         failed = [item for item in sources_info if item["status"] != "ok"]
-        failed_connections = failed + [{"name": item.get("name", kind), "error": item.get("error")} for kind, item in self.integration_summary.items() if item.get("status") != "ok"]
-        if not sources_info and not self.integration_summary:
+        failed_connections = failed + [{"name": item.get("name", item["kind"]), "error": item.get("error")} for item in self.integration_list if item.get("status") != "ok"]
+        if not sources_info and not self.integration_list:
             status = "not_configured" if not self.integration_kinds else "unreachable"
         else:
             status = "ok" if not failed_connections else ("partial" if any_ok else "unreachable")
@@ -543,6 +579,8 @@ class ContextEngine:
             "events": list(self.recent_events),
             "changes": changes,
             "integrations": self.integration_summary,
+            "connections": self.integration_list,
+            "main": self.main_connections,
             "problems": ranked_problems(current),
             "coverage": {
                 "has_metrics": bool(self.states),
@@ -635,20 +673,33 @@ class ContextEngine:
     def _current_problems(self, targets: dict[str, Any], alerts: dict[str, Any], rules: dict[str, Any], anomalies: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Everything wrong right now, from every connection, keyed by a fingerprint that stays the same while it lasts."""
         current: dict[str, dict[str, Any]] = {}
+        workloads = self._k8s_problem_index()
         for alert in alerts["firing"]:
+            # A Prometheus alert about a workload the console already reports, such as KubePodCrashLooping for a
+            # crash loop it found itself, is the same problem. It joins that problem instead of becoming a second one.
+            merged_into = workloads.get(_alert_workload(alert, self._pod_owners()))
+            alert.pop("merged_into", None)
+            if merged_into:
+                alert["merged_into"] = merged_into
             current[alert["fingerprint"]] = {
                 "kind": "alert", "severity": _severity(alert), "title": f"Alert firing: {alert['name']}",
-                "clear": f"Alert resolved: {alert['name']}", "detail": alert,
+                "clear": f"Alert resolved: {alert['name']}", "detail": alert, "merged_into": merged_into,
             }
         for target in targets["down_list"]:
             current[target["fingerprint"]] = {
                 "kind": "target", "severity": "critical", "title": f"Target down: {target['instance']} ({target['job']})",
                 "clear": f"Target back up: {target['instance']} ({target['job']})", "detail": target,
             }
+        also_firing: dict[str, list[str]] = {}
+        for alert in alerts["firing"]:
+            if alert.get("merged_into"):
+                also_firing.setdefault(alert["merged_into"], []).append(alert["name"])
         for problem in self.k8s_problems:
             detail = {key: value for key, value in problem.items() if key not in {"title", "clear"}}
             if problem.get("diagnosis"):
                 detail["summary"] = problem["diagnosis"]["cause"]
+            if problem["fingerprint"] in also_firing:
+                detail["also_firing"] = sorted(set(also_firing[problem["fingerprint"]]))
             current[problem["fingerprint"]] = {
                 "kind": "k8s", "severity": problem["severity"], "title": problem["title"], "clear": problem["clear"], "detail": detail,
             }
@@ -672,16 +723,26 @@ class ContextEngine:
         # Problems seen on the first poll started at an unknown earlier time, so don't date them as new.
         first_poll = not self._state_known
         self._state_known = True
+        # Problems still open from before a restart were announced when they started, so they aren't sent again.
+        # Everything else found on the first poll is sent: a broken deployment is just as urgent when the
+        # console only sees it at startup, or when its cluster was just connected.
+        open_before: set[str] = set()
         if first_poll:
+            open_before = await self._open_problems()
             await self._close_problems_that_ended_offline(current)
+        # One problem, one notification: a problem already announced under another name isn't announced again.
+        announced_alerts = {key for key, value in current.items() if value.get("merged_into") and key in self._active and not self._active[key].get("silent")}
+        covered = {current[key]["merged_into"] for key in announced_alerts}
         for fingerprint, item in current.items():
             self._k8s_missing_since.pop(fingerprint, None)
             if fingerprint not in self._active:
-                self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id")}
+                silent = bool(item.get("merged_into")) or fingerprint in covered
+                self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id"), "silent": silent}
                 title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
                 # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
                 detail = {key: value for key, value in item["detail"].items() if key != "logs"}
-                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"), notify=not first_poll)
+                await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
+                                         notify=not silent and not (first_poll and fingerprint in open_before))
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.
@@ -699,7 +760,32 @@ class ContextEngine:
             title = item["clear"]
             if item.get("kind") == "target" and fingerprint not in self._targets_up:
                 title = title.replace("Target back up:", "Target no longer reported:")
-            await self._record_event(f"{item['kind']}_cleared", "info", fingerprint, title, {}, item.get("source_id"))
+            await self._record_event(f"{item['kind']}_cleared", "info", fingerprint, title, {}, item.get("source_id"), notify=not item.get("silent"))
+
+    def _pod_owners(self) -> dict[tuple[str, str], str]:
+        owners: dict[tuple[str, str], str] = {}
+        for snapshot in self.k8s_snapshots.values():
+            for pod in snapshot.get("pods", []):
+                if pod.get("workload"):
+                    owners[(pod["namespace"], pod["name"])] = pod["workload"]
+        return owners
+
+    def _k8s_problem_index(self) -> dict[tuple[str, str], str]:
+        """The console's own Kubernetes problems by (namespace, workload), and nodes by ("node", name)."""
+        index: dict[tuple[str, str], str] = {}
+        for problem in self.k8s_problems:
+            fingerprint = problem["fingerprint"]
+            if fingerprint.startswith("k8s:node/") or "/node/" in fingerprint.split(":", 1)[-1][:12]:
+                name = fingerprint.split("node/", 1)[1].split(":", 1)[0]
+                index.setdefault(("node", name), fingerprint)
+            elif problem.get("namespace") and problem.get("workload"):
+                index.setdefault((problem["namespace"], problem["workload"]), fingerprint)
+        return index
+
+    async def _open_problems(self) -> set[str]:
+        rows = await self.db.all(
+            "SELECT fingerprint, kind FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
+        return {row["fingerprint"] for row in rows if row["kind"].endswith("_started")}
 
     async def _close_problems_that_ended_offline(self, current: dict[str, Any]) -> None:
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
@@ -825,6 +911,22 @@ class EngineManager:
         self.engines = {}
 
 
+MAIN_KINDS = ("metrics", "loki", "kubernetes")
+
+
+async def main_connections(db: Database, org_id: int) -> dict[str, int]:
+    """The connection an admin marked as main for each kind. Without a choice, the oldest one is main."""
+    saved = await db.get_setting(org_id, "main_connections", {}) or {}
+    return {kind: int(saved[kind]) for kind in MAIN_KINDS if isinstance(saved.get(kind), int)}
+
+
+def pick_main(items: list[dict[str, Any]], preferred: int | None) -> int | None:
+    ids = [item["id"] for item in items]
+    if preferred in ids:
+        return preferred
+    return ids[0] if ids else None
+
+
 def build_integration(row: dict[str, Any], box: SecretBox, config: Config) -> Any:
     settings = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
     secrets = box.decrypt_json(row.get("secret_enc", ""))
@@ -923,7 +1025,8 @@ def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], a
         return {"tone": "idle", "text": "Connect a metric source, a log store, or a Kubernetes cluster to start."}
     if status == "unreachable":
         return {"tone": "critical", "text": "Your connections aren't answering. These numbers are out of date."}
-    firing = len(alerts.get("firing", []))
+    # Alerts about a workload already counted below aren't counted twice.
+    firing = len([alert for alert in alerts.get("firing", []) if not alert.get("merged_into")])
     down = targets.get("down", 0)
     k8s = k8s_problems or []
     k8s_critical = [item for item in k8s if item["severity"] == "critical"]
@@ -949,10 +1052,26 @@ def headline_for(status: str, targets: dict[str, Any], alerts: dict[str, Any], a
 KIND_ORDER = {"alert": 0, "target": 1, "k8s": 2, "log": 3, "rule": 4, "signal": 5}
 
 
+def _alert_workload(alert: dict[str, Any], pod_owners: dict[tuple[str, str], str]) -> tuple[str, str] | None:
+    """Which workload or node a Prometheus alert is about, from the labels kube-state-metrics rules use."""
+    labels = alert.get("labels") or {}
+    namespace = labels.get("namespace", "")
+    for key in ("deployment", "statefulset", "daemonset", "job_name", "replicaset"):
+        if namespace and labels.get(key):
+            return (namespace, labels[key])
+    if namespace and labels.get("pod"):
+        owner = pod_owners.get((namespace, labels["pod"]))
+        if owner:
+            return (namespace, owner)
+    if labels.get("node") and not namespace:
+        return ("node", labels["node"])
+    return None
+
+
 def ranked_problems(current: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """One list of what is wrong, worst first, for the page and for the model."""
+    """One list of what is wrong, worst first, for the page and for the model. An alert merged into another problem shows there."""
     rows = [{"fingerprint": fingerprint, "kind": item["kind"], "severity": item["severity"], "title": item["title"],
-             "detail": item["detail"]} for fingerprint, item in current.items()]
+             "detail": item["detail"]} for fingerprint, item in current.items() if not item.get("merged_into")]
     rows.sort(key=lambda row: (-SEVERITY_RANK.get(row["severity"], 0), KIND_ORDER.get(row["kind"], 9), row["title"]))
     return rows
 

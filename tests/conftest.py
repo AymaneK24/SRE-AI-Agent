@@ -29,7 +29,9 @@ def make_config(tmp_path):
     def build(**overrides):
         # Most tests create several companies, which also proves that their data stays apart if this mode is ever used.
         # Fake servers in these tests listen on this machine, which a real installation refuses as a target.
-        values = {"data_dir": tmp_path, "public_url": "http://localhost", "database_url": PG_URL, "multi_company": True, "allow_loopback_targets": True}
+        values = {"data_dir": tmp_path, "public_url": "http://localhost", "database_url": PG_URL, "multi_company": True, "allow_loopback_targets": True,
+                  # Alerts go out at once in tests, unless a test sets noise control itself.
+                  "alert_grace_s": 0, "alert_warning_grace_s": 0, "alert_group_window_s": 0}
         values.update(overrides)
         return Config(**values)
     return build
@@ -91,6 +93,7 @@ class PromState:
         self.range_result = []
         self.unknown = False
         self.no_targets = False
+        self.extra_alerts = []
 
 
 class FakeProm(BaseHTTPRequestHandler):
@@ -122,7 +125,7 @@ class FakeProm(BaseHTTPRequestHandler):
         elif "/alerts" in self.path:
             alerts = [{"labels": {"alertname": "HighErrorRate", "severity": "critical"}, "annotations": {"summary": "Errors are high"},
                        "state": "firing", "activeAt": "2026-01-01T00:00:00Z", "value": "9"}] if self.state.firing else []
-            self._send({"alerts": alerts})
+            self._send({"alerts": alerts + list(self.state.extra_alerts)})
         elif "/rules" in self.path:
             self._send({"groups": []})
         elif "__name__" in self.path:

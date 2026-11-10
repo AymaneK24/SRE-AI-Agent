@@ -37,17 +37,45 @@ LONG_PROMPT: dict[str, dict[str, float]] = {
 }
 
 
-def compute_cost(provider: str, model: str, input_tokens: int | None, output_tokens: int | None, prices: dict[str, Any]) -> float | None:
-    """Return the cost in dollars, or None when no price is known for this model."""
+# Cached prompt tokens are billed as a share of the input price. Anthropic: reads 10%, writes (5-minute cache) 125%.
+# Google's implicit caching: reads at a discount of at least 75% on Gemini 2.5 and later, so 25% is used as a safe estimate.
+CACHE_READ_RATE = {"claude": 0.10, "gemini": 0.25}
+CACHE_WRITE_RATE = {"claude": 1.25, "gemini": 1.0}
+
+
+def _price(model: str, input_tokens: int, prices: dict[str, Any]) -> dict[str, Any] | None:
+    price = prices.get(model) or DEFAULT_PRICES.get(model)
+    long_prompt = LONG_PROMPT.get(model)
+    if price and long_prompt and model not in prices and input_tokens > long_prompt["over"]:
+        price = long_prompt
+    return price
+
+
+def compute_cost(provider: str, model: str, input_tokens: int | None, output_tokens: int | None, prices: dict[str, Any],
+                 cache_read: int = 0, cache_write: int = 0) -> float | None:
+    """Return the cost in dollars, or None when no price is known for this model. input_tokens includes cached tokens."""
     if provider == "ollama":
         return 0.0
-    price = prices.get(model) or DEFAULT_PRICES.get(model)
-    if not price or input_tokens is None:
+    if input_tokens is None:
         return None
-    long_prompt = LONG_PROMPT.get(model)
-    if long_prompt and model not in prices and input_tokens > long_prompt["over"]:
-        price = long_prompt
-    return (input_tokens * float(price["input"]) + (output_tokens or 0) * float(price["output"])) / 1_000_000
+    price = _price(model, input_tokens, prices)
+    if not price:
+        return None
+    cache_read, cache_write = min(cache_read, input_tokens), min(cache_write, max(input_tokens - cache_read, 0))
+    plain = input_tokens - cache_read - cache_write
+    rate = float(price["input"])
+    billed = (plain + cache_read * CACHE_READ_RATE.get(provider, 1.0) + cache_write * CACHE_WRITE_RATE.get(provider, 1.0)) * rate
+    return (billed + (output_tokens or 0) * float(price["output"])) / 1_000_000
+
+
+def cache_saving(provider: str, model: str, input_tokens: int | None, output_tokens: int | None, prices: dict[str, Any],
+                 cache_read: int = 0, cache_write: int = 0) -> float | None:
+    """What prompt caching saved on one call, compared with sending everything at the full input price."""
+    actual = compute_cost(provider, model, input_tokens, output_tokens, prices, cache_read, cache_write)
+    full = compute_cost(provider, model, input_tokens, output_tokens, prices)
+    if actual is None or full is None:
+        return None
+    return round(full - actual, 6)
 
 
 async def spend_settings(db: Database, org_id: int) -> dict[str, Any]:

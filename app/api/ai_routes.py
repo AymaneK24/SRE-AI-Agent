@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, AsyncIterator, Literal
+from typing import Annotated, Any, AsyncIterator, Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import ai_settings
-from ..costs import budget_problem, compute_cost, spend_settings
+from ..costs import budget_problem, compute_cost, month_start, spend_settings
 from ..db import sha256_text, utcnow
 from ..llm.base import Finished, ProviderError, TextDelta
 from ..llm.claude import FALLBACK_MODELS
@@ -80,6 +80,16 @@ class MessageBody(BaseModel):
     provider: ProviderName | None = None
     model: str | None = Field(default=None, max_length=200)
     use_tools: bool | None = None
+    # Fingerprints of the problems chosen in the live context. Only their evidence goes to the model.
+    focus: list[Annotated[str, Field(max_length=300)]] = Field(default_factory=list, max_length=20)
+    answer_style: Literal["short", "report"] | None = None
+
+
+class SavingsBody(BaseModel):
+    prompt_caching: bool = True
+    gather_evidence: bool = True
+    answer_style: Literal["short", "report"] = "short"
+    evidence_model: dict[Literal["claude", "gemini"], Annotated[str, Field(max_length=200)]] = Field(default_factory=dict)
 
 
 class ShareBody(BaseModel):
@@ -129,6 +139,44 @@ async def put_ai_settings(body: AiSettingsBody, user: Admin, ctx: Ctx) -> dict[s
     await ctx.db.audit(user.org_id, "ai_settings_changed", payload["provider"], {
         "provider": payload["provider"], "model": payload[payload["provider"]]["model"], "ollama_url": payload["ollama"]["url"]}, actor=user.actor)
     return await get_ai_settings(user, ctx)
+
+
+@router.get("/ai/savings")
+async def get_savings(user: Admin, ctx: Ctx) -> dict[str, Any]:
+    """The cost-saving settings, and what they saved this month."""
+    settings = await ai_settings.load_savings(ctx.db, user.org_id)
+    start = month_start()
+    calls = await ctx.db.one(
+        "SELECT count(*) AS calls, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
+        "COALESCE(SUM(saved_usd), 0) AS saved_usd, COALESCE(SUM(cost_usd), 0) AS cost_usd, "
+        "SUM(CASE WHEN purpose = 'evidence' THEN 1 ELSE 0 END) AS evidence_calls, "
+        "COALESCE(SUM(CASE WHEN purpose = 'evidence' THEN cost_usd ELSE 0 END), 0) AS evidence_cost_usd "
+        "FROM llm_calls WHERE org_id = ? AND started_at >= ? AND provider <> 'ollama'", (user.org_id, start))
+    console = await ctx.db.one("SELECT count(*) AS n FROM tool_calls WHERE org_id = ? AND origin = 'console' AND ok = 1 AND created_at >= ?", (user.org_id, start))
+    focused = await ctx.db.one(
+        "SELECT count(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+        "WHERE c.org_id = ? AND m.role = 'user' AND m.focus <> '[]' AND m.created_at >= ?", (user.org_id, start))
+    input_tokens = int(calls["input_tokens"] or 0)
+    cached = int(calls["cache_read_tokens"] or 0)
+    return {
+        **settings,
+        "month": {
+            "since": start, "model_calls": int(calls["calls"] or 0), "cost_usd": round(float(calls["cost_usd"] or 0), 4),
+            "cached_tokens": cached, "cached_share": round(cached / input_tokens, 3) if input_tokens else 0.0,
+            "cache_saved_usd": round(float(calls["saved_usd"] or 0), 4),
+            "evidence_calls": int(calls["evidence_calls"] or 0), "evidence_cost_usd": round(float(calls["evidence_cost_usd"] or 0), 4),
+            "console_queries": int(console["n"] or 0), "focused_investigations": int(focused["n"] or 0),
+        },
+    }
+
+
+@router.put("/ai/savings")
+async def put_savings(body: SavingsBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
+    payload = body.model_dump()
+    payload["evidence_model"] = {name: (payload["evidence_model"].get(name) or "").strip() for name in ("claude", "gemini")}
+    await ctx.db.set_setting(user.org_id, ai_settings.SAVINGS_SETTING, payload)
+    await ctx.db.audit(user.org_id, "ai_savings_changed", "ai", payload, actor=user.actor)
+    return await get_savings(user, ctx)
 
 
 KEY_SETTINGS = {"claude": ai_settings.CLAUDE_KEY_SETTING, "gemini": ai_settings.GEMINI_KEY_SETTING}
@@ -253,11 +301,43 @@ async def get_conversation(conversation_id: int, user: Engineer, ctx: Ctx) -> di
     row = await _readable(ctx, user, conversation_id)
     messages = await ctx.db.all("SELECT * FROM messages WHERE conversation_id = ? ORDER BY id", (conversation_id,))
     tools = await ctx.db.all("SELECT * FROM tool_calls WHERE conversation_id = ? ORDER BY id", (conversation_id,))
+    if not user.can("admin"):
+        # Tokens, costs and timings are for admins. Everyone sees which model answered.
+        for message in messages:
+            for key in ("cost_usd", "input_tokens", "output_tokens", "duration_ms", "context_version"):
+                message[key] = None
+        # A query that failed and was retried or replaced is noise to most readers. Admins see every query.
+        tools = [tool for tool in tools if tool["ok"]]
     run = ctx.investigations.active_run(conversation_id)
     names = json.loads(row["alert_names"] or "[]")
     workflows = await workflows_for(ctx.db, user.org_id, alert_names=names, text=row["title"])
     return {**row, "messages": messages, "tool_calls": tools, "active_run_id": run.id if run else None, "can_change": can_change_conversation(user, row),
             "workflows": [{"id": item["id"], "name": item["name"], "risk": item["risk"], "status": item["status"]} for item in workflows[:4]]}
+
+
+@router.get("/conversations/{conversation_id}/report.pdf")
+async def conversation_pdf(conversation_id: int, user: Engineer, ctx: Ctx) -> Response:
+    """The latest answer as a PDF report, with charts of the metric evidence behind it."""
+    from ..investigation_report import build_pdf, collect_evidence, reviewed_workflows, split_sections
+
+    row = await _readable(ctx, user, conversation_id)
+    answer = await ctx.db.one("SELECT content, verification, created_at FROM messages WHERE conversation_id = ? AND role = 'assistant' AND status = 'complete' "
+                              "AND content <> '' ORDER BY id DESC LIMIT 1", (conversation_id,))
+    if not answer:
+        raise HTTPException(404, "This investigation has no finished answer yet.")
+    org = await ctx.db.one("SELECT name FROM organizations WHERE id = ?", (user.org_id,))
+    verification = json.loads(answer["verification"] or "{}")
+    event = {"title": row["title"], "ts": row["created_at"], "kind": "investigation", "severity": "", "fingerprint": ""}
+    engine = await ctx.engines.get(user.org_id)
+    evidence = await collect_evidence(ctx.db, engine, conversation_id, event, {})
+    facts = {"title": row["title"], "ts": row["created_at"], "company": ctx.config.company_name or org["name"],
+             "confidence": str(verification.get("confidence_final") or "Not stated").capitalize(),
+             "status": {"open": "Open", "resolved": "Resolved", "false_alarm": "False alarm"}.get(row["status"], row["status"]),
+             "subtitle": f"Investigation report. Started {row['created_at'][:16].replace('T', ' ')} UTC.", "status_note": ""}
+    pdf = build_pdf(facts, split_sections(answer["content"]), evidence, await reviewed_workflows(ctx.db, user.org_id, event, {}))
+    await ctx.db.audit(user.org_id, "investigation_pdf_downloaded", f"conversation:{conversation_id}", {}, actor=user.actor)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", row["title"])[:60].strip("-") or "investigation"
+    return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"'})
 
 
 @router.patch("/conversations/{conversation_id}")
@@ -307,13 +387,14 @@ async def send_message(conversation_id: int, body: MessageBody, user: Engineer, 
         if problem:
             raise HTTPException(403, problem)
     try:
-        selection = await ai_settings.select(ctx.db, user.org_id, ctx.box, ctx.config, body.provider, body.model, body.use_tools)
+        selection = await ai_settings.select(ctx.db, user.org_id, ctx.box, ctx.config, body.provider, body.model, body.use_tools, body.answer_style)
     except (ProviderError, ValueError) as error:
         raise HTTPException(422, getattr(error, "message", str(error))) from error
     if row["title"] == "New investigation":
         await ctx.db.execute("UPDATE conversations SET title = ? WHERE id = ?", (" ".join(body.prompt.split())[:90], conversation_id))
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
-    run = ctx.investigations.start(user.org_id, conversation_id, body.prompt, selection, int(settings["max_rounds"]), actor=user.actor, owner_id=row["owner_id"])
+    run = ctx.investigations.start(user.org_id, conversation_id, body.prompt, selection, int(settings["max_rounds"]), actor=user.actor, owner_id=row["owner_id"],
+                                   focus=body.focus)
     return {"run_id": run.id}
 
 

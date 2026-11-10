@@ -38,7 +38,9 @@ class OllamaProvider:
             hint = "This app is in a container, so use http://host.docker.internal:11434 or the host's IP address."
         return ProviderError(f"Could not reach Ollama at {self.base_url}. {hint}")
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
+    def build_request(self, model: str, system: str | list[str], messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
+        # The stable part comes first, so a repeated prompt start can be reused (Gemini's implicit cache, Ollama's prompt cache).
+        system = system if isinstance(system, str) else "\n\n".join(part for part in system if part)
         converted: list[dict[str, Any]] = [{"role": "system", "content": system}]
         for message in messages:
             if message["role"] == "tool":
