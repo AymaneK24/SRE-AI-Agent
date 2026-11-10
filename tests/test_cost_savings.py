@@ -5,6 +5,7 @@ import json
 import pytest
 import pytest_asyncio
 from conftest import Console, FakeProm
+from tests_helpers import reset_database
 
 from app.context.render import focus_context, render_context
 from app.costs import cache_saving, compute_cost
@@ -86,6 +87,7 @@ def test_focus_keeps_only_the_chosen_problems_and_their_evidence():
 # End to end with Claude ----------------------------------------------------------------
 @pytest_asyncio.fixture
 async def claude_console(make_config, fake_models):
+    reset_database()  # Each test starts from an empty database, on PostgreSQL too.
     app = create_app(make_config(anthropic_base_url=fake_models))
     async with app.router.lifespan_context(app):
         yield Console(app)

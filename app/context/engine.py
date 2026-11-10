@@ -723,7 +723,12 @@ class ContextEngine:
         # Problems seen on the first poll started at an unknown earlier time, so don't date them as new.
         first_poll = not self._state_known
         self._state_known = True
+        # Problems still open from before a restart were announced when they started, so they aren't sent again.
+        # Everything else found on the first poll is sent: a broken deployment is just as urgent when the
+        # console only sees it at startup, or when its cluster was just connected.
+        open_before: set[str] = set()
         if first_poll:
+            open_before = await self._open_problems()
             await self._close_problems_that_ended_offline(current)
         # One problem, one notification: a problem already announced under another name isn't announced again.
         announced_alerts = {key for key, value in current.items() if value.get("merged_into") and key in self._active and not self._active[key].get("silent")}
@@ -737,7 +742,7 @@ class ContextEngine:
                 # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
                 detail = {key: value for key, value in item["detail"].items() if key != "logs"}
                 await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
-                                         notify=not first_poll and not silent)
+                                         notify=not silent and not (first_poll and fingerprint in open_before))
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.
@@ -776,6 +781,11 @@ class ContextEngine:
             elif problem.get("namespace") and problem.get("workload"):
                 index.setdefault((problem["namespace"], problem["workload"]), fingerprint)
         return index
+
+    async def _open_problems(self) -> set[str]:
+        rows = await self.db.all(
+            "SELECT fingerprint, kind FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
+        return {row["fingerprint"] for row in rows if row["kind"].endswith("_started")}
 
     async def _close_problems_that_ended_offline(self, current: dict[str, Any]) -> None:
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
