@@ -24,6 +24,16 @@ function toolLabel(name) {
   }[name] || name;
 }
 
+// Metric queries can be drawn as charts; the others are shown as text.
+const CHARTABLE = new Set(['run_instant_query', 'run_range_query']);
+
+function loadText(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch (error) { return fallback; }
+}
+function saveText(key, value) {
+  try { localStorage.setItem(key, value); } catch (error) { /* Only remembered for this visit. */ }
+}
+
 function prettyResult(text) {
   try { return JSON.stringify(JSON.parse(text), null, 1); } catch (error) { return text; }
 }
@@ -47,14 +57,41 @@ export function mount(container, params) {
   const composerNote = h('p', { class: 'privacy-note', hidden: true });
   const composerError = h('div');
   const rail = h('aside', { class: 'rail', 'aria-label': 'Live context' });
+  // Problems chosen in the live context. Only they, and the evidence around them, go to the model.
+  const focus = new Map();
+  for (const fingerprint of String(params.focus || '').split(',').filter(Boolean)) focus.set(fingerprint, '');
+  const focusHost = h('div', { class: 'focus-bar', hidden: true });
+  let answerStyle = loadText('rcc-answer-style', 'short');
+  const styleControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Answer length' });
+  function renderStyle() {
+    clear(styleControl, [['short', 'Short answer'], ['report', 'Full report']].map(([value, label]) => h('button', {
+      type: 'button', 'aria-pressed': String(answerStyle === value), title: value === 'short' ? 'Summary, cause, evidence and next checks. Fewer tokens.' : 'Every section, including competing explanations and remediation.',
+      onClick: () => { answerStyle = value; saveText('rcc-answer-style', value); renderStyle(); },
+    }, label)));
+  }
+  renderStyle();
 
   const composer = h('form', { class: 'composer', onSubmit: submit },
+    focusHost,
     textarea,
     h('div', { class: 'composer-row' },
       modelSelect,
       h('label', { class: 'check' }, toolsCheck, 'Let the model run queries'),
+      styleControl,
       h('div', { class: 'composer-send' }, stopButton, sendButton)),
     composerNote, composerError);
+
+  function renderFocus() {
+    focusHost.hidden = !focus.size;
+    if (!focus.size) { clear(focusHost); textarea.placeholder = 'Describe the problem, or ask what changed'; return; }
+    const titles = new Map((live.context?.problems || []).map((item) => [item.fingerprint, item.title]));
+    clear(focusHost,
+      h('span', { class: 'focus-label' }, `Focused on ${focus.size} ${focus.size === 1 ? 'problem' : 'problems'}`),
+      [...focus.keys()].map((fingerprint) => h('span', { class: 'focus-chip' }, titles.get(fingerprint) || focus.get(fingerprint) || 'A problem that has since cleared',
+        h('button', { type: 'button', 'aria-label': 'Remove from focus', onClick: () => { focus.delete(fingerprint); renderFocus(); renderRail(live.context); } }, '×'))),
+      h('button', { class: 'link-button small', type: 'button', onClick: () => { focus.clear(); renderFocus(); renderRail(live.context); } }, 'Clear'));
+    textarea.placeholder = 'Ask about these problems, or press Investigate to find their root cause';
+  }
   textarea.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') composer.requestSubmit();
   });
@@ -236,21 +273,34 @@ export function mount(container, params) {
     try { return JSON.parse(text); } catch (error) { return {}; }
   }
 
+  // Everyone sees which model answered. Tokens, cost, timing and context version are for admins.
+  function metaLine(message, tools) {
+    const focused = safeJson(message.focus || '[]');
+    const parts = [message.model];
+    if (Array.isArray(focused) && focused.length) parts.push(`focused on ${focused.length} ${focused.length === 1 ? 'problem' : 'problems'}`);
+    if (can('admin')) {
+      const queries = tools.length;
+      parts.push(`context version ${message.context_version ?? 'unknown'}`, queries ? `${queries} ${queries === 1 ? 'query' : 'queries'} run` : 'answered from the live context');
+      return h('p', { class: 'message-meta' }, parts.join(', '), costText(message));
+    }
+    return h('p', { class: 'message-meta' }, parts.join(', '));
+  }
+
   function assistantBlock(message, tools) {
-    const queries = tools.length;
     const body = h('div', { class: 'markdown' });
     renderMarkdown(body, message.content);
     const notices = safeJson(message.notices || '[]');
     return h('article', {},
-      h('p', { class: 'message-meta' }, message.model, `, context version ${message.context_version ?? 'unknown'}, `, queries ? `${queries} ${queries === 1 ? 'query' : 'queries'} run` : 'answered from the live context',
-        costText(message)),
+      metaLine(message, tools),
       verificationBlock(safeJson(message.verification || '{}')),
       tools.length ? evidenceList(tools, false) : null,
       (Array.isArray(notices) ? notices : []).map((text) => h('p', { class: 'notice' }, text)),
       message.content ? body : null,
+      message.status === 'complete' ? evidenceCharts(tools, message) : null,
       message.status === 'failed' ? h('p', { class: 'error-note' }, message.error) : null,
       message.status === 'stopped' ? h('p', { class: 'notice' }, 'Stopped before finishing.') : null,
       message.status === 'complete' ? h('div', { class: 'form-actions' },
+        h('a', { class: 'button compact', href: `/api/conversations/${conversation.id}/report.pdf` }, 'Download report (PDF)'),
         h('button', { class: 'button compact', type: 'button', onClick: draftWorkflow }, 'Draft a remediation workflow'),
         h('span', { class: 'small muted' }, 'Drafts need a person’s review, and this system never runs them.')) : null);
   }
@@ -261,6 +311,8 @@ export function mount(container, params) {
     const parts = [`, ${tokens.toLocaleString()} tokens`];
     if (message.cost_usd !== null && message.cost_usd !== undefined) parts.push(`, ${usd(message.cost_usd)}`);
     else parts.push(', cost unknown');
+    const saved = safeJson(message.verification || '{}').cache_saved_usd;
+    if (saved) parts.push(` (caching saved ${usd(saved)})`);
     if (message.duration_ms) parts.push(`, ${(message.duration_ms / 1000).toFixed(1)} s`);
     return parts.join('');
   }
@@ -291,21 +343,47 @@ export function mount(container, params) {
 
   function evidenceItem(tool) {
     const query = queryFromArgs(tool.arguments);
-    const isPromql = tool.name === 'run_instant_query' || tool.name === 'run_range_query';
+    const isPromql = CHARTABLE.has(tool.name);
     return h('div', { class: 'evidence-item' },
       h('div', { class: 'evidence-head' },
         h('span', { class: 'small muted' }, toolLabel(tool.name)),
+        tool.origin === 'console' ? h('span', { class: 'evidence-origin', title: 'The console ran this itself before the model started.' }, 'Console') : null,
         h('code', {}, query),
         tool.ok ? null : h('span', { class: 'badge critical' }, 'Failed'),
-        isPromql ? h('button', { class: 'link-button small', type: 'button', onClick: () => chartQuery(query) }, 'Chart it') : null),
+        isPromql ? h('button', { class: 'link-button small', type: 'button', onClick: () => chartQuery(query, tool.arguments?.source_id) }, 'Chart it') : null),
       h('details', {}, h('summary', { class: 'small muted' }, 'Show result'), h('pre', { class: 'result' }, prettyResult(tool.result))));
   }
 
   function evidenceList(tools, open) {
-    return h('details', { class: 'evidence', open }, h('summary', {}, `Queries the model ran (${tools.length})`), tools.map(evidenceItem));
+    const byConsole = tools.filter((tool) => tool.origin === 'console').length;
+    const label = byConsole && byConsole < tools.length ? `Evidence: ${byConsole} gathered by the console, ${tools.length - byConsole} queried by the model`
+      : byConsole ? `Evidence gathered by the console (${byConsole})` : `Queries the model ran (${tools.length})`;
+    return h('details', { class: 'evidence', open }, h('summary', {}, label), tools.map(evidenceItem));
   }
 
-  function chartQuery(query) {
+  // The metric evidence as charts under the answer, over the hour before it was written. The PDF report has the same charts.
+  function evidenceCharts(tools, message) {
+    const seen = new Set();
+    const wanted = tools.filter((tool) => tool.ok && CHARTABLE.has(tool.name) && tool.arguments?.query)
+      .filter((tool) => { const key = `${tool.arguments.source_id ?? ''}|${tool.arguments.query}`; if (seen.has(key)) return false; seen.add(key); return true; })
+      .slice(0, 4);
+    if (!wanted.length) return null;
+    const grid = h('div', { class: 'evidence-charts' });
+    const end = Math.floor(new Date(message.created_at).getTime() / 1000) + Math.ceil((message.duration_ms || 0) / 1000) + 60;
+    const start = end - 3600;
+    for (const tool of wanted) {
+      const host = h('div');
+      grid.append(h('figure', { class: 'evidence-chart' }, h('figcaption', {}, h('code', { title: tool.arguments.query }, tool.arguments.query)), host));
+      const chart = new TimeSeriesChart(host, { height: 180, title: tool.arguments.query, showTable: false, ariaLabel: `Chart of ${tool.arguments.query}` });
+      chart.showMessage('Loading chart');
+      api('/api/metrics/query_range', { method: 'POST', body: { query: tool.arguments.query, start, end, step: 60, source_id: tool.arguments.source_id ?? null } })
+        .then((data) => chart.setData(data.result, start, end, 60))
+        .catch((error) => chart.showMessage(error.message, true));
+    }
+    return h('section', { class: 'evidence-dash', 'aria-label': 'Evidence charts' }, h('h3', {}, 'Evidence charts'), grid);
+  }
+
+  function chartQuery(query, sourceId = null) {
     const host = h('div');
     let chart = null;
     openDialog(h('div', {}, dialogHead('Query result, last hour'), h('code', {}, query), host), { wide: true, onClose: () => chart?.destroy() });
@@ -313,7 +391,7 @@ export function mount(container, params) {
     chart.showMessage('Running query');
     const end = Math.floor(Date.now() / 1000);
     const start = end - 3600;
-    api('/api/metrics/query_range', { method: 'POST', body: { query, start, end, step: 60 } })
+    api('/api/metrics/query_range', { method: 'POST', body: { query, start, end, step: 60, source_id: sourceId ?? null } })
       .then((data) => chart.setData(data.result, start, end, 60))
       .catch((error) => chart.showMessage(error.message, true));
   }
@@ -321,7 +399,9 @@ export function mount(container, params) {
   // Sending and streaming ---------------------------------------------------
   async function submit(event) {
     event.preventDefault();
-    const prompt = textarea.value.trim();
+    const titles = new Map((live.context?.problems || []).map((item) => [item.fingerprint, item.title]));
+    const focused = [...focus.keys()];
+    const prompt = textarea.value.trim() || (focused.length ? `Find the root cause of: ${focused.map((key) => titles.get(key) || focus.get(key)).filter(Boolean).join('; ')}.` : '');
     if (!prompt || activeRunId) return;
     clear(composerError);
     const { provider, model } = selectedParts();
@@ -338,7 +418,7 @@ export function mount(container, params) {
         conversation = { ...created, messages: [], tool_calls: [], can_change: true };
       }
       const { run_id: runId } = await api(`/api/conversations/${conversationId}/messages`, {
-        method: 'POST', body: { prompt, provider, model, use_tools: toolsCheck.checked },
+        method: 'POST', body: { prompt, provider, model, use_tools: toolsCheck.checked, focus: focused, answer_style: answerStyle },
       });
       textarea.value = '';
       conversation.title = conversation.title === 'New investigation' ? prompt.replace(/\s+/g, ' ').slice(0, 90) : conversation.title;
@@ -392,7 +472,7 @@ export function mount(container, params) {
       }, 120);
     }
     function paintMeta() {
-      metaLine.textContent = `${model}${contextVersion !== null ? `, context version ${contextVersion}` : ''}`;
+      metaLine.textContent = `${model}${contextVersion !== null && can('admin') ? `, context version ${contextVersion}` : ''}`;
     }
     function paintEvidence() {
       clear(evidenceHost, tools.length ? evidenceList(tools, true) : null);
@@ -443,7 +523,8 @@ export function mount(container, params) {
           status.hidden = false;
           break;
         case 'tool_result':
-          tools.push({ name: event.name, arguments: event.arguments, result: event.result, ok: event.ok });
+          // A query that failed is retried or replaced; only admins need to see the failure.
+          if (event.ok || can('admin')) tools.push({ name: event.name, arguments: event.arguments, result: event.result, ok: event.ok, origin: event.origin });
           paintEvidence();
           keepScrolled();
           break;
@@ -511,8 +592,15 @@ export function mount(container, params) {
       h('p', { class: 'small muted' }, health.status === 'not_configured' ? 'Nothing connected yet.' : `Version ${context.version}, updated ${timeAgo(context.as_of)}${context.sources?.length ? ` from ${context.sources.map((item) => item.name).join(', ')}` : ''}.`),
       stale ? h('p', { class: 'stale-banner small', style: 'margin:10px 0 0' }, `A source isn't answering. The model will be told this data is from ${timeAgo(health.last_ok)}.`) : null,
       health.status === 'not_configured' ? h('p', { class: 'setup-banner small' }, can('admin') ? h('a', { href: '#/connections' }, 'Add a connection') : 'Ask an admin to add a connection', ' so the model has data to work with.') : null,
-      railGroup(`Problems right now (${(context.problems || []).length})`, (context.problems || []).slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, item.title), h('small', {}, item.detail?.diagnosis?.cause || item.kind)))),
-      metrics ? railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name), h('small', {}, alert.summary || labelText(alert.labels))))) : null,
+      railGroup(`Problems right now (${(context.problems || []).length})`, (context.problems || []).slice(0, 12).map((item) => {
+        const box = h('input', { type: 'checkbox', checked: focus.has(item.fingerprint), 'aria-label': `Focus on ${item.title}`,
+          onChange: () => { if (box.checked) focus.set(item.fingerprint, item.title); else focus.delete(item.fingerprint); renderFocus(); row.classList.toggle('is-chosen', box.checked); } });
+        const row = h('label', { class: `rail-item rail-pick${focus.has(item.fingerprint) ? ' is-chosen' : ''}` }, box,
+          h('span', {}, h('b', {}, item.title), h('small', {}, item.detail?.diagnosis?.cause || item.kind)));
+        return row;
+      }), (context.problems || []).length ? 'Tick the problems to investigate. Only they, and their logs, metrics and cluster state, go to the model.' : ''),
+      metrics ? railGroup(`Firing alerts (${firing.length})`, firing.map((alert) => h('div', { class: 'rail-item' }, h('b', {}, alert.name),
+        h('small', {}, alert.merged_into ? 'Same problem as one above, found in the cluster' : alert.summary || labelText(alert.labels))))) : null,
       metrics ? railGroup(`Down targets (${down.length})`, down.map((target) => h('div', { class: 'rail-item' }, h('b', {}, target.instance), h('small', {}, `Job ${target.job}`)))) : null,
       metrics ? railGroup(`Out-of-range signals (${anomalies.length})`, anomalies.slice(0, 8).map((item) => h('div', { class: 'rail-item' }, h('b', {}, `${item.title}: ${formatValue(item.value, item.unit)}`), h('small', {}, labelText(item.labels))))) : null,
       railGroup('Recorded changes', (context.changes || []).slice(0, 5).map((change) => h('div', { class: 'rail-item' }, change.title, h('small', {}, `${change.origin}, ${timeAgo(change.ts)}`)))),
@@ -522,8 +610,8 @@ export function mount(container, params) {
     rail.scrollTop = scroll;
   }
 
-  function railGroup(title, items) {
-    return h('section', { class: 'rail-group' }, h('h3', {}, title), items.length ? items : h('p', { class: 'rail-none' }, 'None'));
+  function railGroup(title, items, hint = '') {
+    return h('section', { class: 'rail-group' }, h('h3', {}, title), hint ? h('p', { class: 'rail-hint' }, hint) : null, items.length ? items : h('p', { class: 'rail-none' }, 'None'));
   }
 
   async function showExact() {
@@ -532,7 +620,10 @@ export function mount(container, params) {
     const note = h('p', { class: 'small muted' });
     openDialog(h('div', {}, dialogHead('Text the model receives now'), note, pre), { wide: true });
     try {
-      const preview = await api(`/api/context/prompt-preview${provider ? `?provider=${provider}` : ''}`);
+      const query = new URLSearchParams();
+      if (provider) query.set('provider', provider);
+      if (focus.size) query.set('focus', [...focus.keys()].join(','));
+      const preview = await api(`/api/context/prompt-preview?${query}`);
       note.textContent = `Context version ${preview.version}, up to ${preview.max_chars.toLocaleString()} characters for this model. Your prompt is added after this, along with any earlier messages and related past investigations.`;
       pre.textContent = preview.text;
     } catch (error) {
@@ -550,6 +641,7 @@ export function mount(container, params) {
 
   if (params.prompt) textarea.value = params.prompt;
   renderRail(live.context);
+  renderFocus();
   loadModels();
   loadConversation();
 

@@ -1,0 +1,69 @@
+# kube-prometheus-stack, sized for a laptop or a small test cluster, for use with Root Cause Console.
+#
+# What it adds: Prometheus with kube-state-metrics and the standard Kubernetes alert rules
+# (KubePodCrashLooping, KubeDeploymentRolloutStuck, KubePodNotReady, KubeContainerWaiting, CPU and
+# memory alerts...), plus node-exporter for machine metrics. The console reads the firing alerts from
+# Prometheus directly, so Alertmanager and Grafana are left out to save memory.
+
+alertmanager:
+  enabled: false
+
+defaultRules:
+  disabled:
+    # Always firing by design, to prove Alertmanager works. Without Alertmanager it's only noise.
+    Watchdog: true
+    InfoInhibitor: true
+    # Fires because Alertmanager is left out on purpose: the console reads alerts from Prometheus.
+    PrometheusNotConnectedToAlertmanagers: true
+    # Docker Desktop's virtual machine clock drifts after the laptop sleeps, so this fires on laptops for no real reason.
+    NodeClockSkewDetected: true
+
+grafana:
+  enabled: false
+
+prometheus:
+  service:
+    # Reachable from outside the cluster on port 30090. On Docker Desktop, that's localhost:30090.
+    type: NodePort
+    nodePort: 30090
+  prometheusSpec:
+    retention: 3d
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # Pick up rules and monitors from any namespace, not only those labelled for this release.
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits: { memory: 1Gi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 20m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+prometheus-node-exporter:
+  # Docker Desktop's root filesystem isn't a shared mount, which stops node-exporter from starting.
+  # Without the host's root mounted it still reports CPU, memory and network; only disk use is limited.
+  hostRootFsMount:
+    enabled: false
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+# Docker Desktop and kind don't expose these control-plane parts, so their rules would only report
+# them as down. On a managed cluster (AKS, EKS, GKE) they're hidden too.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

@@ -89,13 +89,60 @@ def _problem_lines(index: int, problem: dict[str, Any]) -> list[str]:
     return lines
 
 
+def focus_context(context: dict[str, Any], fingerprints: list[str]) -> dict[str, Any]:
+    """The live context narrowed to the problems a person chose: those problems, their alerts, targets and signals,
+    and only the cluster and log detail of their namespaces. Everything else is left out, so the model looks where
+    the person is looking, and fewer tokens are sent."""
+    wanted = set(fingerprints)
+    problems = [item for item in context.get("problems", []) if item.get("fingerprint") in wanted]
+    if not problems:
+        return context
+    focused = dict(context)
+    focused["focus"] = [item["title"] for item in problems]
+    focused["problems"] = problems
+    alerts = context.get("alerts") or {}
+    focused["alerts"] = {**alerts, "firing": [item for item in alerts.get("firing", []) if item.get("fingerprint") in wanted], "pending": []}
+    targets = context.get("targets") or {}
+    focused["targets"] = {**targets, "down_list": [item for item in targets.get("down_list", []) if item.get("fingerprint") in wanted]}
+    focused["anomalies"] = [item for item in context.get("anomalies", []) if item.get("fingerprint") in wanted]
+    focused["rules"] = {**(context.get("rules") or {}), "failing": []}
+    # Signals the chosen anomalies come from, so their current values stay visible. Other signals are left out.
+    chosen_signals = {(item.get("source_id"), item.get("signal_id")) for item in focused["anomalies"]}
+    focused["signals"] = [signal for signal in context.get("signals", []) if (signal.get("source_id"), signal.get("id")) in chosen_signals]
+    namespaces = {(item.get("detail") or {}).get("namespace") for item in problems if item.get("kind") == "k8s"} - {None, ""}
+    workloads = {(item.get("detail") or {}).get("workload") for item in problems if item.get("kind") == "k8s"} - {None, ""}
+    jobs = ({(item.get("detail") or {}).get("job") for item in problems}
+            | {((item.get("detail") or {}).get("labels") or {}).get("job") for item in problems}) - {None, ""}
+    connections = []
+    for item in _connections(context):
+        item = dict(item)
+        if item["kind"] == "kubernetes":
+            item["unhealthy_pods"] = [row for row in item.get("unhealthy_pods", []) if row.get("namespace") in namespaces]
+            item["deployments_below_desired"] = [row for row in item.get("deployments_below_desired", []) if row.get("namespace") in namespaces]
+            item["warning_events"] = [row for row in item.get("warning_events", []) if any(f" {ns}/" in f" {row.get('object', '')}" or row.get("namespace") == ns for ns in namespaces)]
+        elif item["kind"] == "loki":
+            def related(job: str) -> bool:
+                return job in jobs or any(job.startswith(f"{ns}/") for ns in namespaces) or any(workload and workload in job for workload in workloads)
+            item["error_lines"] = [row for row in item.get("error_lines", []) if related(str(row.get("job", "")))]
+        connections.append(item)
+    focused["connections"] = connections
+    focused["events"] = [event for event in context.get("events", []) if event.get("fingerprint") in wanted][:10]
+    return focused
+
+
+def _connections(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every log store and cluster. Older contexts only hold the main one of each kind."""
+    if context.get("connections") is not None:
+        return list(context["connections"])
+    return [{"kind": kind, **item} for kind, item in (context.get("integrations") or {}).items() if kind in {"loki", "kubernetes"}]
+
+
 def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
     """Render what is broken first, then the evidence around it, then the background, and say when something was left out."""
     health = context.get("health", {})
     status = health.get("status", "unknown")
     coverage = context.get("coverage", {})
     has_metrics = coverage.get("has_metrics", bool(context.get("sources")))
-    integrations = context.get("integrations", {})
     sections: list[list[str]] = []
     header = [
         f"Context version {context.get('version')} as of {context.get('as_of') or 'never'} ({_age(context.get('as_of'))}).",
@@ -108,11 +155,13 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
         header.append(line)
         if source.get("stale"):
             header.append(f"WARNING: source \"{source.get('name')}\" is not answering ({source.get('error')}). Its data below is from the last good poll at {source.get('last_ok')}.")
-    for kind, label in (("loki", "Log store: Loki, query language LogQL"), ("kubernetes", "Kubernetes cluster")):
-        item = integrations.get(kind)
-        if item:
-            state = "ok" if item.get("status") == "ok" else f"not answering: {item.get('error')}"
-            header.append(f"{label} \"{item.get('name', kind)}\", status {state}.")
+    connections = _connections(context)
+    labels = {"loki": "Log store: Loki, query language LogQL", "kubernetes": "Kubernetes cluster"}
+    for item in connections:
+        state = "ok" if item.get("status") == "ok" else f"not answering: {item.get('error')}"
+        several = sum(1 for other in connections if other["kind"] == item["kind"]) > 1
+        which = f" (connection_id {item['id']}{', main' if item.get('main') else ''})" if several and item.get("id") is not None else ""
+        header.append(f"{labels.get(item['kind'], item['kind'])} \"{item.get('name', item['kind'])}\"{which}, status {state}.")
     if context.get("stale") and not context.get("sources"):
         header.append(f"WARNING: the source is not answering. Everything below is from the last good poll at {health.get('last_ok')}.")
     sections.append(header)
@@ -122,6 +171,9 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
         return "\n".join(sections[0] + sections[1])
 
     problems = context.get("problems", [])
+    if context.get("focus"):
+        sections.append(["FOCUS: the person chose to investigate only these problems. Explain them, and leave other problems aside:"]
+                        + [f"- {title}" for title in context["focus"]])
     problem_lines = [f"PROBLEMS RIGHT NOW ({len(problems)}), worst first:"]
     for index, problem in enumerate(problems, start=1):
         problem_lines += _problem_lines(index, problem)
@@ -136,19 +188,20 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
             + [f"- {change['ts']} [{change['origin']}] {change.get('service') or ''} {change['title']}" for change in changes]
         )
 
-    loki = integrations.get("loki")
-    if loki:
+    for loki in [item for item in connections if item["kind"] == "loki"]:
+        name = f" \"{loki.get('name')}\"" if len([item for item in connections if item["kind"] == "loki"]) > 1 else ""
         if loki.get("status") == "ok":
             rows = loki.get("error_lines", [])
-            sections.append([f"LOGS, error-like lines in the last 5 minutes from Loki (selector {loki.get('selector')}):"]
+            sections.append([f"LOGS, error-like lines in the last 5 minutes from Loki{name} (selector {loki.get('selector')}):"]
                             + ([f"- job={row['job']}: {row['errors_5m']:.0f} lines" for row in rows] or ["- none"]))
         else:
-            sections.append([f"LOGS: Loki query failed: {loki.get('error')}"])
+            sections.append([f"LOGS: Loki{name} query failed: {loki.get('error')}"])
 
-    kubernetes = integrations.get("kubernetes")
-    if kubernetes:
+    clusters = [item for item in connections if item["kind"] == "kubernetes"]
+    for kubernetes in clusters:
+        name = f" \"{kubernetes.get('name')}\"" if len(clusters) > 1 else ""
         if kubernetes.get("status") == "ok":
-            lines = ["KUBERNETES DETAIL:"]
+            lines = [f"KUBERNETES DETAIL{name}:"]
             lines += [f"- Pod {row['namespace']}/{row['pod']}: {row['phase']}, {row['restarts']} restarts, {', '.join(row['reasons']) or 'no reason given'}" for row in kubernetes.get("unhealthy_pods", [])]
             lines += [f"- Deployment {row['namespace']}/{row['deployment']}: {row['ready']} of {row['desired']} ready, revision {row['revision']}, images {', '.join(row['images'])}" for row in kubernetes.get("deployments_below_desired", [])]
             lines += [f"- Warning {row['last_seen']} {row['object']}: {row['reason']}: {row['message']}" for row in kubernetes.get("warning_events", [])]
@@ -158,7 +211,7 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
                 lines.append("- no unhealthy pods, warning events, or under-replicated deployments")
             sections.append(lines)
         else:
-            sections.append([f"KUBERNETES: the cluster didn't answer: {kubernetes.get('error')}"])
+            sections.append([f"KUBERNETES: the cluster{name} didn't answer: {kubernetes.get('error')}"])
 
     if has_metrics:
         alerts = context.get("alerts", {})

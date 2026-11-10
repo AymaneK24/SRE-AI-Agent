@@ -110,6 +110,20 @@ Obvious secrets, such as tokens and passwords, are removed by pattern matching b
 
 > **Security:** Claude and Gemini stay off until an admin ticks the consent box, and an owner can block them for the whole organization with **Allow cloud AI models**. Prompt injection, a log line written to mislead the model, can't be fully prevented. Because the model has only read-only tools, the worst it can do is give a wrong answer, so read the evidence.
 
+## Cost savings
+
+**Connections > Cost savings** shows what this month cost, what the savings saved, and these settings:
+
+| Saving | What it does | Applies to |
+|---|---|---|
+| **Prompt caching** | Each round of an investigation starts with the same instructions, live context and evidence. Claude reads that part from its cache at about a tenth of the input price, and answers sooner. The console keeps it identical between rounds, and sends what changed in a separate, short part. | Claude. Gemini caches a repeated start by itself on recent models, and Ollama reuses it locally, so both benefit from the same ordering. |
+| **Gather evidence first** | The console runs the obvious queries for the problems in view before the model starts. | Every model. Most useful for small private models, which often write invalid queries. |
+| **Focus** | Only the problems a person ticks, and their evidence, are sent. | Every model. Always on. |
+| **A cheaper model for query rounds** | A small model, such as Haiku or Flash-Lite, runs the queries. The main model reads what it found and writes the answer. Its draft is never shown. | Claude and Gemini, with a smaller model of the same provider. |
+| **Short answers by default** | Fewer output tokens, which cost the most per token. | Every model, for questions asked in the page. |
+
+The month's figures: API spend and what it would have been without caching, the share of input tokens read from cache, queries the console ran for the model, focused investigations, and rounds on the cheaper model. Cached tokens are priced at 10% of the input price for Claude (125% the first time they're written) and estimated at 25% for Gemini.
+
 ## Usage and cost
 
 **Organization > Usage** shows this month's spend, a forecast, answers, average cost and time, and a table by model. Ollama shows $0, because it has no charge per use.

@@ -310,8 +310,8 @@ def test_small_model_mode():
     assert is_small_model("qwen2.5:3b") and is_small_model("llama3.1:8b") and is_small_model("phi3:mini")
     assert not is_small_model("qwen2.5:14b") and not is_small_model("llama3.2:latest") and not is_small_model("claude-sonnet-5-5")
     assert [tool["name"] for tool in compact_tools(TOOL_DEFINITIONS)] == ["get_pod_logs", "describe_object", "query_logs", "run_instant_query"]
-    compact = build_system("ctx", [], [], True, False, compact=True)
-    assert len(compact) < len(build_system("ctx", [], [], True, False)) and "## Likely root cause" in compact
+    compact = "".join(build_system("ctx", [], [], True, False, compact=True))
+    assert len(compact) < len("".join(build_system("ctx", [], [], True, False))) and "## Likely root cause" in compact
 
 
 # The Nov 6 test, replayed ------------------------------------------------------------
@@ -347,7 +347,10 @@ async def test_replay_of_the_nov_6_investigation(console, kube_only, fake_models
     assert message["status"] == "complete"
     assert "connection refused postgres:5432" in request and "PROBLEMS RIGHT NOW (1)" in request, "the crash log went to the model"
     assert "You are a site reliability engineer. Find why" in request, "a 3B model gets the short prompt"
-    tool_calls = await console.ctx.db.all("SELECT name, ok, result FROM tool_calls WHERE org_id = ?", (org_id,))
+    gathered = await console.ctx.db.all("SELECT name, ok FROM tool_calls WHERE org_id = ? AND origin = 'console'", (org_id,))
+    assert [(row["name"], row["ok"]) for row in gathered] == [("describe_object", 1)], "the console describes the crashing workload itself"
+    assert "EVIDENCE THE CONSOLE GATHERED" in request
+    tool_calls = await console.ctx.db.all("SELECT name, ok, result FROM tool_calls WHERE org_id = ? AND origin = 'model'", (org_id,))
     assert tool_calls[0]["name"] == "query_logs" or "get_pod_logs" in tool_calls[0]["result"], "a wrong guess is pointed to the right tool"
     assert any("doesn't address" in reason for reason in verification["reasons"]), "an answer that ignores the crash is flagged"
 
@@ -508,3 +511,44 @@ def test_loki_selector_with_only_negative_matchers_is_made_usable():
     assert usable_selector('{app=~".*"}') == '{job=~".+", app=~".*"}'
     assert usable_selector('{namespace=~".+", namespace!="kube-system"}') == '{namespace=~".+", namespace!="kube-system"}'
     assert usable_selector('{job="api"} |= "x"') == '{job="api"} |= "x"'
+
+
+# Alerts for problems found when the console connects ---------------------------------------
+async def _wait_for(check, seconds=10.0):
+    import asyncio
+    for _ in range(int(seconds * 10)):
+        if check():
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def test_a_deployment_already_broken_at_connect_is_alerted_once(console, kube):
+    """shop/checkout can't pull its image before the cluster is connected, or before a restart: the on-call still hears about it."""
+    client = await console.company("ShopCo", "o@shop.example")
+    org_id = (await client.get("/api/auth/me")).json()["org_id"]
+    channel = await client.post("/api/org/channels", json={"kind": "email", "name": "on-call", "recipients": ["oncall@shop.example"], "min_severity": "critical"})
+    assert channel.status_code == 201, channel.text
+    bad = "nginx:this-tag-does-not-exist"
+    with FakeKube.state.lock:
+        FakeKube.state.deployments = [deployment("shop", "checkout", 2, 0, image=bad)]
+        FakeKube.state.pods = [pod("shop", f"checkout-5b5568b987-{suffix}", "checkout", waiting="ImagePullBackOff", ready=False, image=bad) for suffix in ("aaaaa", "bbbbb")]
+        FakeKube.state.events = [{"metadata": {"namespace": "shop"}, "involvedObject": {"kind": "Pod", "name": "checkout-5b5568b987-aaaaa"},
+                                  "reason": "BackOff", "message": f'Back-off pulling image "{bad}"', "count": 12, "type": "Warning"}]
+    saved = await client.post("/api/integrations", json={"kind": "kubernetes", "name": "docker-desktop", "config": {"url": kube}, "secrets": {"token": TOKEN}})
+    assert saved.status_code == 201, saved.text
+    engine = await console.ctx.engines.get(org_id)
+    await engine.refresh_now()
+
+    def alerts():
+        return [message for message in console.outbox if message["To"] == "oncall@shop.example"]
+    assert await _wait_for(lambda: alerts()), "a critical problem found at connect must reach the on-call channel"
+    message = alerts()[0]
+    assert message["Subject"].startswith("[CRITICAL]") and "checkout" in message["Subject"] and "can't pull its image" in message["Subject"]
+
+    # A restart finds it again. It was already announced, so nobody gets a second email for the same outage.
+    console.ctx.notifier._sent.clear()
+    engine._reset_state()
+    await engine.refresh_now()
+    await _wait_for(lambda: len(alerts()) > 1, seconds=2)
+    assert len(alerts()) == 1

@@ -109,5 +109,4 @@ Run **one** console. Live investigations, rate limits, and monitoring are held i
 ## Known limits
 
 - Rate limits are per process and reset on restart.
-- One Loki and one Kubernetes cluster per installation. See [Connections](/docs/connections#many-sources-one-view).
 - No distributed traces. The console can only find causes its connections can show.

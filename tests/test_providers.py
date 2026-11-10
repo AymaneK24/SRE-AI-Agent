@@ -1,4 +1,5 @@
 """Checks the Ollama and Claude adapters against a server speaking their documented formats."""
+import json
 import threading
 
 import pytest
@@ -58,7 +59,11 @@ async def test_claude_tool_round_trip(base_url):
     provider = ClaudeProvider("sk-ant-test-valid-key", base_url)
     messages = [{"role": "user", "content": "hi"}]
     request = provider.build_request("claude-test-1", "Context version 9", messages, TOOLS)
-    assert request["system"] == "Context version 9" and request["stream"] is True
+    assert request["system"] == [{"type": "text", "text": "Context version 9", "cache_control": {"type": "ephemeral"}}] and request["stream"] is True
+    assert request["tools"][-1]["cache_control"] == {"type": "ephemeral"} and "cache_control" not in TOOLS[-1], "marks a copy, not the shared definitions"
+    assert request["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    plain = ClaudeProvider("sk-ant-test-valid-key", base_url, prompt_caching=False).build_request("claude-test-1", "Context version 9", messages, TOOLS)
+    assert plain["system"] == "Context version 9" and "cache_control" not in json.dumps(plain)
     items = await collect(provider, request)
     call = next(i for i in items if isinstance(i, ToolCall))
     assert call.arguments == {"query": "up"}
@@ -70,7 +75,7 @@ async def test_claude_tool_round_trip(base_url):
     ]
     second = provider.build_request("claude-test-1", "Context version 9", messages, TOOLS)
     assert second["messages"][1]["content"][0]["type"] == "tool_use"
-    assert second["messages"][2]["content"][0] == {"type": "tool_result", "tool_use_id": call.id, "content": "{}"}
+    assert second["messages"][2]["content"][0] == {"type": "tool_result", "tool_use_id": call.id, "content": "{}", "cache_control": {"type": "ephemeral"}}
     items = await collect(provider, second)
     assert "context version 9" in "".join(i.text for i in items if isinstance(i, TextDelta))
     assert items[-1].stop_reason == "end_turn"

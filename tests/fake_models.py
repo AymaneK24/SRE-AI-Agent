@@ -201,7 +201,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
             self.wfile.flush()
 
-        send({"type": "message_start", "message": {"usage": {"input_tokens": 700, "output_tokens": 1}}})
+        system = body["system"] if isinstance(body["system"], str) else "".join(block.get("text", "") for block in body["system"])
+        # Like the real API: with cache marks, a prompt seen before is read from the cache.
+        cached = "cache_control" in json.dumps(body) and len(body["messages"]) > 1
+        usage = {"input_tokens": 100, "cache_read_input_tokens": 600, "output_tokens": 1} if cached else {"input_tokens": 700, "output_tokens": 1}
+        send({"type": "message_start", "message": {"usage": usage}})
         send({"type": "ping"})
         used_tool = any(isinstance(m["content"], list) and any(b.get("type") == "tool_result" for b in m["content"]) for m in body["messages"])
         if body.get("tools") and not used_tool:
@@ -212,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
             send({"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": {"output_tokens": 30}})
         else:
             send({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-            for word in re.findall(r"\S+\s*", scripted_answer(body["system"])):
+            for word in re.findall(r"\S+\s*", scripted_answer(system)):
                 send({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": word}})
             send({"type": "content_block_stop", "index": 0})
             send({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 110}})

@@ -60,7 +60,9 @@ class GeminiProvider:
     async def close(self) -> None:
         await self._client.aclose()
 
-    def build_request(self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
+    def build_request(self, model: str, system: str | list[str], messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True) -> dict[str, Any]:
+        # The stable part comes first, so a repeated prompt start can be reused (Gemini's implicit cache, Ollama's prompt cache).
+        system = system if isinstance(system, str) else "\n\n".join(part for part in system if part)
         contents: list[dict[str, Any]] = []
         names: dict[str, str] = {}
         for message in messages:
@@ -81,6 +83,11 @@ class GeminiProvider:
                 elif message.get("tool_calls"):
                     parts: list[dict[str, Any]] = [{"text": message["content"]}] if message.get("content") else []
                     parts += [{"functionCall": {"name": call["name"], "args": call["arguments"]}} for call in message["tool_calls"]]
+                    if message.get("other_model"):
+                        # Calls made by another model carry no thought signature of this one. Google documents this value for that case.
+                        for part in parts:
+                            if "functionCall" in part:
+                                part["thoughtSignature"] = "skip_thought_signature_validator"
                     contents.append({"role": "model", "parts": parts})
                 elif message.get("content"):
                     contents.append({"role": "model", "parts": [{"text": message["content"]}]})
@@ -135,6 +142,8 @@ class GeminiProvider:
                     usage = chunk.get("usageMetadata") or {}
                     if usage:
                         finished.input_tokens = usage.get("promptTokenCount", finished.input_tokens)
+                        # Gemini caches a repeated prompt start by itself (implicit caching) and reports how much it reused.
+                        finished.cache_read_tokens = int(usage.get("cachedContentTokenCount") or finished.cache_read_tokens or 0)
                         finished.output_tokens = (usage.get("candidatesTokenCount") or 0) + (usage.get("thoughtsTokenCount") or 0) or finished.output_tokens
                     feedback = chunk.get("promptFeedback") or {}
                     if feedback.get("blockReason"):

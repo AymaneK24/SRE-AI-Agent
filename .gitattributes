@@ -1,0 +1,5 @@
+# Scripts and files read inside Linux containers keep Unix line endings, even when checked out on Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf
+Caddyfile* text eol=lf
+*.py text eol=lf
