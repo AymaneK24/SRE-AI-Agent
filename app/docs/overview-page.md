@@ -28,7 +28,12 @@ The panel at the top right has a switch:
 | **Metrics** | Targets answering scrapes, and the four golden signals when your metrics include them |
 | **Logs** | Lines and error-like lines in the last 5 minutes, and the streams with the most errors |
 
-Your browser remembers your choice. A view is only offered when something feeds it: Cluster needs a Kubernetes connection, Metrics a metric source, and Logs a Loki connection that answers. Metrics and Logs are for engineers and above, so viewers see the Cluster view.
+Your browser remembers your choice. With several metric sources, log stores, or clusters, a **Source**, **Log store**, or **Cluster** picker appears next to the switch:
+
+- **Metrics:** *Automatic* shows the most important problem from any source, and the main source's key signal when nothing is wrong. Pick a source to see only that one.
+- **Cluster** and **Logs:** pick which cluster or Loki to show. The main one is shown first.
+
+A view is only offered when something feeds it: Cluster needs a Kubernetes connection, Metrics a metric source, and Logs a Loki connection that answers. Metrics and Logs are for engineers and above, so viewers see the Cluster view.
 
 ### Golden signals
 
@@ -40,6 +45,8 @@ When your metrics include them, the console charts the four golden signals:
 | Traffic | How much is being asked |
 | Errors | How many requests fail |
 | Saturation | How full the system is |
+
+With several metric sources, each box shows the worst value across all of them and names the source it came from. The **Source** picker above them shows one source only. The Metrics panels further down have the same picker, and each panel names its source.
 
 It finds them by recognising common metric names, including Spring Boot, NGINX ingress, JVM, container, database, and queue metrics. If none are found, the section shows one line instead of empty charts.
 

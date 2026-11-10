@@ -116,9 +116,13 @@ class ContextEngine:
         self.version = 0
         self.context: dict[str, Any] = self._empty_context("not_configured")
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=EVENT_MEMORY)
+        # The main connection of each kind, for what shows one of them. All of them are in integration_list.
         self.integration_summary: dict[str, Any] = {}
+        self.integration_list: list[dict[str, Any]] = []
         self.integration_kinds: set[str] = set()
+        self.main_connections: dict[str, int] = {}
         self.k8s_snapshot: dict[str, Any] | None = None
+        self.k8s_snapshots: dict[int, dict[str, Any]] = {}
         self.k8s_problems: list[dict[str, Any]] = []
         self._crash_logs: dict[str, dict[str, Any]] = {}
         self._integrations_at = 0.0
@@ -194,9 +198,9 @@ class ContextEngine:
         await self._load_integration_kinds()
         self._integrations_at = 0.0
         if "kubernetes" not in self.integration_kinds:
-            self.k8s_snapshot, self.k8s_problems = None, []
+            self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
         if not self.states and not self.integration_kinds:
-            self.integration_summary = {}
+            self.integration_summary, self.integration_list = {}, []
             self.context = self._empty_context("not_configured")
         self._wake.set()
 
@@ -213,8 +217,8 @@ class ContextEngine:
         self._snapshot_at = 0.0
         self._material_hash = ""
         self._last_ok_mono = None
-        self.integration_summary = {}
-        self.k8s_snapshot, self.k8s_problems = None, []
+        self.integration_summary, self.integration_list = {}, []
+        self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
         self._integrations_at = 0.0
         self.recent_events.clear()
 
@@ -404,51 +408,78 @@ class ContextEngine:
         if time.monotonic() - self._integrations_at < INTEGRATION_EVERY_S:
             return
         self._integrations_at = time.monotonic()
-        rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND enabled = 1", (self.org_id,))
+        rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND enabled = 1 ORDER BY id", (self.org_id,))
         self.integration_kinds = {row["kind"] for row in rows}
-        summary: dict[str, Any] = {}
+        self.main_connections = await main_connections(self.db, self.org_id)
+        clusters = [row for row in rows if row["kind"] == "kubernetes"]
+        main_cluster = pick_main(clusters, self.main_connections.get("kubernetes"))
+        items: list[dict[str, Any]] = []
+        snapshots: dict[int, dict[str, Any]] = {}
+        problems: list[dict[str, Any]] = []
+        wanted_logs: dict[str, dict[str, Any]] = {}
         for row in rows:
             client = None
+            base = {"id": row["id"], "kind": row["kind"], "name": row["name"]}
             try:
                 client = build_integration(row, self.box, self.config)
                 if row["kind"] == "kubernetes":
                     snapshot = await client.snapshot()
-                    self.k8s_snapshot = snapshot
-                    self.k8s_problems = find_problems(snapshot)
-                    await self._enrich_k8s_problems(client)
-                    kube = {"name": row["name"], "status": "ok", **summary_from_snapshot(snapshot), "problems": self.k8s_problems}
-                    for namespace in kube["namespaces"]:
-                        namespace["problems"] = sum(1 for item in self.k8s_problems if item["namespace"] == namespace["name"])
-                    summary["kubernetes"] = kube
+                    found = find_problems(snapshot)
+                    # A second cluster can hold a namespace with the same name, so its problems need their own fingerprints.
+                    if len(clusters) > 1:
+                        for problem in found:
+                            problem["cluster"], problem["integration_id"] = row["name"], row["id"]
+                            problem["title"] = f"{problem['title']} ({row['name']})"
+                            problem["clear"] = f"{problem['clear']} ({row['name']})"
+                            if row["id"] != main_cluster:
+                                problem["fingerprint"] = problem["fingerprint"].replace("k8s:", f"k8s:#{row['id']}/", 1)
+                    await self._enrich_k8s_problems(client, found, snapshot.get("events", []), wanted_logs)
+                    snapshots[row["id"]] = snapshot
+                    problems.extend(found)
+                    item = {**base, "status": "ok", **summary_from_snapshot(snapshot), "problems": found}
+                    for namespace in item["namespaces"]:
+                        namespace["problems"] = sum(1 for problem in found if problem["namespace"] == namespace["name"])
                 else:
-                    summary[row["kind"]] = {"name": row["name"], "status": "ok", **(await client.summary())}
+                    item = {**base, "status": "ok", **(await client.summary())}
             except (SourceError, BlockedTarget, ValueError) as error:
-                summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(getattr(error, "message", str(error)))}
+                item = {**base, "status": "error", "error": scrub(getattr(error, "message", str(error)))}
             except Exception as error:  # A bad answer from one connection must not stop the others.
                 log.exception("integration refresh failed for %s", row["kind"])
-                summary[row["kind"]] = {"name": row["name"], "status": "error", "error": scrub(f"Refresh failed: {error}")}
+                item = {**base, "status": "error", "error": scrub(f"Refresh failed: {error}")}
             finally:
                 if client:
                     await client.close()
-        if "kubernetes" not in summary:
-            self.k8s_snapshot, self.k8s_problems = None, []
+            items.append(item)
+        self._crash_logs = wanted_logs
+        self.k8s_snapshots = snapshots
+        self.k8s_snapshot = snapshots.get(main_cluster) if main_cluster else None
+        self.k8s_problems = problems
+        summary: dict[str, Any] = {}
+        for kind in ("loki", "kubernetes"):
+            of_kind = [item for item in items if item["kind"] == kind]
+            main_id = pick_main(of_kind, self.main_connections.get(kind))
+            for item in of_kind:
+                item["main"] = item["id"] == main_id
+                if item["main"]:
+                    summary[kind] = item
+        self.integration_list = items
         self.integration_summary = summary
 
-    async def _enrich_k8s_problems(self, client: Any) -> None:
+    async def _enrich_k8s_problems(self, client: Any, problems: list[dict[str, Any]], events: list[dict[str, Any]], wanted: dict[str, dict[str, Any]]) -> None:
         """Add the crashed container's last lines and a rule-based diagnosis to the worst problems.
 
         Logs are read again only when a pod restarts, so a crash loop costs one log call per restart, not per poll.
         A failure here never hides the problems themselves.
         """
-        events = (self.k8s_snapshot or {}).get("events", [])
-        wanted: dict[str, dict[str, Any]] = {}
-        for problem in self.k8s_problems:
+        read_here = 0
+        for problem in problems:
             logs = None
-            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and len(wanted) < CRASH_LOG_PROBLEMS:
+            if problem["problem"] in {"crashloop", "oomkilled", "not_ready"} and problem["pods"] and read_here < CRASH_LOG_PROBLEMS:
+                read_here += 1
                 pod = problem["pods"][0]
                 container = problem["facts"].get("container", "")
                 previous = problem["problem"] != "not_ready"
-                key = f"{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
+                key = f"{problem.get('integration_id', '')}/{problem['namespace']}/{pod}/{container}/{problem['facts'].get('restarts')}/{previous}"
                 logs = self._crash_logs.get(key)
                 if logs is None:
                     try:
@@ -466,16 +497,19 @@ class ContextEngine:
                 problem["diagnosis"] = diagnose(problem, (logs or {}).get("lines"), events)
             except Exception:  # A rule that trips on odd data must not stop the poll.
                 log.exception("diagnosis failed for %s", problem["fingerprint"])
-        self._crash_logs = wanted
 
     def _integration_ok(self, kind: str) -> bool:
-        return self.integration_summary.get(kind, {}).get("status") == "ok"
+        """True when every connection of this kind answered."""
+        of_kind = [item for item in self.integration_list if item["kind"] == kind]
+        return bool(of_kind) and all(item.get("status") == "ok" for item in of_kind)
 
     # Combining sources ------------------------------------------------------
     async def _merge(self, results: list[dict[str, Any] | None], started: float) -> None:
         now_iso = utcnow()
         sources_info, targets_raw, alerts_raw, groups_raw, signals = [], [], [], [], []
-        any_ok = any(result is not None for result in results) or any(item.get("status") == "ok" for item in self.integration_summary.values())
+        any_ok = any(result is not None for result in results) or any(item.get("status") == "ok" for item in self.integration_list)
+        self.main_connections = await main_connections(self.db, self.org_id)
+        main_source = pick_main([{"id": state.source.id} for state in self.states.values()], self.main_connections.get("metrics"))
         for state in self.states.values():
             source = state.source
             sources_info.append({
@@ -484,6 +518,7 @@ class ContextEngine:
                 "query_language": source.query_language, "logs_language": source.logs_language,
                 "status": "ok" if state.failures == 0 else "unreachable", "error": state.error,
                 "last_ok": state.last_ok_iso, "stale": state.failures > 0 and state.last is not None,
+                "main": source.id == main_source,
             })
             if state.last:
                 multi = len(self.states) > 1
@@ -495,8 +530,8 @@ class ContextEngine:
                 signals.extend(state.last["signals"])
         sources_info.extend(self.source_errors)
         failed = [item for item in sources_info if item["status"] != "ok"]
-        failed_connections = failed + [{"name": item.get("name", kind), "error": item.get("error")} for kind, item in self.integration_summary.items() if item.get("status") != "ok"]
-        if not sources_info and not self.integration_summary:
+        failed_connections = failed + [{"name": item.get("name", item["kind"]), "error": item.get("error")} for item in self.integration_list if item.get("status") != "ok"]
+        if not sources_info and not self.integration_list:
             status = "not_configured" if not self.integration_kinds else "unreachable"
         else:
             status = "ok" if not failed_connections else ("partial" if any_ok else "unreachable")
@@ -543,6 +578,8 @@ class ContextEngine:
             "events": list(self.recent_events),
             "changes": changes,
             "integrations": self.integration_summary,
+            "connections": self.integration_list,
+            "main": self.main_connections,
             "problems": ranked_problems(current),
             "coverage": {
                 "has_metrics": bool(self.states),
@@ -823,6 +860,22 @@ class EngineManager:
         for engine in list(self.engines.values()):
             await engine.stop()
         self.engines = {}
+
+
+MAIN_KINDS = ("metrics", "loki", "kubernetes")
+
+
+async def main_connections(db: Database, org_id: int) -> dict[str, int]:
+    """The connection an admin marked as main for each kind. Without a choice, the oldest one is main."""
+    saved = await db.get_setting(org_id, "main_connections", {}) or {}
+    return {kind: int(saved[kind]) for kind in MAIN_KINDS if isinstance(saved.get(kind), int)}
+
+
+def pick_main(items: list[dict[str, Any]], preferred: int | None) -> int | None:
+    ids = [item["id"] for item in items]
+    if preferred in ids:
+        return preferred
+    return ids[0] if ids else None
 
 
 def build_integration(row: dict[str, Any], box: SecretBox, config: Config) -> Any:

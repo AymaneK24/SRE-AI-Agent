@@ -135,6 +135,6 @@ curl -fsS http://LOKI:3100/loki/api/v1/labels
 
 ## Limits
 
-- **One Loki per installation for now.** For several clusters, send them all to one Loki with a `cluster` label.
+- **Several Lokis** are fine: add one per environment and choose the [main one](/docs/connections#the-main-connection). Sending several clusters to one Loki with a `cluster` label also works.
 - **Bearer tokens only.** A Loki that needs a username and password, such as Grafana Cloud, needs a gateway in front that accepts a token.
 - **Certificates:** an `https` Loki needs a certificate from a publicly trusted authority.

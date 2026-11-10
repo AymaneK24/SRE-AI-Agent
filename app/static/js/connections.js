@@ -15,6 +15,7 @@ export function mount(container) {
   let disposed = false;
   let kind = 'prometheus';
   let editing = null;
+  const addingKinds = new Set();
   const editable = can('admin');
   const collectorsHost = h('div', { class: 'collectors', role: 'group', 'aria-label': 'Metric collectors' });
   const formHost = h('div');
@@ -181,20 +182,37 @@ export function mount(container) {
       clear(listHost, h('p', { class: 'empty' }, 'No sources connected yet.'));
       return;
     }
+    const mainId = mainOf(rows, live.context?.main?.metrics);
     clear(listHost, h('ul', { class: 'rows' }, rows.map((row) => {
       const state = statusById.get(row.id);
       const address = row.kind === 'prometheus' ? `${row.config.scheme}://${row.config.host}:${row.config.port}${row.config.path_prefix ? `/${row.config.path_prefix}` : ''}` : row.kind === 'cloudwatch' ? `CloudWatch, ${row.config.region}` : `Azure Monitor, ${row.config.subscription_id}`;
       return h('li', { class: 'row', style: 'grid-template-columns:minmax(0,1fr) auto' },
         h('span', {},
           h('span', { class: 'row-title' }, row.name), ' ',
+          rows.length > 1 && row.id === mainId ? h('span', { class: 'badge neutral main-badge' }, 'Main') : null, ' ',
           !row.enabled ? h('span', { class: 'badge neutral' }, 'Paused') : state?.status === 'ok' ? h('span', { class: 'badge ok' }, 'Answering') : state ? h('span', { class: 'badge critical' }, 'Not answering') : null,
           h('span', { class: 'small muted', style: 'display:block;overflow-wrap:anywhere' }, address),
           state?.error ? h('span', { class: 'small', style: 'display:block;overflow-wrap:anywhere' }, state.error) : null),
         editable ? h('span', { style: 'display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end' },
+          rows.length > 1 && row.id !== mainId ? h('button', { class: 'button compact', type: 'button', title: 'The overview shows this source first, and investigations use it when no source is named.', onClick: () => makeMain('metrics', row, renderSources) }, 'Make main') : null,
           h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/sources/${row.id}/enabled`, { method: 'POST', body: { enabled: !row.enabled } }); renderSources(); } }, row.enabled ? 'Pause' : 'Resume'),
           h('button', { class: 'button compact', type: 'button', onClick: () => { kind = row.kind; editing = row; renderCollectors(); renderForm(); window.scrollTo({ top: collectorsHost.offsetTop - 80 }); } }, 'Edit'),
           h('button', { class: 'button compact', type: 'button', onClick: () => removeSource(row) }, 'Remove')) : null);
     })));
+  }
+
+  // The main connection of a kind: the one shown first, and used when nothing else is named.
+  function mainOf(rows, saved) {
+    return rows.some((row) => row.id === saved) ? saved : rows[0]?.id;
+  }
+
+  async function makeMain(connectionKind, row, rerender) {
+    try {
+      const out = await api('/api/connections/main', { method: 'PUT', body: { kind: connectionKind, id: row.id } });
+      if (live.context) live.context = { ...live.context, main: out.main };
+      toast(`${row.name} is now the main one`);
+      rerender();
+    } catch (error) { toast(error.message); }
   }
 
   async function removeSource(row) {
@@ -267,8 +285,11 @@ export function mount(container) {
   async function renderIntegrations() {
     const rows = await api('/api/integrations');
     if (disposed) return;
-    const section = (integrationKind, title, placeholder, extraLabel, extraKey, hint) => {
-      const row = rows.find((item) => item.kind === integrationKind);
+    const adding = new Set(addingKinds);
+    // One form per connection. A kind can have several, such as one Loki per environment or one cluster per region.
+    const form = (integrationKind, row, kindTitle, placeholder, extraLabel, extraKey, hint, ofKind, mainId) => {
+      const title = row ? row.name : ofKind.length ? 'New connection' : null;
+      const nameInput = h('input', { class: 'input', required: true, maxlength: 80, value: row?.name || (ofKind.length ? '' : kindTitle), placeholder: integrationKind === 'kubernetes' ? 'production-eu' : 'Loki production', spellcheck: 'false' });
       const url = h('input', { class: 'input', type: 'url', value: row?.config.url || '', placeholder });
       const extra = h('input', { class: 'input', value: row?.config[extraKey] || '', spellcheck: 'false' });
       const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: row?.has_secret ? 'Saved. Enter a new one to replace it.' : 'Optional' });
@@ -298,34 +319,51 @@ export function mount(container) {
         field('TLS server name', serverName, 'Use when you connect through another address than the one on the certificate, such as host.docker.internal.', ''),
         h('label', { class: 'check' }, verify, 'Verify the certificate. Only turn this off on a test cluster.'),
       ] : [];
-      const body = () => ({ kind: integrationKind, name: title, config: kube
+      const body = () => ({ kind: integrationKind, id: row?.id ?? null, name: nameInput.value.trim(), config: kube
         ? { url: url.value.trim(), [extraKey]: extra.value.trim(), in_cluster: inCluster.checked, verify_tls: verify.checked, tls_server_name: serverName.value.trim(), ca_cert: caCert.value.trim(), remove_ca: removeCa }
         : { url: url.value.trim(), [extraKey]: extra.value.trim(), tenant: tenant.value.trim() }, secrets: { token: token.value } });
       return h('form', { 'aria-label': title, onSubmit: async (event) => {
         event.preventDefault();
         try {
-          await api('/api/integrations', { method: 'POST', body: body() });
-          toast(`${title} saved`);
+          const saved = await api('/api/integrations', { method: 'POST', body: body() });
+          toast(`${saved.name} saved`);
+          if (!row) addingKinds.delete(integrationKind);
           renderIntegrations();
         } catch (error) { showResult(result, false, error.message); }
       } },
-      h('h3', { style: 'margin-bottom:10px' }, title, ' ', row ? statusBadge('active') : null),
-      h('div', { class: 'stack' }, field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', ''),
+      title ? h('h3', { class: 'connection-title' }, title, ' ', row ? statusBadge('active') : null, ofKind.length > 1 && row?.id === mainId ? h('span', { class: 'badge neutral main-badge' }, 'Main') : null) : null,
+      h('div', { class: 'stack' }, field('Name', nameInput, ofKind.length || !row ? 'Shown wherever you choose between connections.' : null, ''), field('Address', url, null, ''), field(extraLabel, extra, hint, ''), field('Read-only token', token, 'Encrypted before it is stored.', ''),
         kube ? null : field('Tenant', tenant, 'Only for a multi-tenant Loki. Sent as X-Scope-OrgID.', ''), ...kubeFields),
       result,
       editable ? h('div', { class: 'form-actions' },
         h('button', { class: 'button primary compact', type: 'submit' }, 'Save'),
         h('button', { class: 'button compact', type: 'button', onClick: async () => {
           try {
-            const out = await api('/api/integrations/test', { method: 'POST', body: { ...body(), id: row?.id ?? null } });
+            const out = await api('/api/integrations/test', { method: 'POST', body: { ...body(), name: body().name || kindTitle } });
             showResult(result, out.ok, out.ok ? out.detail : out.error);
           } catch (error) { showResult(result, false, error.message); }
         } }, 'Test connection'),
-        row ? h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/integrations/${row.id}`, { method: 'DELETE' }); renderIntegrations(); } }, 'Remove') : null) : null);
+        row && ofKind.length > 1 && row.id !== mainId ? h('button', { class: 'button compact', type: 'button', title: 'The overview shows this one first, and investigations use it when none is named.', onClick: () => makeMain(integrationKind, row, renderIntegrations) }, 'Make main') : null,
+        row ? h('button', { class: 'button compact', type: 'button', onClick: async () => {
+          const ok = await confirmDialog({ title: `Remove ${row.name}?`, body: 'The console stops reading it. Past investigations stay.', action: 'Remove connection' });
+          if (!ok) return;
+          await api(`/api/integrations/${row.id}`, { method: 'DELETE' });
+          renderIntegrations();
+        } }, 'Remove') : h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.delete(integrationKind); renderIntegrations(); } }, ofKind.length ? 'Cancel' : 'Clear')) : null);
+    };
+    const group = (integrationKind, kindTitle, addLabel, ...rest) => {
+      const ofKind = rows.filter((item) => item.kind === integrationKind);
+      const mainId = mainOf(ofKind, live.context?.main?.[integrationKind]);
+      const forms = ofKind.map((row) => form(integrationKind, row, kindTitle, ...rest, ofKind, mainId));
+      if (!ofKind.length || adding.has(integrationKind)) forms.push(form(integrationKind, null, kindTitle, ...rest, ofKind, mainId));
+      return h('div', { class: 'connection-group' },
+        h('div', { class: 'connection-group-head' }, h('h3', {}, kindTitle, ofKind.length > 1 ? h('span', { class: 'muted' }, ` (${ofKind.length})`) : null),
+          editable && ofKind.length && !adding.has(integrationKind) ? h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.add(integrationKind); renderIntegrations(); } }, addLabel) : null),
+        h('div', { class: 'connection-forms' }, forms));
     };
     clear(integrationsHost, h('div', { class: 'two-col' },
-      section('loki', 'Loki logs', 'http://loki.internal:3100', 'Log selector', 'selector', 'Optional. For example: {job=~"api.*"}'),
-      section('kubernetes', 'Kubernetes', 'https://kubernetes.internal:6443', 'Namespace', 'namespace', 'Optional. Leave empty for all the namespaces this token can read.')));
+      group('loki', 'Loki logs', 'Add another Loki', 'http://loki.internal:3100', 'Log selector', 'selector', 'Optional. For example: {job=~"api.*"}'),
+      group('kubernetes', 'Kubernetes', 'Add another cluster', 'https://kubernetes.internal:6443', 'Namespace', 'namespace', 'Optional. Leave empty for all the namespaces this token can read.')));
   }
 
   // Webhooks -----------------------------------------------------------------

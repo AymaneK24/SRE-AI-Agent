@@ -23,6 +23,28 @@ function savePref(key, value) {
 
 function plural(count, one, many) { return `${count} ${count === 1 ? one : many}`; }
 
+// Connections the overview can choose between. Older servers only send the main log store and cluster.
+const METRIC_KINDS = new Set(['prometheus', 'cloudwatch', 'azure']);
+function metricSources(context) {
+  return (context?.sources || []).filter((item) => METRIC_KINDS.has(item.kind) && item.id !== undefined && item.id !== null);
+}
+function connectionsOf(context, kind) {
+  if (Array.isArray(context?.connections)) return context.connections.filter((item) => item.kind === kind);
+  const only = context?.integrations?.[kind];
+  return only ? [{ ...only, kind, main: true }] : [];
+}
+function mainId(items) {
+  return (items.find((item) => item.main) || items[0])?.id;
+}
+const signalKey = (sourceId, id) => `${sourceId ?? ''}:${id}`;
+
+// A compact pill that names which connection a part of the page shows. It only appears when there's a choice.
+function sourcePicker(label, options, value, onChange) {
+  const select = h('select', { 'aria-label': label, onChange: () => onChange(select.value) },
+    options.map(([optionValue, text]) => h('option', { value: optionValue, selected: String(optionValue) === String(value) }, text)));
+  return h('label', { class: 'source-pick' }, h('span', { class: 'source-pick-label' }, label), h('span', { class: 'source-pick-box' }, select));
+}
+
 export function mount(container) {
   let range = loadPref('rcc-range', 3600);
   let refresh = loadPref('rcc-refresh', 15);
@@ -43,12 +65,18 @@ export function mount(container) {
   const metricsHost = h('div', {}, heroLabel, heroChartHost);
   const viewSwitch = h('div', { class: 'segments hero-switch', role: 'group', 'aria-label': 'What to show here' });
   let heroView = loadText('rcc-hero-view');
+  // Which connection each part shows. Empty means automatic: problems first, then the main connection.
+  const picks = { metrics: loadText('rcc-pick-metrics') || '', logs: loadText('rcc-pick-logs') || '', cluster: loadText('rcc-pick-cluster') || '', golden: loadText('rcc-pick-golden') || '', panels: loadText('rcc-pick-panels') || '' };
+  const setPick = (name, value) => { picks[name] = value; savePref(`rcc-pick-${name}`, value); };
+  const heroPickHost = h('span', { class: 'hero-pick' });
+  const goldenPickHost = h('span', { class: 'head-actions' });
+  const panelsPickHost = h('span');
   const staleBanner = h('div', { hidden: true });
   const attention = h('div');
   const changes = h('div');
   const jobs = h('div');
   const golden = h('div', { class: 'golden-grid' });
-  const goldenSection = h('section', { class: 'section', 'aria-labelledby': 'golden-title' }, h('div', { class: 'section-head' }, h('h2', { id: 'golden-title' }, 'Golden signals')), golden);
+  const goldenSection = h('section', { class: 'section', 'aria-labelledby': 'golden-title' }, h('div', { class: 'section-head' }, h('h2', { id: 'golden-title' }, 'Golden signals'), goldenPickHost), golden);
   const panelGrid = h('div', { class: 'panels' });
   const rangeControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Time range' });
   const refreshControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Refresh interval' });
@@ -57,7 +85,7 @@ export function mount(container) {
     staleBanner,
     h('section', { class: `hero${can('engineer') ? '' : ' hero-solo'}`, 'aria-labelledby': 'hero-title' },
       h('div', {}, heroTitle, heroCopy, heroActions),
-      h('div', { class: 'hero-panel' }, viewSwitch, can('engineer') ? metricsHost : null, clusterHost, logsHost)),
+      h('div', { class: 'hero-panel' }, h('div', { class: 'hero-controls' }, viewSwitch, heroPickHost), can('engineer') ? metricsHost : null, clusterHost, logsHost)),
     goldenSection,
     h('section', { class: 'section status-grid' },
       h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Needs attention')), attention),
@@ -67,6 +95,7 @@ export function mount(container) {
       h('div', { class: 'dash-bar' },
         h('span', { class: 'control-label' }, 'Time range', rangeControl),
         h('span', { class: 'control-label' }, 'Refresh', refreshControl),
+        panelsPickHost,
         h('div', { class: 'head-actions' },
           h('button', { class: 'button compact', type: 'button', onClick: () => fetchAll() }, 'Refresh now'),
           can('engineer') ? h('button', { class: 'button compact primary', type: 'button', onClick: () => editPanel() }, 'Add panel') : null)),
@@ -86,7 +115,14 @@ export function mount(container) {
     goldenSection.hidden = context.coverage?.has_metrics === false;
     const panels = container.querySelector('[aria-label="Metric panels"]');
     if (panels) panels.hidden = context.coverage?.has_metrics === false;
-    const signals = (context.signals || []).filter((signal) => signal.golden && signalValue(signal) !== null);
+    const sources = metricSources(context);
+    const names = new Map(sources.map((item) => [item.id, item.name]));
+    const several = sources.length > 1 && can('engineer');
+    if (several && picks.golden && !names.has(Number(picks.golden))) setPick('golden', '');
+    clear(goldenPickHost, several ? sourcePicker('Source', [['', 'All sources, worst value'], ...sources.map((item) => [item.id, item.name])], picks.golden,
+      (value) => { setPick('golden', value); renderGolden(live.context); }) : null);
+    const signals = (context.signals || []).filter((signal) => signal.golden && signalValue(signal) !== null
+      && (!several || !picks.golden || signal.source_id === Number(picks.golden)));
     golden.classList.toggle('golden-grid', Boolean(signals.length) || !context.as_of);
     if (!signals.length && context.as_of) {
       // Four "No data" tiles say less than one sentence.
@@ -101,7 +137,8 @@ export function mount(container) {
       return h('article', { class: `golden${over ? ' is-over' : ''}` },
         h('h3', {}, label),
         h('b', {}, worst ? formatValue(value, worst.unit) : 'No data'),
-        h('p', { class: 'small muted' }, worst ? `${worst.title}${over ? `, over its limit of ${formatValue(worst.limit, worst.unit)}` : ''}` : hint));
+        h('p', { class: 'small muted' }, worst ? `${worst.title}${over ? `, over its limit of ${formatValue(worst.limit, worst.unit)}` : ''}` : hint),
+        worst && several && !picks.golden && names.has(worst.source_id) ? h('p', { class: 'golden-source' }, names.get(worst.source_id)) : null);
     }));
   }
 
@@ -122,23 +159,30 @@ export function mount(container) {
   }
 
   function chooseHeroSignal(context) {
-    const signalById = new Map((context.signals || []).map((signal) => [signal.id, signal]));
-    const anomalies = [...(context.anomalies || [])].sort((a, b) => {
-      const groupA = GROUP_RANK[signalById.get(a.signal_id)?.group] ?? 9;
-      const groupB = GROUP_RANK[signalById.get(b.signal_id)?.group] ?? 9;
-      return groupA - groupB;
-    });
+    const sources = metricSources(context);
+    const chosen = picks.metrics && sources.some((item) => item.id === Number(picks.metrics)) ? Number(picks.metrics) : null;
+    const main = mainId(sources);
+    const inScope = (sourceId) => chosen === null || sourceId === chosen;
+    const signalById = new Map((context.signals || []).map((signal) => [signalKey(signal.source_id, signal.id), signal]));
+    const rank = (sourceId, id) => GROUP_RANK[signalById.get(signalKey(sourceId, id))?.group] ?? 9;
+    const anomalies = (context.anomalies || []).filter((item) => inScope(item.source_id))
+      .sort((a, b) => rank(a.source_id, a.signal_id) - rank(b.source_id, b.signal_id));
     if (anomalies.length) {
       const item = anomalies[0];
       return { title: item.title, query: item.query, unit: item.unit, limit: item.limit, source_id: item.source_id, reason: 'Out of its normal range' };
     }
-    const prom = (context.sources || []).find((item) => item.kind === 'prometheus' && item.status === 'ok');
-    if ((context.targets?.down || 0) > 0 && prom) {
-      return { title: 'Targets answering scrapes', query: 'up', unit: 'short', limit: null, source_id: prom.id, reason: 'A value of 0 means the target is down' };
+    const proms = sources.filter((item) => item.kind === 'prometheus' && item.status === 'ok' && inScope(item.id));
+    const prom = proms.find((item) => item.id === main) || proms[0];
+    const downOn = (context.targets?.down_list || []).map((target) => target.source_id);
+    const promDown = proms.find((item) => downOn.includes(item.id)) || ((context.targets?.down || 0) > 0 && chosen === null ? prom : null);
+    if (promDown) {
+      return { title: 'Targets answering scrapes', query: 'up', unit: 'short', limit: null, source_id: promDown.id, reason: 'A value of 0 means the target is down' };
     }
-    const preferred = [...(context.signals || [])]
-      .filter((signal) => signal.series.length)
-      .sort((a, b) => (GROUP_RANK[a.group] ?? 9) - (GROUP_RANK[b.group] ?? 9) || a.panel_priority - b.panel_priority)[0];
+    // Nothing is wrong: show the main source's key signal, so the chart doesn't jump to whichever source was added last.
+    const preferred = (context.signals || [])
+      .filter((signal) => signal.series.length && inScope(signal.source_id))
+      .sort((a, b) => (a.source_id === main ? 0 : 1) - (b.source_id === main ? 0 : 1)
+        || (GROUP_RANK[a.group] ?? 9) - (GROUP_RANK[b.group] ?? 9) || a.panel_priority - b.panel_priority)[0];
     if (preferred) return { title: preferred.title, query: preferred.query, unit: preferred.unit, limit: preferred.limit, source_id: preferred.source_id, reason: 'Key signal' };
     // No key signal yet: whether each target answers is always worth showing, so the view is never empty.
     if (prom) return { title: 'Targets answering scrapes', query: 'up', unit: 'short', limit: null, source_id: prom.id, reason: 'No key signal was found yet. 1 means the target is up, 0 that it is down' };
@@ -209,7 +253,7 @@ export function mount(container) {
     renderLogs(context, view === 'logs');
     metricsHost.hidden = view !== 'metrics';
     const signal = view === 'metrics' && configured && can('engineer') ? chooseHeroSignal(context) : null;
-    const key = signal ? `${signal.query}|${signal.limit}` : '';
+    const key = signal ? `${signal.source_id}|${signal.query}|${signal.limit}` : '';
     if (key !== heroKey) {
       heroKey = key;
       heroChart?.destroy();
@@ -217,7 +261,8 @@ export function mount(container) {
       clear(heroChartHost);
       clear(heroLabel);
       if (signal) {
-        clear(heroLabel, h('b', {}, signal.title), `. ${signal.reason}.`);
+        const from = metricSources(context).length > 1 ? metricSources(context).find((item) => item.id === signal.source_id)?.name : null;
+        clear(heroLabel, h('b', {}, signal.title), from ? [' on ', h('b', {}, from)] : null, `. ${signal.reason}.`);
         heroChart = new TimeSeriesChart(heroChartHost, { unit: signal.unit, height: 360, limit: signal.limit, title: signal.title, showTable: false, endValue: true, ariaLabel: `${signal.title} chart` });
         heroChart.signal = signal;
         heroChart.showMessage('Loading chart');
@@ -237,11 +282,11 @@ export function mount(container) {
 
   // The right side shows one of: the cluster, a key metric chart, or log streams. Each viewer's choice is remembered.
   function chooseView(context) {
-    const counts = context.integrations?.kubernetes?.counts || context.cluster_counts;
+    const counts = connectionsOf(context, 'kubernetes').some((item) => item.counts) || context.cluster_counts;
     const views = [];
     if (counts) views.push(['cluster', 'Cluster']);
     if (context.coverage?.has_metrics !== false && can('engineer')) views.push(['metrics', 'Metrics']);
-    if (context.integrations?.loki?.status === 'ok' && can('engineer')) views.push(['logs', 'Logs']);
+    if (connectionsOf(context, 'loki').some((item) => item.status === 'ok') && can('engineer')) views.push(['logs', 'Logs']);
     const names = views.map(([name]) => name);
     const view = names.includes(heroView) ? heroView : names[0] || '';
     viewSwitch.hidden = views.length < 2;
@@ -249,11 +294,37 @@ export function mount(container) {
       type: 'button', 'aria-pressed': String(name === view),
       onClick: () => { heroView = name; savePref('rcc-hero-view', name); renderContext(live.context); },
     }, label)));
+    renderHeroPicker(context, view);
     return view;
   }
 
+  // The picker for the view on the right: which metric source, log store, or cluster it shows.
+  function renderHeroPicker(context, view) {
+    let picker = null;
+    if (can('engineer') && view === 'metrics') {
+      const sources = metricSources(context);
+      if (sources.length > 1) {
+        picker = sourcePicker('Source', [['', 'Automatic'], ...sources.map((item) => [item.id, `${item.name}${item.main ? ' (main)' : ''}`])], picks.metrics,
+          (value) => { setPick('metrics', value); renderContext(live.context); });
+      }
+    }
+    for (const [name, kind, label] of [['cluster', 'kubernetes', 'Cluster'], ['logs', 'loki', 'Log store']]) {
+      const items = connectionsOf(context, kind);
+      if (view === name && items.length > 1 && can('engineer')) {
+        picker = sourcePicker(label, items.map((item) => [item.id, `${item.name}${item.main ? ' (main)' : ''}${item.status === 'ok' ? '' : ', not answering'}`]), chosenConnection(context, kind, name)?.id,
+          (value) => { setPick(name, value); renderContext(live.context); });
+      }
+    }
+    clear(heroPickHost, picker);
+  }
+
+  function chosenConnection(context, kind, pickName) {
+    const items = connectionsOf(context, kind);
+    return items.find((item) => String(item.id) === String(picks[pickName])) || items.find((item) => item.main) || items[0] || null;
+  }
+
   function renderCluster(context, show) {
-    const kube = context.integrations?.kubernetes;
+    const kube = chosenConnection(context, 'kubernetes', 'cluster');
     const counts = kube?.counts || context.cluster_counts;
     clusterHost.hidden = !show;
     if (!show) { clear(clusterHost); return; }
@@ -276,9 +347,10 @@ export function mount(container) {
   }
 
   function renderLogs(context, show) {
-    const loki = context.integrations?.loki;
+    const loki = chosenConnection(context, 'loki', 'logs');
     logsHost.hidden = !show;
     if (!show || !loki) { clear(logsHost); return; }
+    if (loki.status !== 'ok') { clear(logsHost, h('p', { class: 'error-note' }, `${loki.name} isn’t answering. ${loki.error || ''}`)); return; }
     const streams = loki.streams || [];
     const total = streams.reduce((sum, row) => sum + row.lines_5m, 0);
     const errors = streams.reduce((sum, row) => sum + row.errors_5m, 0);
@@ -387,8 +459,7 @@ export function mount(container) {
         targets.length > 25 ? h('button', { class: 'button compact', type: 'button', style: 'margin-top:10px', onClick: () => { showAllTargets = !showAllTargets; renderWatched(live.context); } },
           showAllTargets ? 'Show fewer' : `Show all ${targets.length}`) : null);
     }
-    const loki = context.integrations?.loki;
-    if (loki?.status === 'ok') {
+    for (const loki of connectionsOf(context, 'loki').filter((item) => item.status === 'ok')) {
       const streams = loki.streams || [];
       parts.push(h('h3', { class: 'watched-head' }, `Log streams (${streams.length})`, h('span', { class: 'small muted' }, ` read by ${loki.name || 'Loki'}`)),
         streams.length ? table([['Stream'], ['Lines in 5 min', true], ['Error-like lines', true]], streams.slice(0, 50).map((row) => h('tr', {},
@@ -396,8 +467,7 @@ export function mount(container) {
           h('td', { class: 'num' }, row.errors_5m ? h('span', { class: 'badge warning' }, Math.round(row.errors_5m).toLocaleString()) : '0'))))
           : h('p', { class: 'empty' }, 'No stream wrote anything in the last 5 minutes.'));
     }
-    const kube = context.integrations?.kubernetes;
-    if (kube?.status === 'ok') {
+    for (const kube of connectionsOf(context, 'kubernetes').filter((item) => item.status === 'ok')) {
       const namespaces = kube.namespaces || [];
       parts.push(h('h3', { class: 'watched-head' }, `Kubernetes namespaces (${namespaces.length})`, h('span', { class: 'small muted' }, ` read from ${kube.name || 'the cluster'}`)),
         table([['Namespace'], ['Workloads', true], ['Pods ready', true], ['Problems', true]], namespaces.map((row) => h('tr', {},
@@ -414,29 +484,49 @@ export function mount(container) {
     fetchAll();
   }
 
-  function limitFor(query) {
-    const match = (live.context?.signals || []).find((signal) => signal.query === query);
+  function limitFor(query, sourceId) {
+    const match = (live.context?.signals || []).find((signal) => signal.query === query && (sourceId === undefined || sourceId === null || signal.source_id === sourceId));
     return match ? match.limit : null;
+  }
+
+  // Panels can be narrowed to one source. Viewers don't get the source list, so they always see every panel.
+  function visiblePanels() {
+    const sources = metricSources(live.context);
+    if (!can('engineer') || sources.length < 2 || !picks.panels) return panels;
+    return panels.filter((panel) => panel.source_id === Number(picks.panels));
+  }
+
+  function renderPanelsPicker() {
+    const sources = metricSources(live.context);
+    if (picks.panels && !sources.some((item) => item.id === Number(picks.panels))) picks.panels = '';
+    clear(panelsPickHost, can('engineer') && sources.length > 1 ? sourcePicker('Source', [['', 'All sources'], ...sources.map((item) => [item.id, item.name])], picks.panels,
+      (value) => { setPick('panels', value); renderPanels(); fetchAll(); }) : null);
   }
 
   function renderPanels() {
     for (const chart of panelCharts.values()) chart.destroy();
     panelCharts = new Map();
-    if (!panels.length) {
+    renderPanelsPicker();
+    const all = panels;
+    const visible = visiblePanels();
+    if (!visible.length) {
       const connected = live.context?.health?.status && live.context.health.status !== 'not_configured';
       panelGrid.style.display = 'block';
-      clear(panelGrid, h('p', { class: 'empty' }, !can('engineer') ? 'Your team hasn’t added any charts yet.' : connected
+      clear(panelGrid, h('p', { class: 'empty' }, all.length ? 'No panel reads this source yet. Use Add panel and choose it as the metric source.' : !can('engineer') ? 'Your team hasn’t added any charts yet.' : connected
         ? 'Panels appear here once your source returns matching metrics. Use Add panel to chart any query now.'
         : 'Connect a metric source to see panels.'));
       return;
     }
     panelGrid.style.display = '';
     clear(panelGrid);
-    for (const panel of panels) {
+    const sourceNames = new Map(metricSources(live.context).map((item) => [item.id, item.name]));
+    const showSource = can('engineer') && sourceNames.size > 1 && !picks.panels;
+    for (const panel of visible) {
       const host = h('div');
       panelGrid.append(h('article', { class: 'panel', 'aria-label': panel.title },
         h('div', { class: 'panel-head' },
           h('h3', { title: panel.title }, panel.title),
+          showSource && sourceNames.has(panel.source_id) ? h('span', { class: 'panel-source' }, sourceNames.get(panel.source_id)) : null,
           h('div', { class: 'panel-actions' },
             can('engineer') ? [
               h('a', { href: `#/investigate?prompt=${encodeURIComponent(`Look at "${panel.title}" (query: ${panel.query}). Is anything wrong, and why?`)}` }, 'Investigate'),
@@ -444,13 +534,14 @@ export function mount(container) {
               h('button', { type: 'button', onClick: () => removePanel(panel) }, 'Remove')] : null)),
         panel.query ? h('code', { class: 'panel-query', title: panel.query }, panel.query) : null,
         host));
-      const chart = new TimeSeriesChart(host, { unit: panel.unit || 'short', height: 230, title: panel.title, limit: limitFor(panel.query), ariaLabel: `${panel.title} chart. Values are in the table below.` });
+      const chart = new TimeSeriesChart(host, { unit: panel.unit || 'short', height: 230, title: panel.title, limit: limitFor(panel.query, panel.source_id), ariaLabel: `${panel.title} chart. Values are in the table below.` });
       chart.showMessage('Loading chart');
       panelCharts.set(panel.id, chart);
     }
   }
 
   async function fetchAll() {
+    const panels = visiblePanels();
     if (fetching || !panels.length) return;
     fetching = true;
     const end = Math.floor(Date.now() / 1000);
