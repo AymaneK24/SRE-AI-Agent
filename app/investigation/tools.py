@@ -9,7 +9,7 @@ import json
 import time
 from typing import Any
 
-from ..context.engine import ContextEngine, build_integration
+from ..context.engine import ContextEngine, build_integration, pick_main
 from ..db import Database
 from ..net_guard import BlockedTarget
 from ..secrets_store import scrub
@@ -19,6 +19,7 @@ MAX_RESULT_CHARS = 6000
 MAX_SERIES = 15
 MAX_QUERY_CHARS = 4000
 _SOURCE_PROP = {"source_id": {"type": "integer", "description": "Which source to use. Leave out when only one is connected."}}
+_CONNECTION_PROP = {"connection_id": {"type": "integer", "description": "Which Loki connection or cluster to use, by the connection_id in the context. Leave out to use the main one."}}
 
 BASE_TOOLS: list[dict[str, Any]] = [
     {
@@ -55,7 +56,7 @@ LOGS_TOOL = {
                    "such as {namespace=\"shop\", app=\"payment\"} |= \"ERROR\". Otherwise use the source's logs language shown in the context.",
     "input_schema": {"type": "object", "properties": {
         "query": {"type": "string", "description": "The log query."},
-        "minutes": {"type": "integer", "description": "Window length, 1 to 1440. Defaults to 30."}, **_SOURCE_PROP}, "required": ["query"]},
+        "minutes": {"type": "integer", "description": "Window length, 1 to 1440. Defaults to 30."}, **_SOURCE_PROP, **_CONNECTION_PROP}, "required": ["query"]},
 }
 KUBERNETES_TOOL = {
     "name": "get_kubernetes_state",
@@ -63,7 +64,7 @@ KUBERNETES_TOOL = {
                    "services and whether their selector reaches ready pods, or nodes.",
     "input_schema": {"type": "object", "properties": {
         "resource": {"type": "string", "enum": ["problems", "events", "pods", "deployments", "services", "nodes"]},
-        "namespace": {"type": "string", "description": "Optional namespace."}}, "required": ["resource"]},
+        "namespace": {"type": "string", "description": "Optional namespace."}, **_CONNECTION_PROP}, "required": ["resource"]},
 }
 POD_LOGS_TOOL = {
     "name": "get_pod_logs",
@@ -74,14 +75,14 @@ POD_LOGS_TOOL = {
         "pod": {"type": "string", "description": "Pod name, or the name of its Deployment, StatefulSet, DaemonSet, or Job."},
         "container": {"type": "string", "description": "Optional container name."},
         "previous": {"type": "boolean", "description": "Read the previous, crashed container. Defaults to false."},
-        "lines": {"type": "integer", "description": "How many lines from the end, 1 to 200. Defaults to 80."}}, "required": ["namespace", "pod"]},
+        "lines": {"type": "integer", "description": "How many lines from the end, 1 to 200. Defaults to 80."}, **_CONNECTION_PROP}, "required": ["namespace", "pod"]},
 }
 DESCRIBE_TOOL = {
     "name": "describe_object",
     "description": "Status, containers, restarts, exit codes, limits, and recent events for one Kubernetes pod or workload, like kubectl describe.",
     "input_schema": {"type": "object", "properties": {
         "namespace": {"type": "string"},
-        "name": {"type": "string", "description": "Pod name, or a Deployment, StatefulSet, DaemonSet, or Job name."}}, "required": ["namespace", "name"]},
+        "name": {"type": "string", "description": "Pod name, or a Deployment, StatefulSet, DaemonSet, or Job name."}, **_CONNECTION_PROP}, "required": ["namespace", "name"]},
 }
 METRIC_TOOL_NAMES = {"run_instant_query", "run_range_query", "list_metrics"}
 TOOL_DEFINITIONS = BASE_TOOLS + [LOGS_TOOL, KUBERNETES_TOOL, POD_LOGS_TOOL, DESCRIBE_TOOL]
@@ -196,14 +197,28 @@ class ToolRunner:
         terms = str(arguments.get("text", "")).split()
         return {"note": "Past records may not apply now.", "results": await related_investigations(self.db, self.engine.org_id, terms, owner_id=self.owner_id)}
 
-    async def _integration(self, kind: str) -> Any:
-        row = await self.db.one("SELECT * FROM integrations WHERE org_id = ? AND kind = ? AND enabled = 1 LIMIT 1", (self.engine.org_id, kind))
+    async def _integration_row(self, kind: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        """The connection the model named, or the main one of this kind."""
+        rows = await self.db.all("SELECT * FROM integrations WHERE org_id = ? AND kind = ? AND enabled = 1 ORDER BY id", (self.engine.org_id, kind))
+        if not rows:
+            return None
+        wanted = arguments.get("connection_id")
+        if wanted is not None:
+            for row in rows:
+                if row["id"] == int(wanted):
+                    return row
+            raise ValueError(f"No {kind} connection has connection_id {wanted}. Use one from the context, or leave it out.")
+        main = pick_main(rows, self.engine.main_connections.get(kind))
+        return next(row for row in rows if row["id"] == main)
+
+    async def _integration(self, kind: str, arguments: dict[str, Any] | None = None) -> Any:
+        row = await self._integration_row(kind, arguments or {})
         return build_integration(row, self.box, self.config) if row else None
 
     async def _logs(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = self._query_arg(arguments)
         minutes = max(1, min(int(arguments.get("minutes") or 30), 1440))
-        loki = await self._integration("loki")
+        loki = await self._integration("loki", arguments) if arguments.get("source_id") is None else None
         if loki:
             try:
                 return await loki.query(query, minutes)
@@ -214,10 +229,13 @@ class ToolRunner:
     async def _kubernetes(self, arguments: dict[str, Any]) -> dict[str, Any]:
         resource = arguments.get("resource")
         namespace = arguments.get("namespace") or None
+        row = await self._integration_row("kubernetes", arguments)
         if resource == "problems":
-            problems = [item for item in self.engine.k8s_problems if not namespace or item["namespace"] == namespace]
+            several = len(self.engine.k8s_snapshots) > 1
+            problems = [item for item in self.engine.k8s_problems if (not namespace or item["namespace"] == namespace)
+                        and (not several or arguments.get("connection_id") is None or item.get("integration_id") == (row or {}).get("id"))]
             return {"problems": [{key: item.get(key) for key in ("title", "severity", "object", "pods", "facts", "diagnosis")} for item in problems]}
-        client = await self._kube_client()
+        client = await self._kube_client(arguments)
         try:
             if resource == "events":
                 return {"events": await client.warning_events(namespace)}
@@ -233,14 +251,14 @@ class ToolRunner:
                         return {"services": [], "note": "This token may not list services. Add get and list on services to its role."}
                     raise
             if resource == "nodes":
-                snapshot = self.engine.k8s_snapshot or await client.snapshot()
+                snapshot = self.engine.k8s_snapshots.get((row or {}).get("id")) or await client.snapshot()
                 return {"nodes": snapshot.get("nodes", []), "note": "Node access is forbidden for this token." if "nodes" in snapshot.get("forbidden", []) else ""}
             raise ValueError("resource must be problems, events, pods, deployments, services, or nodes")
         finally:
             await client.close()
 
-    async def _kube_client(self) -> Any:
-        client = await self._integration("kubernetes")
+    async def _kube_client(self, arguments: dict[str, Any]) -> Any:
+        client = await self._integration("kubernetes", arguments)
         if not client:
             raise SourceError("No Kubernetes connection is set up.")
         return client
@@ -258,7 +276,7 @@ class ToolRunner:
         if not namespace or not name:
             raise ValueError("namespace and pod are required")
         lines = max(1, min(int(arguments.get("lines") or 80), 200))
-        client = await self._kube_client()
+        client = await self._kube_client(arguments)
         try:
             pods = self._pods_for(namespace, name, await client.pods(namespace))
             if not pods:
@@ -273,7 +291,7 @@ class ToolRunner:
         namespace, name = str(arguments.get("namespace", "")).strip(), str(arguments.get("name", "")).strip()
         if not namespace or not name:
             raise ValueError("namespace and name are required")
-        client = await self._kube_client()
+        client = await self._kube_client(arguments)
         try:
             pods = self._pods_for(namespace, name, await client.pods(namespace))
             deployments = [row for row in await client.rollouts(namespace) if row["name"] == name]

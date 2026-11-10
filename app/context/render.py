@@ -89,13 +89,19 @@ def _problem_lines(index: int, problem: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _connections(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every log store and cluster. Older contexts only hold the main one of each kind."""
+    if context.get("connections") is not None:
+        return list(context["connections"])
+    return [{"kind": kind, **item} for kind, item in (context.get("integrations") or {}).items() if kind in {"loki", "kubernetes"}]
+
+
 def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
     """Render what is broken first, then the evidence around it, then the background, and say when something was left out."""
     health = context.get("health", {})
     status = health.get("status", "unknown")
     coverage = context.get("coverage", {})
     has_metrics = coverage.get("has_metrics", bool(context.get("sources")))
-    integrations = context.get("integrations", {})
     sections: list[list[str]] = []
     header = [
         f"Context version {context.get('version')} as of {context.get('as_of') or 'never'} ({_age(context.get('as_of'))}).",
@@ -108,11 +114,13 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
         header.append(line)
         if source.get("stale"):
             header.append(f"WARNING: source \"{source.get('name')}\" is not answering ({source.get('error')}). Its data below is from the last good poll at {source.get('last_ok')}.")
-    for kind, label in (("loki", "Log store: Loki, query language LogQL"), ("kubernetes", "Kubernetes cluster")):
-        item = integrations.get(kind)
-        if item:
-            state = "ok" if item.get("status") == "ok" else f"not answering: {item.get('error')}"
-            header.append(f"{label} \"{item.get('name', kind)}\", status {state}.")
+    connections = _connections(context)
+    labels = {"loki": "Log store: Loki, query language LogQL", "kubernetes": "Kubernetes cluster"}
+    for item in connections:
+        state = "ok" if item.get("status") == "ok" else f"not answering: {item.get('error')}"
+        several = sum(1 for other in connections if other["kind"] == item["kind"]) > 1
+        which = f" (connection_id {item['id']}{', main' if item.get('main') else ''})" if several and item.get("id") is not None else ""
+        header.append(f"{labels.get(item['kind'], item['kind'])} \"{item.get('name', item['kind'])}\"{which}, status {state}.")
     if context.get("stale") and not context.get("sources"):
         header.append(f"WARNING: the source is not answering. Everything below is from the last good poll at {health.get('last_ok')}.")
     sections.append(header)
@@ -136,19 +144,20 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
             + [f"- {change['ts']} [{change['origin']}] {change.get('service') or ''} {change['title']}" for change in changes]
         )
 
-    loki = integrations.get("loki")
-    if loki:
+    for loki in [item for item in connections if item["kind"] == "loki"]:
+        name = f" \"{loki.get('name')}\"" if len([item for item in connections if item["kind"] == "loki"]) > 1 else ""
         if loki.get("status") == "ok":
             rows = loki.get("error_lines", [])
-            sections.append([f"LOGS, error-like lines in the last 5 minutes from Loki (selector {loki.get('selector')}):"]
+            sections.append([f"LOGS, error-like lines in the last 5 minutes from Loki{name} (selector {loki.get('selector')}):"]
                             + ([f"- job={row['job']}: {row['errors_5m']:.0f} lines" for row in rows] or ["- none"]))
         else:
-            sections.append([f"LOGS: Loki query failed: {loki.get('error')}"])
+            sections.append([f"LOGS: Loki{name} query failed: {loki.get('error')}"])
 
-    kubernetes = integrations.get("kubernetes")
-    if kubernetes:
+    clusters = [item for item in connections if item["kind"] == "kubernetes"]
+    for kubernetes in clusters:
+        name = f" \"{kubernetes.get('name')}\"" if len(clusters) > 1 else ""
         if kubernetes.get("status") == "ok":
-            lines = ["KUBERNETES DETAIL:"]
+            lines = [f"KUBERNETES DETAIL{name}:"]
             lines += [f"- Pod {row['namespace']}/{row['pod']}: {row['phase']}, {row['restarts']} restarts, {', '.join(row['reasons']) or 'no reason given'}" for row in kubernetes.get("unhealthy_pods", [])]
             lines += [f"- Deployment {row['namespace']}/{row['deployment']}: {row['ready']} of {row['desired']} ready, revision {row['revision']}, images {', '.join(row['images'])}" for row in kubernetes.get("deployments_below_desired", [])]
             lines += [f"- Warning {row['last_seen']} {row['object']}: {row['reason']}: {row['message']}" for row in kubernetes.get("warning_events", [])]
@@ -158,7 +167,7 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
                 lines.append("- no unhealthy pods, warning events, or under-replicated deployments")
             sections.append(lines)
         else:
-            sections.append([f"KUBERNETES: the cluster didn't answer: {kubernetes.get('error')}"])
+            sections.append([f"KUBERNETES: the cluster{name} didn't answer: {kubernetes.get('error')}"])
 
     if has_metrics:
         alerts = context.get("alerts", {})

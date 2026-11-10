@@ -185,6 +185,27 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .segments button[aria-pressed="true"], .segments button[aria-selected="true"] { background: var(--button); color: var(--button-ink); }
 .control-label { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13.5px; }
 
+/* Source picker: a pill like the segmented controls, naming which connection a part of the page shows.
+   It only appears when there is more than one to choose from. */
+.source-pick { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: 13.5px; }
+.source-pick-box { position: relative; display: inline-flex; min-width: 0; }
+.source-pick select { min-width: 0; max-width: 260px; padding: 4px 30px 4px 13px; overflow: hidden; background: var(--page); border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-size: 13.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; appearance: none; -webkit-appearance: none; }
+.source-pick select:hover { border-color: var(--muted); }
+.source-pick select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+.source-pick-box::after { content: ""; position: absolute; top: 50%; right: 13px; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.hero-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
+.hero-controls .hero-switch { margin-bottom: 0; }
+.hero-controls:has(> .hero-switch[hidden]):has(> .hero-pick:empty) { display: none; }
+.golden-source { margin-top: 6px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.golden-source::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--muted); vertical-align: 1px; }
+.panel-source { flex: none; max-width: 40%; overflow: hidden; color: var(--muted); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.main-badge { padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
+.connection-group { min-width: 0; }
+.connection-group-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-bottom: 12px; }
+.connection-forms { display: grid; gap: 22px; }
+.connection-forms > form + form { padding-top: 20px; border-top: 1px solid var(--line); }
+.connection-title { margin-bottom: 10px; font-size: 15px; overflow-wrap: anywhere; }
+
 /* Attention lists */
 .status-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px 56px; }
 .rows { border-top: 1px solid var(--line); }
