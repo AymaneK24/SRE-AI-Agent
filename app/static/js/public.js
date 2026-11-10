@@ -65,15 +65,31 @@ export function landing(container) {
   return () => {};
 }
 
+const LOGO = '<svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><path d="M3 24l8-4 6 3 7-13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="26" cy="7" r="4" fill="var(--critical)"/></svg>';
+
+// About 3.5 cm tall on a desktop: the product, the documentation, the policies, and how to reach someone.
 export function footer() {
   const info = live.info || {};
+  const signedIn = Boolean(live.me && !live.me.must_change_password);
+  const column = (title, ...links) => h('div', { class: 'footer-col' }, h('h2', {}, title), h('ul', {}, links.filter(Boolean).map((link) => h('li', {}, link))));
+  const logo = h('span', { class: 'footer-logo' });
+  logo.innerHTML = LOGO;
   return h('footer', { class: 'site-footer', id: 'site-footer' }, h('div', { class: 'site-footer-inner' },
-    h('span', {}, info.operator ? `Root Cause Console, operated by ${info.operator}` : 'Root Cause Console'),
-    h('nav', { 'aria-label': 'Policies' },
-      h('a', { href: '#/legal/privacy' }, 'Privacy'), h('a', { href: '#/legal/cookies' }, 'Cookies'),
-      h('a', { href: '#/legal/terms' }, 'Terms'), h('a', { href: '#/legal/acceptable-use' }, 'Acceptable use'),
-      h('a', { href: '#/legal/security' }, 'Security'), h('a', { href: '#/legal/legal-notice' }, 'Legal notice'),
-      info.contact_email ? h('a', { href: `mailto:${info.contact_email}` }, 'Contact') : null)));
+    h('div', { class: 'footer-brand' },
+      h('a', { class: 'footer-name', href: '#/' }, logo, 'Root Cause Console'),
+      h('p', {}, 'Finds why production broke. It reads your systems and never changes them.'),
+      h('p', { class: 'footer-fine' }, `© ${new Date().getFullYear()} Root Cause Console`, info.operator ? ` · Operated by ${info.operator}` : '')),
+    signedIn ? column('Documentation',
+      h('a', { href: '/docs' }, 'Documentation'),
+      h('a', { href: '/docs/whats-new' }, 'What’s new'),
+      h('a', { href: '/docs/customer-setup' }, 'Customer setup')) : null,
+    h('nav', { class: 'footer-col footer-legal', 'aria-label': 'Policies' }, h('h2', {}, 'Legal'), h('ul', {},
+      [['privacy', 'Privacy'], ['terms', 'Terms'], ['cookies', 'Cookies'], ['acceptable-use', 'Acceptable use'], ['security', 'Security'], ['legal-notice', 'Legal notice']]
+        .map(([slug, label]) => h('li', {}, h('a', { href: `#/legal/${slug}` }, label))))),
+    column('Support',
+      info.contact_email ? h('a', { href: `mailto:${info.contact_email}` }, 'Contact us') : null,
+      signedIn ? h('a', { href: '/docs/troubleshooting' }, 'Troubleshooting') : null,
+      h('a', { href: '#/legal/security' }, 'Report a vulnerability'))));
 }
 
 // Every form that collects personal data links to the privacy notice.
