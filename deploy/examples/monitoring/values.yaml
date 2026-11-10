@@ -8,6 +8,16 @@
 alertmanager:
   enabled: false
 
+defaultRules:
+  disabled:
+    # Always firing by design, to prove Alertmanager works. Without Alertmanager it's only noise.
+    Watchdog: true
+    InfoInhibitor: true
+    # Fires because Alertmanager is left out on purpose: the console reads alerts from Prometheus.
+    PrometheusNotConnectedToAlertmanagers: true
+    # Docker Desktop's virtual machine clock drifts after the laptop sleeps, so this fires on laptops for no real reason.
+    NodeClockSkewDetected: true
+
 grafana:
   enabled: false
 
