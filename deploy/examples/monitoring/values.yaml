@@ -39,6 +39,10 @@ kube-state-metrics:
     limits: { memory: 256Mi }
 
 prometheus-node-exporter:
+  # Docker Desktop's root filesystem isn't a shared mount, which stops node-exporter from starting.
+  # Without the host's root mounted it still reports CPU, memory and network; only disk use is limited.
+  hostRootFsMount:
+    enabled: false
   resources:
     requests: { cpu: 20m, memory: 32Mi }
     limits: { memory: 128Mi }
