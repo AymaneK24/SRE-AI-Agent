@@ -282,6 +282,13 @@ def test_diagnoses_name_the_cause_with_evidence():
     pull = _problem(pod("a", "web-5b5568b987-1", "web", waiting="ImagePullBackOff", ready=False, image="shop/web:9.9"))
     pull["facts"]["message"] = "Back-off pulling image: manifest unknown"
     assert "doesn't exist in the registry" in diagnose(pull)["cause"]
+    # Most of the time the pod only says "Back-off pulling image"; the reason is in the ErrImagePull events.
+    backoff = _problem(pod("a", "web-5b5568b987-1", "web", waiting="ImagePullBackOff", ready=False, image="shop/web:9.9"))
+    backoff["facts"]["message"] = 'Back-off pulling image "shop/web:9.9"'
+    assert diagnose(backoff)["cause"] == "The node can't pull the image shop/web:9.9."
+    failed = [{"namespace": "a", "name": "web-5b5568b987-1", "reason": "Failed",
+               "message": 'Failed to pull image "shop/web:9.9": manifest unknown: manifest tagged by "9.9" is not found'}]
+    assert diagnose(backoff, [], failed)["cause"] == "The image shop/web:9.9 or its tag doesn't exist in the registry."
 
     pending = _problem(pod("a", "big-5b5568b987-1", "big", phase="Pending", ready=False, unschedulable="0/3 nodes are available: 3 Insufficient memory."))
     assert diagnose(pending)["cause"] == "No node can take the pod: not enough free memory."
