@@ -10,6 +10,7 @@ import { mount as mountProjects } from './projects.js';
 import { accept, changePassword, footer, forgot, landing, legal, reset, signin, signup, verify } from './public.js';
 import { mount as mountResults } from './results.js';
 import { mount as mountWorkflows } from './workflows.js';
+import { enhanceSelects } from './select.js';
 
 // Each page's lowest role. The server enforces the same limits on every API call, so this only decides what to show.
 const APP_ROUTES = {
@@ -159,4 +160,5 @@ async function start() {
   route();
 }
 
+enhanceSelects(document.body);
 start();
