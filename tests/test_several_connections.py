@@ -73,3 +73,42 @@ async def test_saving_by_name_updates_and_renaming_onto_another_is_refused(two_c
     clash = await client.post("/api/integrations", json={"kind": "kubernetes", "id": ids[0], "name": "prod-us", "config": {"url": first["config"]["url"]}, "secrets": {}})
     assert clash.status_code == 409
     assert len((await client.get("/api/integrations")).json()) == 2
+
+
+# One problem, one notification ------------------------------------------------------------
+async def test_a_prometheus_alert_about_a_known_workload_joins_it(console, prom_server):
+    from conftest import FakeProm
+
+    server, url = serve()
+    try:
+        client = await console.company("DedupCo", "o@dedup.example")
+        org_id = (await client.get("/api/auth/me")).json()["org_id"]
+        FakeProm.state = FakeProm.state.__class__()
+        FakeKube.state.crash()
+        assert (await client.post("/api/integrations", json={"kind": "kubernetes", "name": "aks", "config": {"url": url}, "secrets": {"token": TOKEN}})).status_code == 201
+        assert (await client.post("/api/sources", json={"name": "prom", "poll_seconds": 5, "config": {"host": "127.0.0.1", "port": prom_server.server_address[1]}, "secrets": {}})).status_code == 201
+        engine = await console.ctx.engines.get(org_id)
+        await engine.refresh_now()
+        sent = []
+        engine.on_event = lambda org, event, detail: sent.append(event) or _done()
+        crash = next(item for item in engine.k8s_problems if item["problem"] == "crashloop")
+        pod = crash["pods"][0]
+        FakeProm.state.extra_alerts = [{"labels": {"alertname": "KubePodCrashLooping", "severity": "warning", "namespace": crash["namespace"], "pod": pod},
+                                        "annotations": {"summary": "crash looping"}, "state": "firing", "activeAt": "2026-01-01T00:00:00Z", "value": "1"}]
+        await engine.refresh_now()
+        context = engine.context
+        assert not [item for item in context["problems"] if item["kind"] == "alert"], "the alert isn't a second problem"
+        problem = next(item for item in context["problems"] if item["fingerprint"] == crash["fingerprint"])
+        assert problem["detail"]["also_firing"] == ["KubePodCrashLooping"]
+        assert context["alerts"]["firing"][0]["merged_into"] == crash["fingerprint"]
+        assert "alert" not in context["headline"]["text"], "it isn't counted twice in the headline"
+        assert sent == [], "and nobody is notified a second time"
+        FakeProm.state.extra_alerts = []
+        await engine.refresh_now()
+        assert sent == [], "its end isn't announced either: the problem it joined is still there"
+    finally:
+        server.shutdown()
+
+
+async def _done():
+    return None

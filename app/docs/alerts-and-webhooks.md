@@ -29,6 +29,14 @@ With **Investigate critical alerts automatically** on, a critical alert starts a
 
 **Most per hour** (5 by default) limits automatic investigations, because each one uses your AI budget.
 
+## One problem, one alert
+
+With both a Kubernetes connection and a Prometheus that has Kubernetes alert rules (such as kube-prometheus-stack), the same problem can be seen twice: the console finds a crash loop itself, and Prometheus fires `KubePodCrashLooping` for it a few minutes later. The console treats them as one problem:
+
+- A Prometheus alert whose labels name a workload the console already reports (`namespace` with `deployment`, `statefulset`, `daemonset`, `job_name`, or a `pod` of that workload), or a node it already reports (`node`), joins that problem. It shows on its row as *Also firing in Prometheus: KubePodCrashLooping*, and isn't counted again in the headline.
+- Only the first one to start is announced. The other starts and ends without a notification, and without a second automatic investigation.
+- Alerts about anything else, such as your own application rules, are announced as usual.
+
 ## Incoming webhooks
 
 Two addresses let other tools push to the console:
