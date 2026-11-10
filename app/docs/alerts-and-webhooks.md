@@ -49,6 +49,8 @@ Every problem passes these checks before anyone is messaged. Nothing is hidden i
 | Grouping | Problems that start within the same window become one message, listing what they share: a node in trouble, the same namespace or cluster, a dependency they all mention (such as `postgres:5432`), or a change recorded in the 20 minutes before. One automatic investigation then looks at all of them. | 90 s |
 | Hourly limit | Each channel gets at most this many messages an hour. The rest arrive as one summary when the hour is up. | 12 |
 
+Problems already running when the console starts, or when a connection is added, are sent like any other: a deployment that can't pull its image is an outage whether it broke a minute ago or before the console looked. Their title starts with *Already active when the console connected*, because the start time isn't known. After a restart, problems that were already announced aren't sent again.
+
 Recovery messages skip these checks and go only to channels that heard about the problem.
 
 The panel also shows the last 7 days: problems started, messages sent, and how many were held back for each reason. If *held back* stays near zero while people complain about noise, shorten nothing and look at the alert rules themselves: a rule that fires for normal behaviour should be fixed at the source.

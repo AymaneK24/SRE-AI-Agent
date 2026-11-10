@@ -91,8 +91,9 @@ async def test_a_flapping_problem_gets_one_message_saying_so(console):
 async def test_a_problem_marked_false_alarm_is_no_longer_sent(console):
     client, org_id, notifier, engine = await _setup(console)
     event = _event("Noisy")
-    await console.ctx.db.insert("INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at) VALUES (?, ?, 'false_positive', '', 'n@test.example', ?)",
-                                (org_id, event["title"], utcnow()))
+    # The same call the Projects page makes when someone marks an issue as a false alarm.
+    marked = await client.put("/api/issues/verdict", json={"title": event["title"], "verdict": "false_positive", "note": "Fires on every nightly batch."})
+    assert marked.status_code == 200, marked.text
     await notifier.handle_event(org_id, event, {})
     assert not _mails(console)
     assert await _held(console, org_id) == ["muted"]
