@@ -413,11 +413,21 @@ textarea.query-input { font: 400 13px/1.45 var(--mono); }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px 56px; }
 .plain-list li { padding: 10px 0; border-top: 1px solid var(--line); color: var(--body); }
 .plain-list b { color: var(--ink); }
-.site-footer { flex: none; border-top: 1px solid var(--line); color: var(--muted); font-size: 13.5px; }
-.site-footer-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 24px; max-width: 1520px; margin: 0 auto; padding: 16px clamp(16px, 4vw, 56px); }
-.site-footer nav { display: flex; flex-wrap: wrap; gap: 6px 20px; }
-.site-footer a { text-decoration: none; }
-.site-footer a:hover { text-decoration: underline; }
+.site-footer { flex: none; background: var(--raised); border-top: 1px solid var(--line); color: var(--body); font-size: 13.5px; }
+.site-footer-inner { display: grid; grid-template-columns: minmax(240px, 1.6fr) repeat(3, auto); gap: 20px clamp(28px, 5vw, 72px); align-items: start; max-width: 1520px; margin: 0 auto; padding: 22px clamp(16px, 4vw, 56px) 20px; }
+.footer-brand p { max-width: 42ch; margin: 6px 0 0; line-height: 1.45; }
+.footer-brand .footer-fine { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.footer-name { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-size: 15px; font-weight: 600; text-decoration: none; }
+.footer-logo { display: inline-flex; }
+.footer-col h2 { margin: 2px 0 8px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.footer-col ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.footer-legal ul { grid-template-columns: repeat(2, auto); column-gap: 26px; }
+.site-footer a { color: var(--body); text-decoration: none; }
+.site-footer a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 860px) {
+  .site-footer-inner { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .footer-brand { grid-column: 1 / -1; }
+}
 .legal { max-width: 74ch; padding-top: 40px; }
 .legal h1 { font-size: clamp(36px, 4vw, 54px); font-weight: 600; line-height: 1.05; letter-spacing: -.04em; }
 .legal h2 { margin-top: 28px; font-size: 20px; }

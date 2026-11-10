@@ -53,7 +53,7 @@ kubectl get svc -A | grep -i prometheus
 
 ### No Prometheus in the cluster yet?
 
-`deploy/examples/monitoring/install.sh` installs kube-prometheus-stack, sized for a laptop or a small cluster: Prometheus, kube-state-metrics, node-exporter, and the standard Kubernetes alert rules such as `KubePodCrashLooping` and `KubeDeploymentRolloutStuck`. Alertmanager and Grafana are left out, because the console reads firing alerts from Prometheus itself. It needs `kubectl` pointed at the cluster and `helm`, and prints the address to enter here when it's done. On Docker Desktop that's host `host.docker.internal`, port `30090`.
+`deploy/examples/monitoring/install.sh` installs kube-prometheus-stack, sized for a laptop or a small cluster: Prometheus, kube-state-metrics, node-exporter, and the standard Kubernetes alert rules such as `KubePodCrashLooping` and `KubeDeploymentRolloutStuck`. Alertmanager and Grafana are left out, because the console reads firing alerts from Prometheus itself. It needs `kubectl` pointed at the cluster and `helm`, and prints the address to enter here when it's done. On Docker Desktop that's host `host.docker.internal`, port `30090`. For a customer's real cluster, use `PROFILE=production`: 15 days of history on a volume, disk metrics, and no open node port. See [Set up a customer's environment](/docs/customer-setup#2-prometheus-with-the-standard-alert-rules).
 
 With kube-prometheus-stack, it's usually `prometheus-operated` or `RELEASE-kube-prometheus-prometheus` on port `9090` in the `monitoring` namespace.
 
