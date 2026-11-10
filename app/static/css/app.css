@@ -588,7 +588,7 @@ pre.prompt-text { max-height: 58vh; margin: 8px 0 0; padding: 12px; overflow: au
 }
 
 /* Dropdowns: one look for every choice list. The native select stays hidden behind it (select.js). */
-.select-native { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; pointer-events: none; }
+select.select-native, .select-native { position: absolute !important; left: 0 !important; top: 0 !important; width: 1px !important; min-width: 0 !important; max-width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); border: 0 !important; opacity: 0; pointer-events: none; }
 .select-button { position: relative; display: inline-flex; align-items: center; min-width: 0; padding: 8px 36px 8px 11px; background: var(--raised); border: 1px solid var(--line); border-radius: 9px; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
 .select-button:hover:not(:disabled) { border-color: var(--muted); }
 .select-button[aria-expanded="true"] { border-color: var(--ink); }
@@ -603,3 +603,6 @@ pre.prompt-text { max-height: 58vh; margin: 8px 0 0; padding: 12px; overflow: au
 .select-item[aria-selected="true"]::after { content: ""; position: absolute; top: 50%; right: 13px; width: 5px; height: 10px; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); transform: translateY(-65%) rotate(45deg); }
 .select-item[aria-disabled="true"] { color: var(--muted); cursor: default; }
 @media (prefers-reduced-motion: reduce) { .select-button::after { transition: none; } }
+
+/* On small screens a wide table scrolls by itself instead of widening the page. */
+@media (max-width: 860px) { table.data-table { display: block; max-width: 100%; overflow-x: auto; } }
