@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -93,6 +93,17 @@ ALTER TABLE project_reports ADD COLUMN notes_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE project_reports ADD COLUMN notes_started_at TEXT;
 ALTER TABLE workflows ADD COLUMN project_id BIGINT;
 ALTER TABLE workflows ADD COLUMN targets TEXT NOT NULL DEFAULT '[]';
+"""
+
+# Version 8: cost savings and focused investigations. Calls record cached tokens and what caching saved;
+# a query can come from the console itself; a message keeps the problems it focused on and its answer style.
+V8_COLUMNS = """ALTER TABLE llm_calls ADD COLUMN cache_read_tokens BIGINT;
+ALTER TABLE llm_calls ADD COLUMN cache_write_tokens BIGINT;
+ALTER TABLE llm_calls ADD COLUMN saved_usd REAL;
+ALTER TABLE llm_calls ADD COLUMN purpose TEXT NOT NULL DEFAULT 'answer';
+ALTER TABLE tool_calls ADD COLUMN origin TEXT NOT NULL DEFAULT 'model';
+ALTER TABLE messages ADD COLUMN focus TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE messages ADD COLUMN answer_style TEXT NOT NULL DEFAULT 'report';
 """
 
 COMMON = """
@@ -429,15 +440,17 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         statements += _split(V6_TABLES.format(**types))
     if version < 7:
         statements += _split(V7_COLUMNS)
+    if version < 8:
+        statements += _split(V8_COLUMNS)
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS)
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS)
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

@@ -14,6 +14,7 @@ from ..db import Database
 from ..net_guard import BlockedTarget
 from ..secrets_store import scrub
 from ..sources.base import SourceError
+from .logql import repair_logql, simple_logql
 
 MAX_RESULT_CHARS = 6000
 MAX_SERIES = 15
@@ -92,6 +93,8 @@ class ToolRunner:
     def __init__(self, engine: ContextEngine, db: Database, box: Any, config: Any, owner_id: int | None = None) -> None:
         self.engine, self.db, self.box, self.config = engine, db, box, config
         self.owner_id = owner_id
+        # What the console corrected in a query, told to the model with the result instead of failing the query.
+        self._notes: list[str] = []
 
     async def _kinds(self) -> set[str]:
         rows = await self.db.all("SELECT kind FROM integrations WHERE org_id = ? AND enabled = 1", (self.engine.org_id,))
@@ -137,7 +140,10 @@ class ToolRunner:
             if handler is None:
                 available = ", ".join(tool["name"] for tool in await self.definitions())
                 return False, f"Unknown tool: {name}. The tools you can use are: {available}."
+            self._notes = []
             result = await handler(arguments)
+            if self._notes and isinstance(result, dict):
+                result = {"note": " ".join(self._notes), **result}
             return True, _limit(scrub(json.dumps(result, ensure_ascii=False, default=str)))
         except (SourceError, BlockedTarget) as error:
             return False, scrub(f"Query error: {getattr(error, 'message', error)} {await self._hint(name)}".strip())
@@ -146,7 +152,15 @@ class ToolRunner:
 
     def _source(self, arguments: dict[str, Any]) -> Any:
         raw = arguments.get("source_id")
-        return self.engine.source(int(raw) if raw not in (None, "") else None)
+        try:
+            wanted = int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            wanted = None
+        if wanted is not None and wanted not in self.engine.states:
+            # Small models often invent an id. Use the main source and say so, instead of failing the query.
+            self._notes.append(f"There is no metric source {raw}, so the main source was used.")
+            wanted = None
+        return self.engine.source(wanted)
 
     @staticmethod
     def _query_arg(arguments: dict[str, Any]) -> str:
@@ -203,12 +217,14 @@ class ToolRunner:
         if not rows:
             return None
         wanted = arguments.get("connection_id")
-        if wanted is not None:
-            for row in rows:
-                if row["id"] == int(wanted):
-                    return row
-            raise ValueError(f"No {kind} connection has connection_id {wanted}. Use one from the context, or leave it out.")
         main = pick_main(rows, self.engine.main_connections.get(kind))
+        if wanted not in (None, ""):
+            for row in rows:
+                if str(row["id"]) == str(wanted).strip():
+                    return row
+            # An unknown id is a model's guess. Use the main connection and say so, instead of failing the query.
+            if len(rows) > 1:
+                self._notes.append(f"There is no {kind} connection {wanted}, so the main one, {next(row['name'] for row in rows if row['id'] == main)}, was used.")
         return next(row for row in rows if row["id"] == main)
 
     async def _integration(self, kind: str, arguments: dict[str, Any] | None = None) -> Any:
@@ -221,7 +237,18 @@ class ToolRunner:
         loki = await self._integration("loki", arguments) if arguments.get("source_id") is None else None
         if loki:
             try:
-                return await loki.query(query, minutes)
+                repaired, fixes = repair_logql(query)
+                if fixes:
+                    self._notes.append(f"The query was corrected to valid LogQL ({'; '.join(fixes)}): {repaired}")
+                try:
+                    return await loki.query(repaired, minutes)
+                except SourceError as error:
+                    if "parse error" not in error.message.lower() and error.kind not in {"bad_data", "query"}:
+                        raise
+                    # Still not valid LogQL: search the same streams for the words the model was after.
+                    fallback = simple_logql(query)
+                    self._notes.append(f"Loki couldn't read the query ({error.message}), so this simpler search ran instead: {fallback}")
+                    return await loki.query(fallback, minutes)
             finally:
                 await loki.close()
         return await self._source(arguments).logs(query, minutes)

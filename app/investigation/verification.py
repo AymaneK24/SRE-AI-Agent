@@ -71,9 +71,13 @@ def _section(sections: dict[str, str], name: str) -> str | None:
     return None
 
 
-def missing_sections(answer: str) -> list[str]:
+SHORT_REQUIRED_SECTIONS = ("Likely root cause", "Evidence")
+
+
+def missing_sections(answer: str, style: str = "report") -> list[str]:
     sections = _sections(answer)
-    missing = [name for name in REQUIRED_SECTIONS if _section(sections, name) is None]
+    required = SHORT_REQUIRED_SECTIONS if style == "short" else REQUIRED_SECTIONS
+    missing = [name for name in required if _section(sections, name) is None]
     if not CONFIDENCE_RE.search(answer):
         missing.append("a Confidence line")
     return missing

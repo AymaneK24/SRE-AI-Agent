@@ -274,7 +274,8 @@ class ContextEngine:
         if source_id is not None and source_id in self.states:
             return self.states[source_id].source
         if source_id is None and self.states:
-            return next(iter(self.states.values())).source
+            main = self.main_connections.get("metrics")
+            return (self.states[main] if main in self.states else next(iter(self.states.values()))).source
         if not self.states:
             raise SourceError("No metric source is connected, so metric queries can't run. Use the log and Kubernetes tools instead.", "bad_data")
         raise SourceError("That metric source isn't connected.", "bad_data")

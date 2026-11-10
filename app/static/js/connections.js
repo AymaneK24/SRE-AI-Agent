@@ -24,6 +24,7 @@ export function mount(container) {
   const channelsHost = h('div');
   const webhooksHost = h('div');
   const aiHost = h('div');
+  const savingsHost = h('div');
 
   clear(container, h('div', { class: 'page' },
     h('h1', { class: 'page-title' }, 'Point it at your systems.'),
@@ -44,7 +45,9 @@ export function mount(container) {
       h('div', { class: 'section-head' }, h('h2', { id: 'hooks-title' }, 'Incoming webhooks')),
       webhooksHost),
     h('section', { class: 'section', 'aria-labelledby': 'ai-title' },
-      h('div', { class: 'section-head' }, h('h2', { id: 'ai-title' }, 'AI model')), aiHost)));
+      h('div', { class: 'section-head' }, h('h2', { id: 'ai-title' }, 'AI model')), aiHost),
+    editable ? h('section', { class: 'section', 'aria-labelledby': 'savings-title' },
+      h('div', { class: 'section-head' }, h('h2', { id: 'savings-title' }, 'Cost savings')), savingsHost) : null));
 
   async function renderCollectors() {
     const collectors = await api('/api/collectors');
@@ -279,6 +282,68 @@ export function mount(container) {
               h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/org/channels/${row.id}`, { method: 'DELETE' }); renderChannels(); } }, 'Remove'))))) : h('p', { class: 'empty' }, 'No channels yet.'))),
       h('div', { class: 'form-actions' }, h('label', { class: 'check' }, autoCheck, 'Investigate critical alerts automatically, then email the findings with charts and a PDF'), h('label', { class: 'check' }, 'Most per hour', perHour)),
       h('p', { class: 'small muted', style: 'margin-top:6px' }, 'This uses your AI budget and license allowance.'));
+  }
+
+  // Cost savings -------------------------------------------------------------
+  // How investigations keep API costs down, and what that saved this month.
+  async function renderSavings() {
+    const [savings, claudeModels, geminiModels] = await Promise.all([
+      api('/api/ai/savings'),
+      api('/api/ai/providers/claude/models').catch(() => ({ models: [] })),
+      api('/api/ai/providers/gemini/models').catch(() => ({ models: [] })),
+    ]);
+    if (disposed) return;
+    const month = savings.month || {};
+    const money = (value) => `$${Number(value || 0).toFixed(value >= 10 ? 0 : 2)}`;
+    const caching = h('input', { type: 'checkbox', checked: savings.prompt_caching });
+    const gather = h('input', { type: 'checkbox', checked: savings.gather_evidence });
+    let style = savings.answer_style;
+    const styleControl = h('div', { class: 'segments', role: 'group', 'aria-label': 'Default answer length' });
+    const paintStyle = () => clear(styleControl, [['short', 'Short answer'], ['report', 'Full report']].map(([value, label]) => h('button', {
+      type: 'button', 'aria-pressed': String(style === value), onClick: () => { style = value; paintStyle(); } }, label)));
+    paintStyle();
+    const modelPicker = (provider, models, current) => {
+      const ids = models.map((item) => item.id);
+      const options = [['', 'The main model does everything'], ...models.map((item) => [item.id, item.label || item.id])];
+      if (current && !ids.includes(current)) options.push([current, current]);
+      return h('select', { class: 'input', 'aria-label': `${provider} model for query rounds` }, options.map(([value, label]) => h('option', { value, selected: value === (current || '') }, label)));
+    };
+    const claudePick = modelPicker('Claude', claudeModels.models || [], savings.evidence_model?.claude);
+    const geminiPick = modelPicker('Gemini', geminiModels.models || [], savings.evidence_model?.gemini);
+    const result = h('div');
+    const stat = (value, label, hint) => h('div', { class: 'stat', title: hint || '' }, h('b', {}, value), h('span', {}, label));
+    clear(savingsHost,
+      h('p', { class: 'body-text', style: 'margin-bottom:6px' }, 'An investigation sends the instructions, the live context and the evidence to the model on every round. These settings cut what is sent, and what each token costs.'),
+      h('div', { class: 'stat-row savings-stats' },
+        stat(money(month.cost_usd), 'Spent on API models this month', month.cache_saved_usd ? `It would have been ${money((month.cost_usd || 0) + month.cache_saved_usd)} without prompt caching.` : ''),
+        stat(money(month.cache_saved_usd), 'Saved by prompt caching', 'Compared with sending every round at the full input price.'),
+        stat(`${Math.round((month.cached_share || 0) * 100)}%`, 'Of input tokens read from cache', `${Number(month.cached_tokens || 0).toLocaleString()} tokens`),
+        stat(String(month.console_queries || 0), 'Queries the console ran for the model', 'Each is a round the model didn’t have to pay for.'),
+        stat(String(month.focused_investigations || 0), 'Focused investigations', 'Only the chosen problems’ evidence was sent.'),
+        stat(month.evidence_calls ? `${month.evidence_calls} · ${money(month.evidence_cost_usd)}` : '0', 'Query rounds on the cheaper model')),
+      h('form', { class: 'savings-form', 'aria-label': 'Cost savings', onSubmit: async (event) => {
+        event.preventDefault();
+        try {
+          await api('/api/ai/savings', { method: 'PUT', body: { prompt_caching: caching.checked, gather_evidence: gather.checked, answer_style: style,
+            evidence_model: { claude: claudePick.value, gemini: geminiPick.value } } });
+          toast('Cost savings saved');
+          renderSavings();
+        } catch (error) { showResult(result, false, error.message); }
+      } },
+        h('ul', { class: 'savings-list' },
+          h('li', {}, h('label', { class: 'check' }, caching, h('b', {}, 'Prompt caching')),
+            h('p', {}, 'The part of the prompt that stays the same between rounds is read from Claude’s cache at about a tenth of the input price, and faster. Gemini does this by itself on recent models; the console keeps that part first so it can.')),
+          h('li', {}, h('label', { class: 'check' }, gather, h('b', {}, 'Gather evidence before the model starts')),
+            h('p', {}, 'For the problems being investigated, the console runs the obvious queries itself: the workload’s error lines, its Kubernetes state, the chart of the signal that went out of range. API models need fewer rounds, and private models get evidence they would struggle to query for.')),
+          h('li', {}, h('b', {}, 'Focus on chosen problems'),
+            h('p', {}, 'In Investigate, people tick the problems they care about in the live context. Only those problems, and their logs, metrics and cluster state, are sent. Investigate buttons on the overview do this for one problem. Always on.')),
+          h('li', {}, h('b', {}, 'A cheaper model for the query rounds'),
+            h('p', {}, 'A small, fast model runs the queries; the main model reads what it found and writes the answer. Choose the same provider’s smaller model, such as Haiku or Flash-Lite.'),
+            h('div', { class: 'form-grid' }, field('With Claude', claudePick, null, 'span-3'), field('With Gemini', geminiPick, null, 'span-3'))),
+          h('li', {}, h('b', {}, 'Default answer length'), styleControl,
+            h('p', {}, 'Short answers give the cause, the evidence and next checks in under 250 words. People can still ask for a full report, and automatic investigations always write one for the email and PDF.'))),
+        result,
+        h('div', { class: 'form-actions' }, h('button', { class: 'button primary', type: 'submit' }, 'Save cost savings'))));
   }
 
   // Logs and Kubernetes ------------------------------------------------------
@@ -540,6 +605,7 @@ export function mount(container) {
   renderIntegrations().catch((error) => clear(integrationsHost, h('p', { class: 'error-note' }, error.message)));
   renderWebhooks().catch((error) => clear(webhooksHost, h('p', { class: 'error-note' }, error.message)));
   renderAi().catch((error) => clear(aiHost, h('p', { class: 'error-note' }, error.message)));
+  if (editable) renderSavings().catch((error) => clear(savingsHost, h('p', { class: 'error-note' }, error.message)));
   const unsubscribe = live.subscribe((type) => { if (type === 'context') renderSources().catch(() => {}); });
   return () => { disposed = true; unsubscribe(); };
 }

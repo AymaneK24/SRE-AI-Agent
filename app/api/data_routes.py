@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 from .. import ai_settings
 from ..access import context_for, live_message_for
 from ..context.engine import build_integration
-from ..context.render import render_context
+from ..context.render import focus_context, render_context
 from ..db import utcnow
-from ..investigation.prompts import build_system
+from ..investigation.prompts import build_system, system_text
 from ..net_guard import BlockedTarget, check_host, check_url
 from ..secrets_store import scrub
 from ..sources.base import SourceError
@@ -508,17 +508,19 @@ async def refresh_context(user: Engineer, ctx: Ctx) -> dict[str, Any]:
 
 
 @router.get("/context/prompt-preview")
-async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None) -> dict[str, Any]:
+async def context_preview(user: Engineer, ctx: Ctx, provider: Literal["ollama", "claude", "gemini"] | None = None, focus: str = "") -> dict[str, Any]:
     settings = await ai_settings.load_settings(ctx.db, user.org_id, ctx.config)
+    savings = await ai_settings.load_savings(ctx.db, user.org_id)
     name = provider or settings["provider"]
     chars = int(settings["ollama"]["num_ctx"]) * 2 if name == "ollama" else 60000
     engine = await ctx.engines.get(user.org_id)
-    rendered = render_context(engine.context, chars)
+    chosen = [item for item in focus.split(",") if item][:20]
+    rendered = render_context(focus_context(engine.context, chosen) if chosen else engine.context, chars)
     section = settings[name]
     mode = section.get("small_model", "auto")
     compact = name == "ollama" and (mode == "on" or (mode == "auto" and ai_settings.is_small_model(section.get("model", ""))))
     return {"version": engine.context.get("version"), "as_of": engine.context.get("as_of"), "provider": name, "max_chars": chars,
-            "text": build_system(rendered, [], [], section["use_tools"], False, None, compact)}
+            "text": system_text(build_system(rendered, [], [], section["use_tools"], False, None, compact, savings["answer_style"]))}
 
 
 @router.get("/stream")

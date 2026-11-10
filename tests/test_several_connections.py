@@ -61,7 +61,7 @@ async def test_tools_can_name_a_cluster(console, two_clusters):
     ok, text = await runner.run("get_kubernetes_state", {"resource": "problems", "connection_id": ids[1]})
     assert ok and "prod-us" in text and "prod-eu" not in text
     ok, text = await runner.run("get_kubernetes_state", {"resource": "pods", "connection_id": 424242})
-    assert not ok and "connection_id" in text
+    assert ok and "no kubernetes connection 424242" in text and "prod-eu" in text, "a made-up id uses the main cluster and says so"
 
 
 async def test_saving_by_name_updates_and_renaming_onto_another_is_refused(two_clusters):

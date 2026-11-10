@@ -42,6 +42,30 @@ async def load_settings(db: Database, org_id: int, config: Config) -> dict[str, 
     return merged
 
 
+# How investigations keep costs down. Kept apart from the model settings, so older clients that save those keep these.
+SAVINGS_SETTING = "ai_savings"
+
+
+def savings_defaults() -> dict[str, Any]:
+    return {
+        "prompt_caching": True,       # Claude: reuse the repeated start of each round at about a tenth of the price.
+        "gather_evidence": True,      # The console runs the obvious queries itself, before the model starts.
+        "answer_style": "short",      # Short answers in the page; automatic investigations always write a full report.
+        "evidence_model": {"claude": "", "gemini": ""},  # A cheaper model for the query rounds. Empty: the main model does everything.
+    }
+
+
+async def load_savings(db: Database, org_id: int) -> dict[str, Any]:
+    merged = savings_defaults()
+    stored = await db.get_setting(org_id, SAVINGS_SETTING, {}) or {}
+    for key, value in stored.items():
+        if key == "evidence_model" and isinstance(value, dict):
+            merged[key].update({name: str(model) for name, model in value.items() if name in merged[key]})
+        elif key in merged:
+            merged[key] = value
+    return merged
+
+
 async def claude_key(db: Database, org_id: int, box: SecretBox, config: Config) -> tuple[str, str]:
     """Return (key, source). A server-wide key is only used on single-company installations."""
     stored = await db.get_setting(org_id, CLAUDE_KEY_SETTING, "")
@@ -75,6 +99,10 @@ class Selection:
     history_chars: int
     repair: bool = False
     compact: bool = False
+    # Cost savings, from load_savings.
+    evidence_model: str = ""
+    answer_style: str = "short"
+    gather_evidence: bool = True
 
 
 SMALL_MODEL_RE = re.compile(r"[:_\-](\d+(?:\.\d+)?)b\b")
@@ -106,7 +134,8 @@ async def build_provider(db: Database, org_id: int, box: SecretBox, config: Conf
         key, _ = await claude_key(db, org_id, box, config)
         if not key:
             raise ProviderError("Add a Claude API key in Connections first.")
-        return ClaudeProvider(key, config.anthropic_base_url, int(settings["claude"]["max_tokens"])), settings
+        savings = await load_savings(db, org_id)
+        return ClaudeProvider(key, config.anthropic_base_url, int(settings["claude"]["max_tokens"]), bool(savings["prompt_caching"])), settings
     if name == "gemini":
         key, _ = await gemini_key(db, org_id, box, config)
         if not key:
@@ -115,7 +144,8 @@ async def build_provider(db: Database, org_id: int, box: SecretBox, config: Conf
     raise ProviderError(f"Unknown AI provider: {name}")
 
 
-async def select(db: Database, org_id: int, box: SecretBox, config: Config, provider_name: str | None, model: str | None, use_tools: bool | None) -> Selection:
+async def select(db: Database, org_id: int, box: SecretBox, config: Config, provider_name: str | None, model: str | None, use_tools: bool | None,
+                 answer_style: str | None = None) -> Selection:
     provider, settings = await build_provider(db, org_id, box, config, provider_name)
     section = settings[provider.name]
     chosen = model or section.get("model") or ""
@@ -139,4 +169,8 @@ async def select(db: Database, org_id: int, box: SecretBox, config: Config, prov
     tools = section.get("use_tools", False) if use_tools is None else use_tools
     mode = section.get("small_model", "auto")
     compact = provider.name == "ollama" and (mode == "on" or (mode == "auto" and is_small_model(chosen)))
-    return Selection(provider, chosen, bool(tools), context_chars, history_chars, bool(section.get("strict_answers", False)), compact)
+    savings = await load_savings(db, org_id)
+    evidence_model = str(savings["evidence_model"].get(provider.name, "") or "") if provider.name in CLOUD_PROVIDERS else ""
+    style = answer_style if answer_style in {"short", "report"} else savings["answer_style"]
+    return Selection(provider, chosen, bool(tools), context_chars, history_chars, bool(section.get("strict_answers", False)), compact,
+                     evidence_model if evidence_model and evidence_model != chosen else "", style, bool(savings["gather_evidence"]))
