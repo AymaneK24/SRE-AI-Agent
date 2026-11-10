@@ -229,9 +229,12 @@ class ScriptedProvider:
 
     def __init__(self, answers=None, on_first_tool=None, loop_forever=False):
         self.requests, self.answers, self.on_first_tool, self.loop_forever = [], list(answers or []), on_first_tool, loop_forever
+        self.parts = []
 
     def build_request(self, model, system, messages, tools, allow_tools=True):
-        return {"model": model, "system": system, "messages": [dict(m) for m in messages], "tools": bool(tools) and allow_tools}
+        # The system prompt comes in two parts: the stable start (cacheable) and what changed this round.
+        self.parts.append(system)
+        return {"model": model, "system": "\n\n".join(system) if isinstance(system, list) else system, "messages": [dict(m) for m in messages], "tools": bool(tools) and allow_tools}
 
     async def stream(self, request):
         self.requests.append(request)
@@ -269,6 +272,7 @@ async def test_context_updates_reach_the_model_between_rounds(console, prom_serv
     assert "HighErrorRate" not in provider.requests[0]["system"]
     assert "HighErrorRate" in provider.requests[-1]["system"]
     assert "Changed since this investigation started" in provider.requests[-1]["system"]
+    assert "Changed since" not in provider.parts[-1][0], "round-to-round changes stay out of the cacheable start"
 
 
 async def test_tool_rounds_are_limited(console, prom_server):

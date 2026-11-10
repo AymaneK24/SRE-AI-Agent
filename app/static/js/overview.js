@@ -379,10 +379,13 @@ export function mount(container) {
     return job.endsWith('/') ? `${job.slice(0, -1)} (pods without an app label)` : job;
   }
 
-  function investigateLink(prompt, workflowQuery) {
+  // Investigate one problem: the investigation is focused on it, so only its evidence goes to the model.
+  function investigateLink(prompt, workflowQuery, fingerprint) {
+    const query = new URLSearchParams({ prompt });
+    if (fingerprint) query.set('focus', fingerprint);
     return h('span', { class: 'row-buttons' },
       workflowQuery ? h('a', { class: 'button compact', href: `#/workflows?${workflowQuery}` }, 'Runbooks') : null,
-      can('engineer') ? h('a', { class: 'button compact', href: `#/investigate?prompt=${encodeURIComponent(prompt)}` }, 'Investigate') : null);
+      can('engineer') ? h('a', { class: 'button compact', href: `#/investigate?${query}` }, 'Investigate') : null);
   }
 
   function renderAttention(context) {
@@ -391,13 +394,13 @@ export function mount(container) {
       const severe = ['critical', 'page', 'error'].includes(String(alert.severity).toLowerCase());
       rows.push(h('li', { class: 'row' }, icon(severe ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, alert.name, ' ', h('span', { class: 'muted small' }, `${alert.severity} alert`)),
-        h('span', { class: 'row-side' }, investigateLink(`Why is the ${alert.name} alert firing (${labelText(alert.labels)})? Find the root cause.`, `alert=${encodeURIComponent(alert.name)}`)),
+        h('span', { class: 'row-side' }, investigateLink(`Why is the ${alert.name} alert firing (${labelText(alert.labels)})? Find the root cause.`, `alert=${encodeURIComponent(alert.name)}`, alert.fingerprint)),
         h('span', { class: 'row-detail' }, `${alert.summary || (can('engineer') ? labelText(alert.labels) : 'Alert firing')}. Firing since ${timeAgo(alert.active_at)}.`)));
     }
     for (const target of context.targets?.down_list || []) {
       rows.push(h('li', { class: 'row' }, icon('critical'),
         h('span', { class: 'row-title' }, `${target.instance} is down`),
-        h('span', { class: 'row-side' }, investigateLink(`Why is target ${target.instance} in job ${target.job} down?`, 'alert=targetdown')),
+        h('span', { class: 'row-side' }, investigateLink(`Why is target ${target.instance} in job ${target.job} down?`, 'alert=targetdown', target.fingerprint)),
         h('span', { class: 'row-detail' }, `Job ${target.job}. `, target.error || 'No error was reported.')));
     }
     for (const item of (context.problems || []).filter((problem) => problem.kind === 'k8s')) {
@@ -405,7 +408,7 @@ export function mount(container) {
       const why = detail.diagnosis?.cause || (detail.pods?.length ? `Pods: ${detail.pods.slice(0, 3).join(', ')}` : '');
       rows.push(h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, item.title),
-        h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail))),
+        h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail), item.fingerprint)),
         h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem')));
     }
     for (const rule of context.rules?.failing || []) {
@@ -418,7 +421,7 @@ export function mount(container) {
       const limit = item.kind === 'over_limit' && item.limit !== null ? `, limit ${formatValue(item.limit, item.unit)}` : '';
       rows.push(h('li', { class: 'row' }, icon('warning'),
         h('span', { class: 'row-title' }, `${item.title}: ${formatValue(item.value, item.unit)}`),
-        h('span', { class: 'row-side' }, investigateLink(`${item.title} is ${formatValue(item.value, item.unit)} on ${labelText(item.labels)}${usual}. What is causing this?`, `signal=${encodeURIComponent(item.signal_id)}`)),
+        h('span', { class: 'row-side' }, investigateLink(`${item.title} is ${formatValue(item.value, item.unit)} on ${labelText(item.labels)}${usual}. What is causing this?`, `signal=${encodeURIComponent(item.signal_id)}`, item.fingerprint)),
         h('span', { class: 'row-detail' }, can('engineer') ? labelText(item.labels) : 'Out of range', usual, limit)));
     }
     if (rows.length) clear(attention, h('ul', { class: 'rows scroll-rows' }, rows));

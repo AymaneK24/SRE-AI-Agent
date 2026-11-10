@@ -235,7 +235,7 @@ def build_pdf(facts: dict[str, Any], sections: dict[str, str], evidence: dict[st
                 output.append(Paragraph(reports._inline(stripped.lstrip("#").strip()), TEXT))
         return output
 
-    flow: list[Any] = [Paragraph(clean(facts["title"]), reports.TITLE), Paragraph(f"Incident report from an automatic investigation. Alert started {_when(facts['ts'])}.", reports.SUBTITLE), Spacer(1, 8)]
+    flow: list[Any] = [Paragraph(clean(facts["title"]), reports.TITLE), Paragraph(facts.get("subtitle") or f"Incident report from an automatic investigation. Alert started {_when(facts['ts'])}.", reports.SUBTITLE), Spacer(1, 8)]
     rows = [[Paragraph(item, reports.HEAD_CELL) for item in ("Status", "AI confidence after checks", "Company")],
             [Paragraph(clean(facts["status"]), reports.CELL_BOLD), Paragraph(clean(facts["confidence"]), reports.CELL_BOLD), Paragraph(clean(facts["company"]), reports.CELL_BOLD)]]
     flow.append(reports._table(rows, [reports.WIDTH / 3] * 3))

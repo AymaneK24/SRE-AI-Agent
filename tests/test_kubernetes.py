@@ -310,8 +310,8 @@ def test_small_model_mode():
     assert is_small_model("qwen2.5:3b") and is_small_model("llama3.1:8b") and is_small_model("phi3:mini")
     assert not is_small_model("qwen2.5:14b") and not is_small_model("llama3.2:latest") and not is_small_model("claude-sonnet-5-5")
     assert [tool["name"] for tool in compact_tools(TOOL_DEFINITIONS)] == ["get_pod_logs", "describe_object", "query_logs", "run_instant_query"]
-    compact = build_system("ctx", [], [], True, False, compact=True)
-    assert len(compact) < len(build_system("ctx", [], [], True, False)) and "## Likely root cause" in compact
+    compact = "".join(build_system("ctx", [], [], True, False, compact=True))
+    assert len(compact) < len("".join(build_system("ctx", [], [], True, False))) and "## Likely root cause" in compact
 
 
 # The Nov 6 test, replayed ------------------------------------------------------------
@@ -347,7 +347,10 @@ async def test_replay_of_the_nov_6_investigation(console, kube_only, fake_models
     assert message["status"] == "complete"
     assert "connection refused postgres:5432" in request and "PROBLEMS RIGHT NOW (1)" in request, "the crash log went to the model"
     assert "You are a site reliability engineer. Find why" in request, "a 3B model gets the short prompt"
-    tool_calls = await console.ctx.db.all("SELECT name, ok, result FROM tool_calls WHERE org_id = ?", (org_id,))
+    gathered = await console.ctx.db.all("SELECT name, ok FROM tool_calls WHERE org_id = ? AND origin = 'console'", (org_id,))
+    assert [(row["name"], row["ok"]) for row in gathered] == [("describe_object", 1)], "the console describes the crashing workload itself"
+    assert "EVIDENCE THE CONSOLE GATHERED" in request
+    tool_calls = await console.ctx.db.all("SELECT name, ok, result FROM tool_calls WHERE org_id = ? AND origin = 'model'", (org_id,))
     assert tool_calls[0]["name"] == "query_logs" or "get_pod_logs" in tool_calls[0]["result"], "a wrong guess is pointed to the right tool"
     assert any("doesn't address" in reason for reason in verification["reasons"]), "an answer that ignores the crash is flagged"
 

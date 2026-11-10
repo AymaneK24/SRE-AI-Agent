@@ -75,7 +75,8 @@ class AutoInvestigator:
         if await budget_problem(ctx.db, org_id):
             return None
         try:
-            selection = await ai_settings.select(ctx.db, org_id, ctx.box, ctx.config, None, None, None)
+            # Automatic investigations end up in an email and a PDF, so they always write the full report.
+            selection = await ai_settings.select(ctx.db, org_id, ctx.box, ctx.config, None, None, None, "report")
         except (ProviderError, ValueError) as error:
             log.warning("automatic investigation skipped: %s", getattr(error, "message", error))
             return None
@@ -90,7 +91,9 @@ class AutoInvestigator:
         prompt = f"{title}. Find the root cause."
 
         def begin() -> None:
-            ctx.investigations.start(org_id, conversation_id, prompt, selection, int(ai["max_rounds"]), actor="automatic")
+            # Focused on the alert that started it: only its evidence goes to the model.
+            ctx.investigations.start(org_id, conversation_id, prompt, selection, int(ai["max_rounds"]), actor="automatic",
+                                     focus=[event["fingerprint"]] if event.get("fingerprint") else None)
 
         return conversation_id, begin
 

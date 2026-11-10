@@ -31,8 +31,11 @@ class ToolCall:
 @dataclass
 class Finished:
     stop_reason: str = ""
+    # All prompt tokens, cached or not. The cached part is also counted below, because it's billed at a lower rate.
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     assistant_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -42,7 +45,7 @@ class Provider(Protocol):
     is_remote: bool
 
     def build_request(
-        self, model: str, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True,
+        self, model: str, system: str | list[str], messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, allow_tools: bool = True,
     ) -> dict[str, Any]:
         """`allow_tools=False` keeps the tools declared, so earlier tool calls in the history stay valid, but tells
         the model it must answer now. Providers without that switch leave the tools out."""

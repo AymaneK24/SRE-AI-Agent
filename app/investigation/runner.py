@@ -14,13 +14,14 @@ from prometheus_client import Counter
 from ..ai_settings import Selection
 from ..config import Config
 from ..context.engine import EngineManager, material_hash
-from ..context.render import render_context
-from ..costs import compute_cost, spend_settings
+from ..context.render import focus_context, render_context
+from ..costs import cache_saving, compute_cost, spend_settings
 from ..db import Database, sha256_text, utcnow
 from ..llm.base import Finished, ProviderError, TextDelta, ToolCall, ToolsUnsupported
 from ..secrets_store import SecretBox
 from ..workflows import matching_workflows
 from .prompts import FALLBACK_MARK, build_system, compact_tools, fallback_answer
+from . import evidence
 from .tools import ToolRunner, related_investigations
 from .verification import expects_diagnosis, missing_sections, verify_answer
 
@@ -55,6 +56,9 @@ class Run:
         self.cost: float | None = 0.0
         self.tool_results: list[str] = []
         self.rendered = ""
+        self.focus: list[str] = []
+        self.cache_read_tokens = 0
+        self.saved_usd = 0.0
         self._changed = asyncio.Condition()
 
     async def emit(self, kind: str, **data: Any) -> None:
@@ -107,8 +111,10 @@ class InvestigationManager:
         run = self.runs.get(run_id)
         return run if run and run.org_id == org_id else None
 
-    def start(self, org_id: int, conversation_id: int, prompt: str, selection: Selection, max_rounds: int, actor: str = "system", owner_id: int | None = None) -> Run:
+    def start(self, org_id: int, conversation_id: int, prompt: str, selection: Selection, max_rounds: int, actor: str = "system", owner_id: int | None = None,
+              focus: list[str] | None = None) -> Run:
         run = Run(org_id, conversation_id, owner_id)
+        run.focus = list(focus or [])[:20]
         self.runs[run.id] = run
         run.task = asyncio.create_task(self._execute(run, prompt, selection, max_rounds, actor))
         return run
@@ -133,13 +139,13 @@ class InvestigationManager:
         now = utcnow()
         started = time.monotonic()
         await self.db.insert(
-            "INSERT INTO messages(conversation_id, role, content, provider, model, author, created_at) VALUES (?, 'user', ?, ?, ?, ?, ?)",
-            (conversation_id, prompt, provider.name, selection.model, actor, now),
+            "INSERT INTO messages(conversation_id, role, content, provider, model, author, focus, answer_style, created_at) VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?)",
+            (conversation_id, prompt, provider.name, selection.model, actor, json.dumps(run.focus), selection.answer_style, now),
         )
         await self.db.index_text(run.org_id, conversation_id, prompt)
         message_id = await self.db.insert(
-            "INSERT INTO messages(conversation_id, role, content, status, provider, model, created_at) VALUES (?, 'assistant', '', 'running', ?, ?, ?)",
-            (conversation_id, provider.name, selection.model, now),
+            "INSERT INTO messages(conversation_id, role, content, status, provider, model, focus, answer_style, created_at) VALUES (?, 'assistant', '', 'running', ?, ?, ?, ?, ?)",
+            (conversation_id, provider.name, selection.model, json.dumps(run.focus), selection.answer_style, now),
         )
         await self.db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
 
@@ -163,6 +169,8 @@ class InvestigationManager:
         verification: dict[str, Any] = {}
         if status == "complete":
             verification = await self._verify(run, prompt, answer)
+            if run.saved_usd:
+                verification["cache_saved_usd"] = round(run.saved_usd, 6)
         context = run.sent_context
         duration = round((time.monotonic() - started) * 1000)
         await self.db.execute(
@@ -175,7 +183,8 @@ class InvestigationManager:
         await self.db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (utcnow(), conversation_id))
         await provider.close()
         await run.emit("finished", status=status, error=error_text, message_id=message_id, verification=verification,
-                       cost_usd=run.cost, input_tokens=run.input_tokens, output_tokens=run.output_tokens, duration_ms=duration)
+                       cost_usd=run.cost, input_tokens=run.input_tokens, output_tokens=run.output_tokens, duration_ms=duration,
+                       cache_read_tokens=run.cache_read_tokens, saved_usd=round(run.saved_usd, 6))
         if self.on_finished and status == "complete":
             try:
                 await self.on_finished(run, {"answer": answer, "verification": verification})
@@ -234,13 +243,25 @@ class InvestigationManager:
         repaired = False
         tool_calls_made = 0
         seen_calls: dict[str, int] = {}
+        evidence_text = ""
+        if selection.gather_evidence and engine.has_connections:
+            evidence_text = await self._gather(run, tools_runner, engine, message_id)
+        rendered_hash = ""
+        # A cheaper model may run the query rounds; the main model then writes the answer from what it found.
+        use_evidence_model = bool(selection.evidence_model) and use_tools
+        final_round = False
 
         for round_number in range(1, max_rounds + 2):
-            context = engine.context
+            context = self._focused(engine.context, run.focus)
             run.sent_context = context
-            run.rendered = render_context(context, selection.context_chars)
+            # The context is rendered again only when something material changed. An identical prompt start on
+            # every round is what lets the provider's cache serve it.
+            current_hash = material_hash(engine.context)
+            if current_hash != rendered_hash:
+                rendered_hash = current_hash
+                run.rendered = render_context(context, selection.context_chars)
             changes = [f"{event['ts']} {event['title']}" for event in context.get("events", []) if event["id"] not in started_events]
-            if material_hash(context) != started_hash and round_number > 1:
+            if material_hash(engine.context) != started_hash and round_number > 1:
                 notice = "The live state changed during this investigation, so the model received the update."
                 if notice not in notices:
                     notices.append(notice)
@@ -257,24 +278,31 @@ class InvestigationManager:
                 notice = f"The model used the {MAX_TOOL_CALLS} queries allowed in one investigation, so it was asked to answer now."
                 notices.append(notice)
                 await run.emit("notice", text=notice)
-            last_round = round_number >= max_rounds or over_tokens or out_of_calls
+            last_round = round_number >= max_rounds or over_tokens or out_of_calls or final_round
             # On the last round the tools stay declared, so earlier calls in the history remain valid, but the
             # model is told it may not call them. Some models ignore a missing tool list and call tools anyway.
             tools = tool_definitions if use_tools else None
-            system = build_system(run.rendered, past, changes, use_tools, last_round and use_tools, workflows, selection.compact)
+            system = build_system(run.rendered, past, changes, use_tools, last_round and use_tools, workflows, selection.compact, selection.answer_style, evidence_text)
+            evidence_round = use_evidence_model and not last_round
             outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, tools, context, answer_parts, prices, actor,
-                                                allow_tools=not last_round)
+                                                allow_tools=not last_round, model=selection.evidence_model if evidence_round else None)
             if outcome is None:  # The model can't use tools, so ask again without them.
                 use_tools = False
                 notice = f"{selection.model} can't run queries, so it answered from the live context only."
                 notices.append(notice)
                 await run.emit("notice", text=notice)
-                system = build_system(run.rendered, past, changes, False, False, workflows, selection.compact)
+                use_evidence_model = evidence_round = False
+                system = build_system(run.rendered, past, changes, False, False, workflows, selection.compact, selection.answer_style, evidence_text)
                 outcome, call_id = await self._send(run, message_id, round_number, selection, system, messages, None, context, answer_parts, prices, actor)
                 if outcome is None:
                     raise ProviderError("The model rejected the request.")
 
             round_text, tool_calls, finished = outcome
+            if evidence_round and not tool_calls:
+                # The cheaper model has gathered what it needs. Its draft isn't shown: the main model writes the answer.
+                final_round = True
+                await run.emit("status", text=f"Evidence gathered. {selection.model} is writing the answer")
+                continue
             if finished.stop_reason == "max_tokens":
                 notice = "The answer hit the model's length limit and may be cut off."
                 notices.append(notice)
@@ -298,7 +326,7 @@ class InvestigationManager:
                 return
             if not tool_calls:
                 answer = "".join(answer_parts)
-                missing = missing_sections(answer)
+                missing = missing_sections(answer, selection.answer_style)
                 if selection.repair and not repaired and missing and expects_diagnosis(prompt, answer) and round_text.strip():
                     repaired = True
                     messages.append({"role": "assistant", "content": round_text})
@@ -314,7 +342,9 @@ class InvestigationManager:
             messages.append({
                 "role": "assistant", "content": round_text,
                 "tool_calls": [{"id": call.id, "name": call.name, "arguments": call.arguments} for call in tool_calls],
-                "assistant_blocks": finished.assistant_blocks or None,
+                # Blocks are model-specific (thinking, signatures), so calls made by the evidence model are passed on plainly.
+                "assistant_blocks": None if evidence_round else (finished.assistant_blocks or None),
+                "other_model": evidence_round,
             })
             for index, call in enumerate(tool_calls):
                 key = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
@@ -335,30 +365,34 @@ class InvestigationManager:
         notices.append(notice)
         await run.emit("notice", text=notice)
 
-    async def _send(self, run: Run, message_id: int, round_number: int, selection: Selection, system: str, messages: list[dict[str, Any]],
+    async def _send(self, run: Run, message_id: int, round_number: int, selection: Selection, system: str | list[str], messages: list[dict[str, Any]],
                     tools: list[dict[str, Any]] | None, context: dict[str, Any], answer_parts: list[str], prices: dict[str, Any], actor: str,
-                    allow_tools: bool = True) -> tuple[Any, int]:
+                    allow_tools: bool = True, model: str | None = None) -> tuple[Any, int]:
         provider = selection.provider
         engine = await self.engines.get(run.org_id)
-        request = provider.build_request(selection.model, system, messages, tools, allow_tools)
+        model = model or selection.model
+        purpose = "answer" if model == selection.model else "evidence"
+        request = provider.build_request(model, system, messages, tools, allow_tools)
         snapshot_id = await engine.save_snapshot(context, "sent_to_model")
         request_json = json.dumps(request, ensure_ascii=False)
         request_hash = sha256_text(request_json)
         call_id = await self.db.insert(
-            "INSERT INTO llm_calls(org_id, conversation_id, message_id, round, provider, model, endpoint, snapshot_id, context_version, request_json, request_sha256, started_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (run.org_id, run.conversation_id, message_id, round_number, provider.name, selection.model, provider.endpoint,
-             snapshot_id, context.get("version"), request_json, request_hash, utcnow()),
+            "INSERT INTO llm_calls(org_id, conversation_id, message_id, round, provider, model, endpoint, snapshot_id, context_version, request_json, request_sha256, purpose, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run.org_id, run.conversation_id, message_id, round_number, provider.name, model, provider.endpoint,
+             snapshot_id, context.get("version"), request_json, request_hash, purpose, utcnow()),
         )
         await self.db.audit(run.org_id, "model_prompt_sent", f"conversation:{run.conversation_id}", {
-            "llm_call_id": call_id, "provider": provider.name, "model": selection.model, "endpoint": provider.endpoint,
+            "llm_call_id": call_id, "provider": provider.name, "model": model, "endpoint": provider.endpoint,
             "leaves_this_system": provider.is_remote, "request_sha256": request_hash, "context_version": context.get("version"),
         }, actor=actor)
-        await run.emit("status", text=f"Waiting for {selection.model}", round=round_number)
-        outcome = await self._call_model(run, call_id, provider, request, answer_parts, selection.model, prices)
+        await run.emit("status", text=f"{model} is looking for evidence" if purpose == "evidence" else f"Waiting for {model}", round=round_number)
+        # Text from an evidence round is working notes, not the answer, so it isn't shown.
+        outcome = await self._call_model(run, call_id, provider, request, answer_parts if purpose == "answer" else [], model, prices, visible=purpose == "answer")
         return outcome, call_id
 
-    async def _call_model(self, run: Run, call_id: int, provider: Any, request: dict[str, Any], answer_parts: list[str], model: str, prices: dict[str, Any]) -> tuple[str, list[ToolCall], Finished] | None:
+    async def _call_model(self, run: Run, call_id: int, provider: Any, request: dict[str, Any], answer_parts: list[str], model: str, prices: dict[str, Any],
+                          visible: bool = True) -> tuple[str, list[ToolCall], Finished] | None:
         started = time.monotonic()
         first_token_ms: int | None = None
         text_parts: list[str] = []
@@ -372,7 +406,8 @@ class InvestigationManager:
                         first_token_ms = round((time.monotonic() - started) * 1000)
                     text_parts.append(item.text)
                     answer_parts.append(item.text)
-                    await run.emit("text", text=item.text)
+                    if visible:
+                        await run.emit("text", text=item.text)
                 elif isinstance(item, ToolCall):
                     if first_token_ms is None:
                         first_token_ms = round((time.monotonic() - started) * 1000)
@@ -390,34 +425,61 @@ class InvestigationManager:
             raise
         finally:
             MODEL_CALLS.labels(provider.name, status).inc()
-            cost = compute_cost(provider.name, model, finished.input_tokens, finished.output_tokens, prices)
+            cost = compute_cost(provider.name, model, finished.input_tokens, finished.output_tokens, prices, finished.cache_read_tokens, finished.cache_write_tokens)
+            saved = cache_saving(provider.name, model, finished.input_tokens, finished.output_tokens, prices, finished.cache_read_tokens, finished.cache_write_tokens)
             run.input_tokens += finished.input_tokens or 0
             run.output_tokens += finished.output_tokens or 0
+            run.cache_read_tokens += finished.cache_read_tokens or 0
+            run.saved_usd += max(saved or 0.0, 0.0)
             if status == "complete":
                 run.cost = None if cost is None or run.cost is None else run.cost + cost
             await asyncio.shield(self.db.execute(
                 "UPDATE llm_calls SET response_text = ?, response_tool_calls = ?, stop_reason = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, "
-                "first_token_ms = ?, duration_ms = ?, status = ?, error = ?, finished_at = ? WHERE id = ?",
+                "first_token_ms = ?, duration_ms = ?, status = ?, error = ?, cache_read_tokens = ?, cache_write_tokens = ?, saved_usd = ?, finished_at = ? WHERE id = ?",
                 ("".join(text_parts),
                  json.dumps([{"id": call.id, "name": call.name, "arguments": call.arguments} for call in tool_calls], ensure_ascii=False),
                  finished.stop_reason, finished.input_tokens, finished.output_tokens, cost, first_token_ms,
-                 round((time.monotonic() - started) * 1000), status, error_text, utcnow(), call_id),
+                 round((time.monotonic() - started) * 1000), status, error_text, finished.cache_read_tokens, finished.cache_write_tokens, saved, utcnow(), call_id),
             ))
         return "".join(text_parts), tool_calls, finished
 
-    async def _run_tool(self, run: Run, runner: ToolRunner, call: ToolCall, conversation_id: int, message_id: int, call_id: int) -> dict[str, Any]:
-        await run.emit("tool_start", id=call.id, name=call.name, arguments=call.arguments)
+    async def _run_tool(self, run: Run, runner: ToolRunner, call: ToolCall, conversation_id: int, message_id: int, call_id: int | None,
+                        origin: str = "model") -> dict[str, Any]:
+        await run.emit("tool_start", id=call.id, name=call.name, arguments=call.arguments, origin=origin)
         started = time.monotonic()
         ok, result = await runner.run(call.name, call.arguments)
         duration = round((time.monotonic() - started) * 1000)
         if ok:
             run.tool_results.append(result)
         await self.db.insert(
-            "INSERT INTO tool_calls(org_id, conversation_id, message_id, llm_call_id, name, arguments, result, ok, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (run.org_id, conversation_id, message_id, call_id, call.name, json.dumps(call.arguments, ensure_ascii=False), result, int(ok), duration, utcnow()),
+            "INSERT INTO tool_calls(org_id, conversation_id, message_id, llm_call_id, name, arguments, result, ok, duration_ms, origin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run.org_id, conversation_id, message_id, call_id, call.name, json.dumps(call.arguments, ensure_ascii=False), result, int(ok), duration, origin, utcnow()),
         )
-        await run.emit("tool_result", id=call.id, name=call.name, arguments=call.arguments, ok=ok, result=result, duration_ms=duration)
+        await run.emit("tool_result", id=call.id, name=call.name, arguments=call.arguments, ok=ok, result=result, duration_ms=duration, origin=origin)
         return {"role": "tool", "tool_call_id": call.id, "name": call.name, "content": result, "is_error": not ok}
+
+    @staticmethod
+    def _focused(context: dict[str, Any], focus: list[str]) -> dict[str, Any]:
+        return focus_context(context, focus) if focus else context
+
+    async def _gather(self, run: Run, runner: ToolRunner, engine: Any, message_id: int) -> str:
+        """Run the obvious first queries for the problems in view, before the model starts."""
+        context = self._focused(engine.context, run.focus)
+        problems = context.get("problems", [])
+        if not problems:
+            return ""
+        kinds = engine.integration_kinds
+        planned = evidence.plan(context, problems, "loki" in kinds, "kubernetes" in kinds, bool(engine.states))
+        if not planned:
+            return ""
+        await run.emit("status", text="Gathering evidence for the problems in view")
+        results = []
+        for index, item in enumerate(planned, start=1):
+            arguments = {key: value for key, value in item["arguments"].items() if value is not None}
+            call = ToolCall(f"console-{index}", item["name"], arguments)
+            message = await self._run_tool(run, runner, call, run.conversation_id, message_id, None, origin="console")
+            results.append({**item, "arguments": arguments, "ok": not message["is_error"], "result": message["content"]})
+        return evidence.section(results)
 
     async def _history(self, conversation_id: int, max_chars: int) -> list[dict[str, Any]]:
         """Load earlier turns, newest first, up to the budget. The newest prompt is always kept."""
