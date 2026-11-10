@@ -210,6 +210,8 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .savings-list li > p { max-width: 72ch; color: var(--body); font-size: 14px; }
 .savings-list .form-grid { max-width: 640px; }
 .savings-list .segments { justify-self: start; }
+.noise-title { margin-top: 30px; font-size: 18px; }
+.noise-steps { list-style: none; counter-reset: none; }
 
  a pill like the segmented controls, naming which connection a part of the page shows.
    It only appears when there is more than one to choose from. */

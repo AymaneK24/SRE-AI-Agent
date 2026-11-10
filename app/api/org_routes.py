@@ -61,6 +61,16 @@ class ChannelBody(BaseModel):
     recipients: list[str] = Field(default_factory=list, max_length=20)
 
 
+class NoiseBody(BaseModel):
+    """Only the fields sent change. The others keep their saved value."""
+    grace_critical_s: int | None = Field(default=None, ge=0, le=3600)
+    grace_warning_s: int | None = Field(default=None, ge=0, le=7200)
+    group_window_s: int | None = Field(default=None, ge=0, le=900)
+    max_per_hour: int | None = Field(default=None, ge=1, le=500)
+    flapping: bool | None = None
+    respect_verdicts: bool | None = None
+
+
 class AutoInvestigateBody(BaseModel):
     enabled: bool = False
     per_hour: int = Field(default=5, ge=1, le=60)
@@ -327,6 +337,33 @@ async def put_auto(body: AutoInvestigateBody, user: Admin, ctx: Ctx) -> dict[str
     await ctx.db.set_setting(user.org_id, "auto_investigate", body.model_dump())
     await ctx.db.audit(user.org_id, "auto_investigate_changed", "organization", body.model_dump(), actor=user.actor)
     return body.model_dump()
+
+
+@router.get("/org/noise")
+async def get_noise(user: Admin, ctx: Ctx) -> dict[str, Any]:
+    """Noise control settings, and what they held back in the last 7 days."""
+    from .. import noise
+    from ..db import utc_after
+
+    since = utc_after(days=-7)
+    started = await ctx.db.one("SELECT count(*) AS n FROM events WHERE org_id = ? AND kind LIKE '%_started' AND ts >= ? AND title NOT LIKE 'Already active%'",
+                               (user.org_id, since))
+    rows = await ctx.db.all("SELECT status, count(*) AS n FROM deliveries WHERE org_id = ? AND created_at >= ? GROUP BY status", (user.org_id, since))
+    counts = {row["status"]: int(row["n"]) for row in rows}
+    held = {key.split(":", 1)[1]: value for key, value in counts.items() if key.startswith("suppressed:")}
+    return {**await noise.load(ctx.db, user.org_id, ctx.config),
+            "week": {"problems_started": int(started["n"] or 0), "messages_sent": counts.get("sent", 0), "failed": counts.get("failed", 0),
+                     "held_back": held, "held_back_total": sum(held.values())}}
+
+
+@router.put("/org/noise")
+async def put_noise(body: NoiseBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
+    from .. import noise
+    changes = body.model_dump(exclude_none=True)
+    settings = {**await noise.load(ctx.db, user.org_id, ctx.config), **changes}
+    await ctx.db.set_setting(user.org_id, "noise", settings)
+    await ctx.db.audit(user.org_id, "noise_control_changed", "organization", changes, actor=user.actor)
+    return await get_noise(user, ctx)
 
 
 # Workflows ------------------------------------------------------------------

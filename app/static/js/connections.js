@@ -25,6 +25,7 @@ export function mount(container) {
   const webhooksHost = h('div');
   const aiHost = h('div');
   const savingsHost = h('div');
+  const noiseHost = h('div');
 
   clear(container, h('div', { class: 'page' },
     h('h1', { class: 'page-title' }, 'Point it at your systems.'),
@@ -36,7 +37,7 @@ export function mount(container) {
     h('section', { class: 'section', 'aria-labelledby': 'alerts-title' },
       h('div', { class: 'section-head' }, h('h2', { id: 'alerts-title' }, 'Alerts')),
       h('p', { class: 'read-only-banner' }, h('b', {}, 'Alerts are read-only. '), 'Messages describe the problem and link to suggested steps. They can’t change anything.'),
-      channelsHost),
+      channelsHost, editable ? noiseHost : null),
     h('section', { class: 'section', 'aria-labelledby': 'more-title' },
       h('div', { class: 'section-head' }, h('h2', { id: 'more-title' }, 'Logs and Kubernetes')),
       h('p', { class: 'body-text', style: 'margin-bottom:14px' }, 'These add evidence to investigations. Use a read-only token.'),
@@ -282,6 +283,61 @@ export function mount(container) {
               h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/org/channels/${row.id}`, { method: 'DELETE' }); renderChannels(); } }, 'Remove'))))) : h('p', { class: 'empty' }, 'No channels yet.'))),
       h('div', { class: 'form-actions' }, h('label', { class: 'check' }, autoCheck, 'Investigate critical alerts automatically, then email the findings with charts and a PDF'), h('label', { class: 'check' }, 'Most per hour', perHour)),
       h('p', { class: 'small muted', style: 'margin-top:6px' }, 'This uses your AI budget and license allowance.'));
+  }
+
+  // Noise control ------------------------------------------------------------
+  // Fewer, better messages: what is held back, and why.
+  async function renderNoise() {
+    const settings = await api('/api/org/noise');
+    if (disposed) return;
+    const week = settings.week || {};
+    const held = week.held_back || {};
+    const number = (value, min, max, step = 1) => h('input', { class: 'input', type: 'number', min, max, step, value });
+    const graceCritical = number(settings.grace_critical_s, 0, 3600, 15);
+    const graceWarning = number(settings.grace_warning_s, 0, 7200, 30);
+    const groupWindow = number(settings.group_window_s, 0, 900, 15);
+    const perHour = number(settings.max_per_hour, 1, 500);
+    const flapping = h('input', { type: 'checkbox', checked: settings.flapping });
+    const verdicts = h('input', { type: 'checkbox', checked: settings.respect_verdicts });
+    const result = h('div');
+    const stat = (value, label, hint) => h('div', { class: 'stat', title: hint || '' }, h('b', {}, String(value ?? 0)), h('span', {}, label));
+    clear(noiseHost,
+      h('h3', { class: 'noise-title' }, 'Noise control'),
+      h('p', { class: 'body-text' }, 'Every problem passes these checks before anyone is messaged. Nothing is hidden in the console: only the messages are held back.'),
+      h('div', { class: 'stat-row savings-stats' },
+        stat(week.problems_started, 'Problems started, last 7 days'),
+        stat(week.messages_sent, 'Messages sent'),
+        stat(week.held_back_total, 'Held back'),
+        stat(held.blip || 0, 'Cleared within the grace period', 'Short blips that fixed themselves.'),
+        stat(held.grouped || 0, 'Sent together with another problem'),
+        stat((held.flapping || 0) + (held.muted || 0) + (held.rate_limit || 0), 'Flapping, marked false alarm, or over the limit')),
+      h('form', { class: 'savings-form', 'aria-label': 'Noise control', onSubmit: async (event) => {
+        event.preventDefault();
+        try {
+          await api('/api/org/noise', { method: 'PUT', body: { grace_critical_s: Number(graceCritical.value), grace_warning_s: Number(graceWarning.value),
+            group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked } });
+          toast('Noise control saved');
+          renderNoise();
+        } catch (error) { showResult(result, false, error.message); }
+      } },
+        h('ol', { class: 'savings-list noise-steps' },
+          h('li', {}, h('b', {}, 'Grace period'),
+            h('p', {}, 'A problem must still be there after this wait. Blips that clear by themselves are never sent, and never start an automatic investigation.'),
+            h('div', { class: 'form-grid' }, field('Critical, seconds', graceCritical, null, 'span-2'), field('Warning, seconds', graceWarning, null, 'span-2'))),
+          h('li', {}, h('b', {}, 'Group problems that start together'),
+            h('p', {}, 'Problems starting within this window become one message, with what they share: a node, a namespace, a cluster, a dependency they all mention such as postgres:5432, or a change recorded just before. One automatic investigation looks at all of them.'),
+            h('div', { class: 'form-grid' }, field('Window, seconds', groupWindow, null, 'span-2'))),
+          h('li', {}, h('label', { class: 'check' }, flapping, h('b', {}, 'Calm flapping problems')),
+            h('p', {}, 'Something that starts 3 times or more in an hour gets one message saying so. Further starts stay quiet until it has been stable for 30 minutes.')),
+          h('li', {}, h('label', { class: 'check' }, verdicts, h('b', {}, 'Respect false-alarm verdicts')),
+            h('p', {}, 'Problems your team marked as a false alarm or expected, in a project report, are no longer messaged. They still show in the console.')),
+          h('li', {}, h('b', {}, 'Most messages per channel, per hour'),
+            h('p', {}, 'Beyond this, a channel gets one summary of what was held back when the hour is up.'),
+            h('div', { class: 'form-grid' }, field('Messages per hour', perHour, null, 'span-2'))),
+          h('li', {}, h('b', {}, 'Already in place'),
+            h('p', {}, 'One problem, one alert: a Prometheus alert about a workload the console already reports joins it. A message isn’t repeated for 15 minutes. Recovery messages go only where the problem was sent. Unusual signals must stay unusual for two polls.'))),
+        result,
+        h('div', { class: 'form-actions' }, h('button', { class: 'button primary', type: 'submit' }, 'Save noise control'))));
   }
 
   // Cost savings -------------------------------------------------------------
@@ -606,6 +662,7 @@ export function mount(container) {
   renderWebhooks().catch((error) => clear(webhooksHost, h('p', { class: 'error-note' }, error.message)));
   renderAi().catch((error) => clear(aiHost, h('p', { class: 'error-note' }, error.message)));
   if (editable) renderSavings().catch((error) => clear(savingsHost, h('p', { class: 'error-note' }, error.message)));
+  if (editable) renderNoise().catch((error) => clear(noiseHost, h('p', { class: 'error-note' }, error.message)));
   const unsubscribe = live.subscribe((type) => { if (type === 'context') renderSources().catch(() => {}); });
   return () => { disposed = true; unsubscribe(); };
 }
