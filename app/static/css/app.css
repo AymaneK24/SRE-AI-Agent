@@ -164,7 +164,7 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .watched-head:first-child { margin-top: 0; }
 .workflow-filters { margin: 4px 0 16px; gap: 10px; }
 .workflow-filters input[type=search] { flex: 1 1 320px; max-width: 520px; }
-.workflow-filters select { flex: 0 1 220px; }
+.workflow-filters .select-button { flex: 0 1 220px; }
 
 /* Buttons */
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 9px 18px; background: transparent; border: 1px solid var(--muted); border-radius: 999px; font-weight: 500; text-decoration: none; white-space: nowrap; }
@@ -213,14 +213,11 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .noise-title { margin-top: 30px; font-size: 18px; }
 .noise-steps { list-style: none; counter-reset: none; }
 
- a pill like the segmented controls, naming which connection a part of the page shows.
+/* Source picker: a pill like the segmented controls, naming which connection a part of the page shows.
    It only appears when there is more than one to choose from. */
 .source-pick { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: 13.5px; }
 .source-pick-box { position: relative; display: inline-flex; min-width: 0; }
-.source-pick select { min-width: 0; max-width: 260px; padding: 4px 30px 4px 13px; overflow: hidden; background: var(--page); border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-size: 13.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; appearance: none; -webkit-appearance: none; }
-.source-pick select:hover { border-color: var(--muted); }
-.source-pick select:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
-.source-pick-box::after { content: ""; position: absolute; top: 50%; right: 13px; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.source-pick .select-button { max-width: 260px; padding: 5px 34px 5px 14px; background-color: var(--page); border-radius: 999px; font-size: 13.5px; font-weight: 500; }
 .hero-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
 .hero-controls .hero-switch { margin-bottom: 0; }
 .hero-controls:has(> .hero-switch[hidden]):has(> .hero-pick:empty) { display: none; }
@@ -321,7 +318,7 @@ pre.result { max-height: 240px; margin: 6px 0 0; padding: 8px 10px; overflow: au
 .composer { position: sticky; bottom: 12px; padding: 12px 14px; background: var(--raised); border: 1px solid var(--line); border-radius: 22px; box-shadow: 0 8px 30px rgba(0, 0, 0, .08); }
 .composer textarea { display: block; width: 100%; min-height: 54px; max-height: 240px; padding: 2px 4px; background: none; border: 0; resize: vertical; outline: none; }
 .composer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 6px; }
-.composer-row select { max-width: 220px; padding: 4px 8px; background: transparent; border: 1px solid var(--line); border-radius: 999px; font-size: 13.5px; }
+.composer-row .select-button { max-width: 220px; padding: 5px 32px 5px 13px; background-color: transparent; border-radius: 999px; font-size: 13.5px; }
 .composer-send { display: flex; gap: 8px; margin-left: auto; }
 .check { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; color: var(--body); }
 .check input { accent-color: var(--ink); margin: 0; }
@@ -485,7 +482,7 @@ button.collector b, button.collector span { display: block; }
 .finish-panel { margin-top: 14px; padding: 14px 18px; border: 1px solid var(--ok); border-radius: 14px; }
 .finish-panel h3 { margin-bottom: 10px; }
 .finish-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-.finish-row select { flex: 0 1 190px; }
+.finish-row .select-button { flex: 0 1 190px; }
 .finish-row input { flex: 1 1 240px; }
 .workflow-detail > p.small { margin-top: 10px; }
 .step-editor { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
@@ -508,7 +505,7 @@ button.collector b, button.collector span { display: block; }
 .account-forms h2 { font-size: 20px; }
 .invite-name { flex: 1 1 180px; max-width: 260px; }
 .invite-email { flex: 1 1 220px; max-width: 320px; }
-.verdict-select { min-width: 132px; padding: 4px 8px; font-size: 13.5px; }
+.select-button.verdict-select { min-width: 132px; padding: 5px 32px 5px 12px; font-size: 13.5px; }
 .noise-hint { margin-top: 3px; color: var(--warning); }
 
 /* Projects */
@@ -579,3 +576,20 @@ pre.prompt-text { max-height: 58vh; margin: 8px 0 0; padding: 12px; overflow: au
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }
   .spinner { border-top-color: var(--line); }
 }
+
+/* Dropdowns: one look for every choice list. The native select stays hidden behind it (select.js). */
+.select-native { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; pointer-events: none; }
+.select-button { position: relative; display: inline-flex; align-items: center; min-width: 0; padding: 8px 36px 8px 11px; background: var(--raised); border: 1px solid var(--line); border-radius: 9px; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.select-button:hover:not(:disabled) { border-color: var(--muted); }
+.select-button[aria-expanded="true"] { border-color: var(--ink); }
+.select-button:disabled { color: var(--muted); cursor: not-allowed; opacity: .7; }
+.select-button::after { content: ""; position: absolute; top: 50%; right: 14px; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-70%) rotate(45deg); transition: transform .12s; pointer-events: none; }
+.select-button[aria-expanded="true"]::after { transform: translateY(-25%) rotate(225deg); }
+.select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-list { position: fixed; z-index: 60; max-width: min(420px, calc(100vw - 16px)); max-height: 320px; margin: 0; padding: 5px; overflow-y: auto; list-style: none; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, .14); outline: none; }
+.select-item { position: relative; padding: 7px 34px 7px 11px; border-radius: 8px; color: var(--ink); font-size: 14px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.select-item.is-active { background: var(--page); }
+.select-item[aria-selected="true"] { font-weight: 600; }
+.select-item[aria-selected="true"]::after { content: ""; position: absolute; top: 50%; right: 13px; width: 5px; height: 10px; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); transform: translateY(-65%) rotate(45deg); }
+.select-item[aria-disabled="true"] { color: var(--muted); cursor: default; }
+@media (prefers-reduced-motion: reduce) { .select-button::after { transition: none; } }
