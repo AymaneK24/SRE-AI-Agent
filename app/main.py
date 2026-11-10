@@ -89,11 +89,16 @@ class AutoInvestigator:
         )
         ai = await ai_settings.load_settings(ctx.db, org_id, ctx.config)
         prompt = f"{title}. Find the root cause."
+        if event.get("group"):
+            # Several problems started together: one investigation looks for what they share.
+            listed = "; ".join(item["title"] for item in detail.get("group", []))
+            hints = " ".join(detail.get("hints") or [])
+            prompt = f"These problems started together: {listed}. Find whether they share a root cause, and what it is. {hints}".strip()
 
         def begin() -> None:
             # Focused on the alert that started it: only its evidence goes to the model.
             ctx.investigations.start(org_id, conversation_id, prompt, selection, int(ai["max_rounds"]), actor="automatic",
-                                     focus=[event["fingerprint"]] if event.get("fingerprint") else None)
+                                     focus=event.get("group") or ([event["fingerprint"]] if event.get("fingerprint") else None))
 
         return conversation_id, begin
 

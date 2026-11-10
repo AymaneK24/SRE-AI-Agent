@@ -12,6 +12,7 @@ import httpx
 
 from .config import Config
 from .db import Database, utcnow
+from . import noise
 from .mailer import MailError, Mailer
 from .net_guard import check_url, guarded_transport
 from .investigation_report import build_email, build_pdf, collect_evidence, reviewed_workflows, split_sections
@@ -113,17 +114,71 @@ class Notifier:
         self.on_critical: Any = None
         self.engines: Any = None
         self._waiting: set[asyncio.Task[None]] = set()
+        self.noise = noise.NoiseControl()
 
     def close(self) -> None:
         for task in self._waiting:
             task.cancel()
 
     async def handle_event(self, org_id: int, event: dict[str, Any], detail: dict[str, Any]) -> None:
+        try:
+            if event["kind"].endswith(("_cleared", "_recovered")):
+                await self._dispatch(org_id, event, detail)
+                return
+            settings = await noise.load(self.db, org_id, self.config)
+            reason = await self._gate(org_id, event, settings)
+            if reason:
+                await self._suppressed(org_id, event, reason)
+                return
+            if not self.noise.join(org_id, event, detail):
+                await self._suppressed(org_id, event, "grouped")
+                return  # Another problem opened a group a moment ago; this one goes out with it.
+            await noise.sleep(float(settings["group_window_s"]))
+            items = self.noise.close(org_id)
+        except Exception:  # Notification failures must not affect monitoring.
+            log.exception("notification failed")
+            return
+        if len(items) <= 1:
+            await self._send_one(org_id, event, detail, settings)
+        else:
+            await self._send_group(org_id, items, settings)
+
+    async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any]) -> str | None:
+        """Why this start shouldn't be sent, or None. Waits out the grace period."""
+        if settings["respect_verdicts"]:
+            title = event["title"].removeprefix("Already active when the console connected. ")
+            verdict = await self.db.one("SELECT verdict FROM issue_verdicts WHERE org_id = ? AND issue_key = ? AND verdict IN ('false_positive', 'expected')",
+                                        (org_id, title))
+            if verdict:
+                return "muted"
+        if settings["flapping"]:
+            state = self.noise.flapping(org_id, event["fingerprint"])
+            if state == "quiet":
+                return "flapping"
+            if state == "first":
+                flap = {**event, "severity": "warning", "title": f"{event['title']} keeps starting and stopping",
+                        "fingerprint": f"flapping:{event['fingerprint']}"}
+                await self._dispatch(org_id, flap, {"summary": f"It started {noise.FLAP_STARTS} times or more in the last hour. Further changes won't be sent until it has been stable for {noise.FLAP_QUIET_S // 60} minutes."}, settings=settings)
+                return "flapping"
+        grace = float(settings["grace_critical_s"] if event["severity"] == "critical" else settings["grace_warning_s"])
+        if grace > 0:
+            await noise.sleep(grace)
+            engine = await self.engines.get(org_id) if self.engines else None
+            if engine is not None and event["fingerprint"] not in engine._active:
+                return "blip"
+        return None
+
+    async def _suppressed(self, org_id: int, event: dict[str, Any], reason: str) -> None:
+        await self.db.insert(
+            "INSERT INTO deliveries(org_id, channel_id, fingerprint, title, status, error, created_at) VALUES (?, NULL, ?, ?, ?, '', ?)",
+            (org_id, event["fingerprint"], event["title"][:300], f"suppressed:{reason}", utcnow()))
+
+    async def _send_one(self, org_id: int, event: dict[str, Any], detail: dict[str, Any], settings: dict[str, Any]) -> None:
         prepared = None
         try:
             if self.on_critical and event["severity"] == "critical":
                 prepared = await self.on_critical(org_id, event, detail)
-            await self._dispatch(org_id, event, detail, prepared[0] if prepared else None)
+            await self._dispatch(org_id, event, detail, prepared[0] if prepared else None, settings=settings)
         except Exception:  # Notification failures must not affect monitoring.
             log.exception("notification failed")
         if prepared:
@@ -133,7 +188,33 @@ class Notifier:
                 log.exception("automatic investigation couldn't start")
                 await self.release_held(prepared[0], "The automatic investigation couldn't start, so this message has only the alert.", final=True)
 
-    async def _dispatch(self, org_id: int, event: dict[str, Any], detail: dict[str, Any], investigation_id: int | None = None) -> None:
+    async def _send_group(self, org_id: int, items: list[tuple[dict[str, Any], dict[str, Any]]], settings: dict[str, Any]) -> None:
+        """Problems that started together: one message, and one automatic investigation that looks at all of them."""
+        items.sort(key=lambda pair: -SEVERITY_RANK.get(pair[0]["severity"], 0))
+        worst = items[0][0]
+        changes = noise.changes_since(await self.db.all("SELECT ts, title FROM change_events WHERE org_id = ? ORDER BY ts DESC LIMIT 20", (org_id,)))
+        hints = noise.common_causes(items, changes)
+        lines = [f"- {event['title']}" for event, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        summary = "\n".join(lines + ([""] + hints if hints else []))
+        event = {**worst, "title": f"{len(items)} problems started together: {worst['title']}" + (" and others" if len(items) > 1 else ""),
+                 "fingerprint": f"group:{worst['fingerprint']}", "group": [item["fingerprint"] for item, _ in items]}
+        detail = {"summary": summary, "group": [{"title": item["title"], "fingerprint": item["fingerprint"]} for item, _ in items], "hints": hints}
+        prepared = None
+        try:
+            if self.on_critical and event["severity"] == "critical":
+                prepared = await self.on_critical(org_id, event, detail)
+            await self._dispatch(org_id, event, detail, prepared[0] if prepared else None, settings=settings, members=[item["fingerprint"] for item, _ in items])
+        except Exception:
+            log.exception("notification failed")
+        if prepared:
+            try:
+                prepared[1]()
+            except Exception:
+                log.exception("automatic investigation couldn't start")
+                await self.release_held(prepared[0], "The automatic investigation couldn't start, so this message has only the alert.", final=True)
+
+    async def _dispatch(self, org_id: int, event: dict[str, Any], detail: dict[str, Any], investigation_id: int | None = None,
+                        settings: dict[str, Any] | None = None, members: list[str] | None = None) -> None:
         channels = await self.db.all("SELECT * FROM channels WHERE org_id = ? AND enabled = 1", (org_id,))
         if not channels:
             return
@@ -165,7 +246,13 @@ class Notifier:
                 key = (channel["id"], event["fingerprint"])
                 if time.monotonic() - self._sent.get(key, -COOLDOWN_S) < COOLDOWN_S:
                     continue
+                if settings and not self.noise.allow(channel["id"], int(settings["max_per_hour"])):
+                    self._overflow(org_id, channel, event)
+                    continue
                 self._sent[key] = time.monotonic()
+                # A grouped message stands for each problem in it, so each one's recovery goes to this channel too.
+                for member in members or []:
+                    self._sent[(channel["id"], member)] = time.monotonic()
                 # Email waits so it can carry the findings. Chat channels hear about the alert straight away.
                 if investigation_id is not None and channel["kind"] == "email":
                     held_ids.append(channel["id"])
@@ -173,6 +260,27 @@ class Notifier:
             await self.deliver(channel, org_id, event["fingerprint"], message)
         if held_ids and investigation_id is not None:
             await self._hold(org_id, investigation_id, event, detail, message, held_ids)
+
+    def _overflow(self, org_id: int, channel: dict[str, Any], event: dict[str, Any]) -> None:
+        """Over the channel's hourly limit: keep the title for one summary when the hour is up."""
+        waiting = self.noise.overflow.setdefault(channel["id"], [])
+        waiting.append(event["title"])
+        asyncio.get_running_loop().create_task(self._suppressed(org_id, event, "rate_limit"))
+        if len(waiting) == 1:
+            task = asyncio.create_task(self._send_overflow(org_id, channel["id"]))
+            self._waiting.add(task)
+            task.add_done_callback(self._waiting.discard)
+
+    async def _send_overflow(self, org_id: int, channel_id: int) -> None:
+        await asyncio.sleep(self.noise.seconds_until_room(channel_id))
+        titles = self.noise.overflow.pop(channel_id, [])
+        channel = await self.db.one("SELECT * FROM channels WHERE id = ? AND org_id = ? AND enabled = 1", (channel_id, org_id))
+        if not titles or not channel:
+            return
+        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        event = {"severity": "warning", "title": f"{len(titles)} more problems started in the last hour", "ts": utcnow(), "fingerprint": f"digest:{channel_id}"}
+        summary = "This channel reached its hourly limit, so these were held back:\n" + "\n".join(f"- {title}" for title in titles[:30])
+        await self.deliver(channel, org_id, event["fingerprint"], _message(org["name"], event, summary, [], f"{self.config.public_url}/#/overview"))
 
     async def _hold(self, org_id: int, conversation_id: int, event: dict[str, Any], detail: dict[str, Any], message: dict[str, Any], channel_ids: list[int]) -> None:
         await self.db.execute(

@@ -73,6 +73,10 @@ class Config:
     allow_loopback_targets: bool = field(default_factory=lambda: _bool("RCC_ALLOW_LOOPBACK_TARGETS"))
     target_allowlist: tuple[str, ...] = field(default_factory=lambda: tuple(item.strip().lower() for item in _env("RCC_TARGET_ALLOWLIST").split(",") if item.strip()))
     alert_email_wait_s: float = field(default_factory=lambda: float(_env("RCC_ALERT_EMAIL_WAIT_SECONDS", "600")))
+    # Noise control defaults. Each organization can change them in Connections, Alerts.
+    alert_grace_s: float = field(default_factory=lambda: float(_env("RCC_ALERT_GRACE_SECONDS", "60")))
+    alert_warning_grace_s: float = field(default_factory=lambda: float(_env("RCC_ALERT_WARNING_GRACE_SECONDS", "300")))
+    alert_group_window_s: float = field(default_factory=lambda: float(_env("RCC_ALERT_GROUP_SECONDS", "90")))
     in_container: bool = field(default_factory=lambda: Path("/.dockerenv").exists())
 
     @property
