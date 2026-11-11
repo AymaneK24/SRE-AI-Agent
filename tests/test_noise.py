@@ -9,6 +9,9 @@ class _Engine:
     def __init__(self):
         self._active = {}
 
+    def still_active(self, fingerprint):
+        return fingerprint in self._active
+
 
 class _Engines:
     def __init__(self, engine):

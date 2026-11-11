@@ -7,6 +7,10 @@ The changes in this version, with links to the full description.
 - **Noise control.** Every problem passes five checks before anyone is messaged: false-alarm verdicts, flapping, a grace period, grouping, and an hourly limit per channel. Blips that fix themselves are never sent, and problems that start together arrive as one message, with what they share: a node, a namespace, a cluster, a dependency they all mention, or a change just before. Held-back messages are counted per reason. [Noise control](/docs/alerts-and-webhooks#noise-control-fewer-better-messages)
 - **One problem, one alert.** A Prometheus alert about a workload the console already reports joins that problem instead of sending a second message. [One problem, one alert](/docs/alerts-and-webhooks#one-problem-one-alert)
 - **Problems found at startup are sent.** A deployment that is already broken when the console starts, or when its cluster is connected, now sends its alert. Problems already announced before a restart aren't sent again.
+- **Alerts survive a restart.** A problem whose message was still waiting out its grace period when the console stopped is sent after it starts again. Before, it was never sent.
+- **A source that stops answering is announced.** With a grace period set, "stopped answering" was wrongly held back as a blip. It is now sent while the source is still down.
+- **Alertmanager webhooks without a metric source work with a grace period.** Their alerts are sent at once, because Alertmanager already waited before calling, and a critical one starts a single automatic investigation.
+- **Monitoring continues after a failed check.** One failed poll, such as during a database restart, no longer stops the console watching that company. The page shows that the last check failed until the next one succeeds.
 - **False alarms stay quiet.** An issue marked *false alarm* or *expected* in a project is no longer messaged. [False alarms](/docs/projects-and-reports#false-alarms)
 
 ## Several connections of each kind

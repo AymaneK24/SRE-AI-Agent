@@ -129,10 +129,11 @@ class Notifier:
             reason = await self._gate(org_id, event, settings)
             if reason:
                 await self._suppressed(org_id, event, reason)
+                await self._handled([event])
                 return
             if not self.noise.join(org_id, event, detail):
                 await self._suppressed(org_id, event, "grouped")
-                return  # Another problem opened a group a moment ago; this one goes out with it.
+                return  # Another problem opened a group a moment ago; this one goes out with it, and is handled then.
             await noise.sleep(float(settings["group_window_s"]))
             items = self.noise.close(org_id)
         except Exception:  # Notification failures must not affect monitoring.
@@ -142,6 +143,16 @@ class Notifier:
             await self._send_one(org_id, event, detail, settings)
         else:
             await self._send_group(org_id, items, settings)
+        await self._handled([item for item, _ in items] or [event])
+
+    async def _handled(self, events: list[dict[str, Any]]) -> None:
+        """Records that these starts were sent or deliberately held back. Until then, a restart sends them again."""
+        ids = [int(event["id"]) for event in events if event.get("id")]
+        try:
+            for event_id in ids:
+                await self.db.execute("UPDATE events SET handled = 1 WHERE id = ?", (event_id,))
+        except Exception:  # Worst case, the message is sent once more after a restart.
+            log.exception("couldn't mark an alert as handled")
 
     async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any]) -> str | None:
         """Why this start shouldn't be sent, or None. Waits out the grace period."""
@@ -160,11 +171,15 @@ class Notifier:
                         "fingerprint": f"flapping:{event['fingerprint']}"}
                 await self._dispatch(org_id, flap, {"summary": f"It started {noise.FLAP_STARTS} times or more in the last hour. Further changes won't be sent until it has been stable for {noise.FLAP_QUIET_S // 60} minutes."}, settings=settings)
                 return "flapping"
+        # An alert pushed by Alertmanager already waited out its own "for" period there, and the console
+        # has no state of its own to check it against, so it isn't made to wait again.
+        if event["kind"] == "alertmanager_alert":
+            return None
         grace = float(settings["grace_critical_s"] if event["severity"] == "critical" else settings["grace_warning_s"])
         if grace > 0:
             await noise.sleep(grace)
             engine = await self.engines.get(org_id) if self.engines else None
-            if engine is not None and event["fingerprint"] not in engine._active:
+            if engine is not None and not engine.still_active(event["fingerprint"]):
                 return "blip"
         return None
 

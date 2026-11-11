@@ -35,26 +35,36 @@ async def _json(request: Request) -> Any:
         raise HTTPException(422, "Send the webhook body as JSON.") from error
 
 
+async def _object(request: Request) -> dict[str, Any]:
+    payload = await _json(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "Send the webhook body as a JSON object.")
+    return payload
+
+
 @router.post("/alertmanager/{token}", status_code=202)
 async def alertmanager(token: str, request: Request, ctx: Ctx) -> dict[str, int]:
     org_id = await _org_from_token(ctx, token)
     if not ctx.limiter.allow(f"hook:{org_id}", 120, 60):
         raise HTTPException(429, "Too many webhook calls.")
-    payload = await _json(request)
+    payload = await _object(request)
+    alerts = payload.get("alerts") or []
+    if not isinstance(alerts, list):
+        raise HTTPException(422, "Send the alerts as a list.")
     accepted = 0
     engine = await ctx.engines.get(org_id)
-    for alert in (payload.get("alerts") or [])[:100]:
-        if alert.get("status") != "firing":
+    for alert in alerts[:100]:
+        if not isinstance(alert, dict) or alert.get("status") != "firing":
             continue
-        labels = {str(k): str(v) for k, v in (alert.get("labels") or {}).items()}
-        annotations = alert.get("annotations") or {}
+        labels = {str(k): str(v) for k, v in alert["labels"].items()} if isinstance(alert.get("labels"), dict) else {}
+        annotations = alert["annotations"] if isinstance(alert.get("annotations"), dict) else {}
         name = labels.get("alertname", "Alert")
         severity = "critical" if labels.get("severity", "").lower() in {"critical", "page", "error"} else "warning"
         fingerprint = "alertmanager:" + str(alert.get("fingerprint") or sha256_text(json.dumps(labels, sort_keys=True)))
         detail = {"name": name, "severity": labels.get("severity", ""), "labels": labels, "summary": scrub(str(annotations.get("summary") or annotations.get("description") or ""))}
-        # When a source is connected, its own poll sends the notification, so this avoids a duplicate.
+        # When a source is connected, its own poll sends the notification and starts any automatic investigation,
+        # so this avoids a duplicate. Without one, this event goes through the same steps as any other problem.
         await engine._record_event("alertmanager_alert", severity, fingerprint, f"Alertmanager: {name}", detail, None, notify=not engine.states)
-        await ctx.notifier.on_critical(org_id, {"title": f"Alertmanager: {name}", "severity": severity, "fingerprint": fingerprint}, detail)
         accepted += 1
     return {"accepted": accepted}
 
@@ -79,7 +89,7 @@ async def changes(token: str, request: Request, ctx: Ctx) -> dict[str, bool]:
     org_id = await _org_from_token(ctx, token)
     if not ctx.limiter.allow(f"hook:{org_id}", 120, 60):
         raise HTTPException(429, "Too many webhook calls.")
-    payload = await _json(request)
+    payload = await _object(request)
     event = request.headers.get("x-github-event")
     if event == "ping":
         return {"stored": False}
