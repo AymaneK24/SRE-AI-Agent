@@ -169,18 +169,25 @@ def kube():
 
 @pytest_asyncio.fixture
 async def outage(console, kube):
+    """A company and the broken cluster. connect() adds the cluster: tests set up channels and settings first,
+    because adding a cluster starts a poll at once, which would announce the problems under the old settings."""
     client = await console.company("MapCo", "o@map.example")
     org_id = (await client.get("/api/auth/me")).json()["org_id"]
     _outage()
-    saved = await client.post("/api/integrations", json={"kind": "kubernetes", "name": "prod-eu", "config": {"url": kube}, "secrets": {"token": TOKEN}})
-    assert saved.status_code == 201, saved.text
-    engine = await console.ctx.engines.get(org_id)
-    return client, org_id, engine
+
+    async def connect():
+        saved = await client.post("/api/integrations", json={"kind": "kubernetes", "name": "prod-eu", "config": {"url": kube}, "secrets": {"token": TOKEN}})
+        assert saved.status_code == 201, saved.text
+        engine = await console.ctx.engines.get(org_id)
+        await engine.refresh_now()
+        return engine
+
+    return client, org_id, connect
 
 
 async def test_the_map_page_data_shows_the_cause_and_its_symptom(console, outage):
-    client, org_id, engine = outage
-    await engine.refresh_now()
+    client, org_id, connect = outage
+    engine = await connect()
     data = (await client.get("/api/dependencies")).json()
     nodes = {node["name"]: node for node in data["nodes"]}
     assert nodes["postgres"]["role"] == "cause" and nodes["payment"]["role"] == "symptom" and nodes["frontend"]["status"] == "ok"
@@ -205,8 +212,8 @@ async def test_the_map_page_data_shows_the_cause_and_its_symptom(console, outage
 
 async def test_the_model_can_read_the_map(console, outage):
     from app.investigation.tools import ToolRunner
-    client, org_id, engine = outage
-    await engine.refresh_now()
+    client, org_id, connect = outage
+    engine = await connect()
     runner = ToolRunner(engine, console.ctx.db, console.ctx.box, console.ctx.config)
     assert "get_dependencies" in {tool["name"] for tool in await runner.definitions()}
     ok, text = await runner.run("get_dependencies", {"name": "shop/payment"})
@@ -217,7 +224,8 @@ async def test_the_model_can_read_the_map(console, outage):
 
 async def test_viewers_do_not_see_the_map(console, outage):
     from test_security import _invite
-    client, org_id, engine = outage
+    client, org_id, connect = outage
+    await connect()
     viewer = await _invite(console, client, "v@map.example", "viewer")
     assert (await viewer.get("/api/dependencies")).status_code == 403
     context = (await viewer.get("/api/context")).json()
@@ -232,7 +240,7 @@ async def _sent(console, org_id):
 
 async def test_alerts_name_the_likely_cause_or_hold_the_symptom(console, outage, monkeypatch):
     from app import notifications
-    client, org_id, engine = outage
+    client, org_id, connect = outage
     sent_texts = []
 
     async def capture(self, channel, message):
@@ -242,7 +250,7 @@ async def test_alerts_name_the_likely_cause_or_hold_the_symptom(console, outage,
     assert (await client.post("/api/org/channels", json={"kind": "email", "name": "mail", "recipients": ["o@map.example"], "min_severity": "warning"})).status_code == 201
     # No grouping, so each problem has its own message.
     assert (await client.put("/api/org/noise", json={"group_window_s": 0})).status_code == 200
-    await engine.refresh_now()
+    await connect()
     titles = await _sent(console, org_id)
     assert len(titles) == 2
     payment = next(text for text in sent_texts if "payment is" in text.split("\n")[0] or "shop/payment " in text.split("\n")[0])
@@ -252,10 +260,10 @@ async def test_alerts_name_the_likely_cause_or_hold_the_symptom(console, outage,
 
 
 async def test_holding_symptoms_sends_only_the_cause(console, outage, monkeypatch):
-    client, org_id, engine = outage
+    client, org_id, connect = outage
     assert (await client.post("/api/org/channels", json={"kind": "email", "name": "mail", "recipients": ["o@map.example"], "min_severity": "warning"})).status_code == 201
     assert (await client.put("/api/org/noise", json={"group_window_s": 0, "hold_symptoms": True})).json()["hold_symptoms"] is True
-    await engine.refresh_now()
+    await connect()
     titles = await _sent(console, org_id)
     assert len(titles) == 1 and "postgres" in titles[0]
     held = await console.ctx.db.all("SELECT title FROM deliveries WHERE org_id = ? AND status = 'suppressed:symptom'", (org_id,))
@@ -265,7 +273,7 @@ async def test_holding_symptoms_sends_only_the_cause(console, outage, monkeypatc
 
 async def test_a_grouped_message_leads_with_the_likely_cause(console, outage, monkeypatch):
     from app import notifications
-    client, org_id, engine = outage
+    client, org_id, connect = outage
     texts = []
 
     async def capture(self, channel, message):
@@ -273,12 +281,14 @@ async def test_a_grouped_message_leads_with_the_likely_cause(console, outage, mo
 
     monkeypatch.setattr(notifications.Notifier, "_send", capture)
     assert (await client.post("/api/org/channels", json={"kind": "email", "name": "mail", "recipients": ["o@map.example"], "min_severity": "warning"})).status_code == 201
-    assert (await client.put("/api/org/noise", json={"group_window_s": 1})).status_code == 200
-    await engine.refresh_now()
-    for _ in range(100):
+    # Wide enough that both problems join the group even on a slow database.
+    assert (await client.put("/api/org/noise", json={"group_window_s": 4})).status_code == 200
+    await connect()
+    for _ in range(300):
         if texts:
             break
         await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)  # Nothing else follows the grouped message.
     assert len(texts) == 1
     message = texts[0]
     assert "postgres" in message["subject"].split(":", 1)[1].split(" and ")[0], message["subject"]
@@ -286,8 +296,8 @@ async def test_a_grouped_message_leads_with_the_likely_cause(console, outage, mo
 
 
 async def test_calls_from_a_newly_added_metric_source_are_read_on_the_next_poll(console, outage):
-    client, org_id, engine = outage
-    await engine.refresh_now()
-    assert engine._observed_at > 0, "the first poll read observed calls, with no metric source yet"
+    client, org_id, connect = outage
+    engine = await connect()
+    assert engine._observed_at is not None, "the first poll read observed calls, even right after the machine started"
     await engine.reload_sources()  # What adding or changing a source does.
-    assert engine._observed_at == 0.0
+    assert engine._observed_at is None

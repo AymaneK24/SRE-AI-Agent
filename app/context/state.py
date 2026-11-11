@@ -39,6 +39,9 @@ ANOMALY_Z = 4.0
 ANOMALY_SUSTAIN_POLLS = 2
 EVENT_MEMORY = 50
 # A polling loop that hasn't come round for this long after it was due is stuck, not slow.
+# The start value of a "last done" time, so the first check always runs. Zero would not: the monotonic
+# clock counts from boot, so on a server started a minute ago, zero looks like "a minute ago".
+NEVER = float("-inf")
 STALLED_AFTER_S = 300
 OBSERVED_EVERY_S = 300
 # The console says on the alert channels that it can't complete its checks after this many failed polls in a row.
@@ -58,16 +61,16 @@ class SourceState:
         self.source = source
         self.poll_seconds = poll_seconds
         self.metric_names: set[str] = set()
-        self.metrics_at = 0.0
+        self.metrics_at = NEVER
         self.baselines: dict[str, dict[str, dict[str, float]]] = {}
-        self.baselines_at = 0.0
+        self.baselines_at = NEVER
         self.info: dict[str, Any] = {}
         self.failures = 0
         self.last_ok_iso: str | None = None
         self.last_ok_mono: float | None = None
         self.error: str | None = None
         self.last: dict[str, Any] | None = None
-        self.changes_at = 0.0
+        self.changes_at = NEVER
 
 
 class EngineState:
@@ -99,9 +102,9 @@ class EngineState:
         self.topology_current: dict[str, dict[str, Any]] = {}
         self.topology_built_at: str | None = None
         self._observed: dict[str, list[dict[str, Any]]] = {}
-        self._observed_at = 0.0
+        self._observed_at: float | None = None  # None: never read, so the next poll reads them.
         self._crash_logs: dict[str, dict[str, Any]] = {}
-        self._integrations_at = 0.0
+        self._integrations_at = NEVER
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
         self._poll_lock = asyncio.Lock()
@@ -110,7 +113,7 @@ class EngineState:
         self._state_known = False
         self._targets_up: set[str] = set()
         self._targets_unknown: set[str] = set()
-        self._snapshot_at = 0.0
+        self._snapshot_at = NEVER
         self._material_hash = ""
         self._seeded: set[int] = set()
         self._seed_deadlines: dict[int, float] = {}

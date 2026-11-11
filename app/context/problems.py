@@ -153,16 +153,21 @@ class ProblemTracking(EngineState):
         # One problem, one notification: a problem already announced under another name isn't announced again.
         announced_alerts = {key for key, value in current.items() if value.get("merged_into") and key in self._active and not self._active[key].get("silent")}
         covered = {current[key]["merged_into"] for key in announced_alerts}
+        # Every new problem is marked active before any is announced, so the alert for one can already see
+        # the others, such as a symptom whose likely cause started in the same poll.
+        started = []
         for fingerprint, item in current.items():
             self._k8s_missing_since.pop(fingerprint, None)
             if fingerprint not in self._active:
                 silent = bool(item.get("merged_into")) or fingerprint in covered
                 self._active[fingerprint] = {"since": utcnow(), "clear": item["clear"], "kind": item["kind"], "source_id": item["detail"].get("source_id"), "silent": silent}
-                title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
-                # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
-                detail = {key: value for key, value in item["detail"].items() if key != "logs"}
-                await self.record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
-                                         notify=not silent and not (first_poll and fingerprint in open_before))
+                started.append((fingerprint, item, silent))
+        for fingerprint, item, silent in started:
+            title = f"Already active when the console connected. {item['title']}" if first_poll else item["title"]
+            # Log lines stay in the live context only. Events keep the diagnosis, which is short and computed.
+            detail = {key: value for key, value in item["detail"].items() if key != "logs"}
+            await self.record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
+                                     notify=not silent and not (first_poll and fingerprint in open_before))
         self._state_known = True
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.

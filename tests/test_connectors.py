@@ -252,7 +252,7 @@ async def test_integrations_join_context_and_tools(console, prom_server, kube_ur
     made = await client.post("/api/integrations", json={"kind": "loki", "name": "l", "config": {"url": kube_url, "selector": '{job="api"}'}, "secrets": {"token": "kube"}})
     assert made.status_code == 201 and "kube" not in json.dumps(made.json().get("config"))
     engine = await console.ctx.engines.get(org_id)
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     text = render_context(engine.context)
     assert "api-1" in text and "CrashLoopBackOff" in text and "job=api: 17 lines" in text

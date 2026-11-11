@@ -200,18 +200,18 @@ async def test_cluster_problems_start_and_clear_as_events(console, kube_only, mo
     monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
     client, org_id, engine = kube_only
     FakeKube.state.heal()
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     assert engine.context["problems"] == []
     FakeKube.state.down = True
     FakeKube.state.crash()
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     FakeKube.state.down = False
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     FakeKube.state.down = True
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     assert engine.context["health"]["status"] == "unreachable"
     kinds = [row["kind"] for row in await console.ctx.db.all("SELECT kind FROM events WHERE org_id = ? ORDER BY id", (org_id,))]
@@ -303,7 +303,7 @@ async def test_crash_logs_and_diagnosis_reach_the_context_once_per_restart(conso
     text = render_context(engine.context)
     assert "Diagnosis (computed from cluster state, not by a model)" in text and "<untrusted_logs>" in text
     assert text.index("connection refused postgres:5432") < text.index("KUBERNETES DETAIL")
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     assert FakeKube.state.log_requests == ["shop/payment-5b5568b987-h5zzq:previous"], "logs are read again only after a restart"
     detail = (await console.ctx.db.one("SELECT detail FROM events WHERE org_id = ?", (org_id,)))["detail"]
@@ -382,12 +382,12 @@ async def test_a_problem_must_stay_gone_before_it_clears(console, kube_only, mon
 
     client, org_id, engine = kube_only
     FakeKube.state.heal()
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     kinds = [row["kind"] for row in await console.ctx.db.all("SELECT kind FROM events WHERE org_id = ?", (org_id,))]
     assert kinds == ["k8s_started"], "a few healthy seconds don't resolve it"
     monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
-    engine._integrations_at = 0
+    engine._integrations_at = float("-inf")  # Due now.
     await engine.refresh_now()
     kinds = [row["kind"] for row in await console.ctx.db.all("SELECT kind FROM events WHERE org_id = ? ORDER BY id", (org_id,))]
     assert kinds == ["k8s_started", "k8s_cleared"]
