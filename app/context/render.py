@@ -50,12 +50,6 @@ def _alert_lines(alerts: list[dict[str, Any]]) -> list[str]:
 def _problem_lines(index: int, problem: dict[str, Any]) -> list[str]:
     detail = problem.get("detail") or {}
     lines = [f"{index}. [{problem['severity']}] {problem['title']}"]
-    # From the service dependency map: a lead to check, not a conclusion.
-    cause = detail.get("caused_by") or {}
-    if cause.get("title"):
-        lines.append(f"   Dependency map: likely a symptom of \"{cause['title']}\" ({' -> '.join(cause.get('path') or [])}). Check that problem first.")
-    elif detail.get("affects"):
-        lines.append(f"   Dependency map: also failing and depend on it: {', '.join(detail['affects'][:8])}. This is a likely root cause.")
     if problem["kind"] == "k8s":
         facts = detail.get("facts") or {}
         bits = []

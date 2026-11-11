@@ -20,7 +20,7 @@ def iso(minutes_ago: float = 0) -> str:
 
 def pod(namespace: str, name: str, deployment: str | None = None, *, waiting: str | None = None, last_reason: str | None = None,
         exit_code: int | None = None, restarts: int = 0, phase: str = "Running", ready: bool = True, image: str = "app:1",
-        unschedulable: str | None = None, limits: dict | None = None, created_minutes_ago: float = 30, env: dict | None = None) -> dict:
+        unschedulable: str | None = None, limits: dict | None = None, created_minutes_ago: float = 30) -> dict:
     labels, owners = {}, []
     if deployment:
         labels["pod-template-hash"] = "5b5568b987"
@@ -33,8 +33,7 @@ def pod(namespace: str, name: str, deployment: str | None = None, *, waiting: st
         conditions.append({"type": "PodScheduled", "status": "False", "message": unschedulable})
     return {
         "metadata": {"namespace": namespace, "name": name, "labels": labels, "ownerReferences": owners, "creationTimestamp": iso(created_minutes_ago)},
-        "spec": {"nodeName": "" if unschedulable else "node-1", "containers": [{"name": "app", "image": image, "resources": {"limits": limits or {}},
-                                                                          "env": [{"name": key, "value": value} for key, value in (env or {}).items()]}]},
+        "spec": {"nodeName": "" if unschedulable else "node-1", "containers": [{"name": "app", "image": image, "resources": {"limits": limits or {}}}]},
         "status": {"phase": phase, "conditions": conditions,
                    "containerStatuses": [] if unschedulable else [{"name": "app", "ready": ready, "restartCount": restarts, "image": image, "state": state, "lastState": last}]},
     }

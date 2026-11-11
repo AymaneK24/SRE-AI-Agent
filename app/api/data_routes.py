@@ -502,12 +502,6 @@ async def get_context(user: User, ctx: Ctx) -> dict[str, Any]:
     return context_for(user, (await ctx.engines.get(user.org_id)).public_context())
 
 
-@router.get("/dependencies")
-async def get_dependencies(user: Engineer, ctx: Ctx) -> dict[str, Any]:
-    """The service dependency map, with each workload's problems and which one is the likely cause."""
-    return (await ctx.engines.get(user.org_id)).dependency_map()
-
-
 @router.post("/context/refresh")
 async def refresh_context(user: Engineer, ctx: Ctx) -> dict[str, Any]:
     return context_for(user, await (await ctx.engines.get(user.org_id)).refresh_now())

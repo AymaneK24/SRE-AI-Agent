@@ -2,7 +2,6 @@
 import { api, can, clear, closeDialog, connectLive, disconnectLive, h, live, modelName, refreshAi, setAuthHandler } from './core.js';
 import { mount as mountAccount } from './account.js';
 import { mount as mountConnections } from './connections.js';
-import { mount as mountDependencies } from './dependencies.js';
 import { mount as mountInvestigate } from './investigate.js';
 import { mount as mountLogs } from './logs.js';
 import { mount as mountOrganization } from './organization.js';
@@ -18,7 +17,6 @@ const APP_ROUTES = {
   overview: ['viewer', mountOverview],
   projects: ['viewer', mountProjects],
   investigate: ['viewer', (container, params) => (can('engineer') ? mountInvestigate(container, params) : mountResults(container, params))],
-  dependencies: ['engineer', mountDependencies],
   workflows: ['viewer', mountWorkflows],
   logs: ['engineer', mountLogs],
   connections: ['admin', mountConnections],
@@ -26,7 +24,7 @@ const APP_ROUTES = {
   account: ['viewer', mountAccount],
   'change-password': ['viewer', changePassword],
 };
-const NAV = [['overview', 'Overview'], ['projects', 'Projects'], ['investigate', 'Investigate'], ['dependencies', 'Dependencies'], ['workflows', 'Workflows'], ['logs', 'Logs'], ['connections', 'Connections'], ['organization', 'Organization']];
+const NAV = [['overview', 'Overview'], ['projects', 'Projects'], ['investigate', 'Investigate'], ['workflows', 'Workflows'], ['logs', 'Logs'], ['connections', 'Connections'], ['organization', 'Organization']];
 const PUBLIC_ROUTES = { '': landing, signin, signup, verify, forgot, reset, accept, legal };
 const view = document.getElementById('view');
 let unmount = null;
@@ -89,7 +87,7 @@ function route() {
   chip.hidden = !me || me.must_change_password || !can('engineer');
   if (can('admin')) chip.setAttribute('href', '#/connections');
   else chip.removeAttribute('href');
-  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', dependencies: 'Dependencies', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Create an account', legal: 'Policies' };
+  const titles = { overview: 'Overview', account: 'Your account', investigate: can('engineer') ? 'Investigate' : 'Investigation results', workflows: 'Workflows', logs: 'Logs', connections: 'Connections', organization: 'Organization', projects: 'Projects', signin: 'Sign in', signup: 'Create an account', legal: 'Policies' };
   document.title = titles[name] ? `${titles[name]}, Root Cause Console` : 'Root Cause Console';
   const render = APP_ROUTES[name]?.[1] || PUBLIC_ROUTES[name];
   unmount = render(view, params);

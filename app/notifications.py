@@ -37,20 +37,6 @@ MAX_QUEUED_BYTES = 4_000_000
 DELIVERIES = Counter("rcc_deliveries_total", "Alert messages by outcome", ["status"])
 
 
-
-def _dependency_lines(detail: dict[str, Any]) -> str:
-    """What the dependency map says about this problem, in one or two sentences."""
-    cause = detail.get("caused_by") or {}
-    if cause.get("title"):
-        chain = " → ".join(cause.get("path") or [])
-        return f"Likely caused by: {cause['title']}" + (f" (it depends on it: {chain})." if chain else ".")
-    affected = detail.get("affects") or detail.get("impact") or []
-    if affected:
-        more = f" and {len(affected) - 5} more" if len(affected) > 5 else ""
-        verb = "Also failing because of it" if detail.get("affects") else "Depends on it"
-        return f"{verb}: {', '.join(affected[:5])}{more}."
-    return ""
-
 class DeliveryError(Exception):
     """A channel didn't take a message. `permanent` means trying again can't help, such as a deleted webhook."""
 
@@ -225,7 +211,7 @@ class Notifier:
                 await self._dispatch(org_id, event, detail)
                 return
             settings = await noise.load(self.db, org_id, self.config)
-            reason = await self._gate(org_id, event, settings, detail)
+            reason = await self._gate(org_id, event, settings)
             if reason:
                 await self._suppressed(org_id, event, reason)
                 await self._handled([event])
@@ -253,7 +239,7 @@ class Notifier:
         except Exception:  # Worst case, the message is sent once more after a restart.
             log.exception("couldn't mark an alert as handled")
 
-    async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any], detail: dict[str, Any] | None = None) -> str | None:
+    async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any]) -> str | None:
         """Why this start shouldn't be sent, or None. Waits out the grace period."""
         if settings["respect_verdicts"]:
             title = event["title"].removeprefix("Already active when the console connected. ")
@@ -280,13 +266,6 @@ class Notifier:
             engine = await self.engines.get(org_id) if self.engines else None
             if engine is not None and not engine.still_active(event["fingerprint"]):
                 return "blip"
-        # A problem the dependency map explains by another one that is still going on, when the team chose to
-        # hear only about the cause. Its message names what it affects.
-        cause = ((detail or {}).get("caused_by") or {}).get("fingerprint")
-        if settings.get("hold_symptoms") and cause:
-            engine = await self.engines.get(org_id) if self.engines else None
-            if engine is not None and engine.still_active(cause):
-                return "symptom"
         return None
 
     async def _suppressed(self, org_id: int, event: dict[str, Any], reason: str) -> None:
@@ -311,26 +290,13 @@ class Notifier:
 
     async def _send_group(self, org_id: int, items: list[tuple[dict[str, Any], dict[str, Any]]], settings: dict[str, Any]) -> None:
         """Problems that started together: one message, and one automatic investigation that looks at all of them."""
-        # The likely cause leads, then the rest by severity. A problem caused by another in this group is a symptom.
-        members = {item["fingerprint"] for item, _ in items}
-
-        def symptom_of(detail: dict[str, Any]) -> dict[str, Any] | None:
-            cause = detail.get("caused_by") or {}
-            return cause if cause.get("fingerprint") in members else None
-
-        items.sort(key=lambda pair: (symptom_of(pair[1]) is not None, -SEVERITY_RANK.get(pair[0]["severity"], 0)))
+        items.sort(key=lambda pair: -SEVERITY_RANK.get(pair[0]["severity"], 0))
         worst = items[0][0]
         changes = noise.changes_since(await self.db.all("SELECT ts, title FROM change_events WHERE org_id = ? ORDER BY ts DESC LIMIT 20", (org_id,)))
         hints = noise.common_causes(items, changes)
         prefix = "Already active when the console connected. "
         at_connect = all(item["title"].startswith(prefix) for item, _ in items)
-        lines = [f"- {item['title'].removeprefix(prefix)}" + (f" (likely because of {str((symptom_of(detail) or {}).get('title', '')).removeprefix(prefix)})" if symptom_of(detail) else "")
-                 for item, detail in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
-        symptoms = [detail for _, detail in items if symptom_of(detail)]
-        if symptoms:
-            root = symptom_of(symptoms[0]) or {}
-            hints = [f"Likely cause: {str(root.get('title', '')).removeprefix(prefix)}. {len(symptoms)} of the others depend on it, "
-                     "so their problems probably follow from it.", *hints]
+        lines = [f"- {item['title'].removeprefix(prefix)}" for item, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
         if at_connect:
             hints = ["They were already running when the console connected, so their start time is unknown.", *hints]
         summary = "\n".join(lines + ([""] + hints if hints else []))
@@ -363,8 +329,6 @@ class Notifier:
         signals = [str(detail["signal_id"])] if detail.get("signal_id") else []
         workflows = [] if cleared else await workflows_for(self.db, org_id, alert_names=names, signal_ids=signals, text=event["title"])
         summary = str(detail.get("summary") or detail.get("error") or "")[:500]
-        if not cleared and not detail.get("group"):
-            summary = (_dependency_lines(detail) + "\n" + summary).strip() if _dependency_lines(detail) else summary
         message = _message(org["name"], event, summary, workflows, f"{self.config.public_url}/#/overview")
         held_ids: list[int] = []
         waiting = None
