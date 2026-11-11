@@ -67,6 +67,27 @@ The panel also shows the last 7 days: problems started, messages sent, and how m
 
 Server-wide defaults: `RCC_ALERT_GRACE_SECONDS`, `RCC_ALERT_WARNING_GRACE_SECONDS`, `RCC_ALERT_GROUP_SECONDS`.
 
+## Heartbeat: know when the console itself stops
+
+A monitoring tool that stops is silent, and silence looks like "all is well". The console can't message you about its own death: whatever stopped it, such as a lost database or a dead server, stops its messages too. So an outside service has to notice.
+
+With a **heartbeat**, the console calls an address of your choice every few minutes while it is watching. A dead man's switch service alerts you when the calls stop. Healthchecks.io, Better Stack, Cronitor and Uptime Kuma (push monitor) all work this way, and so does an endpoint of your own.
+
+1. Create a check in that service. Set its period to the console's interval (5 minutes by default) and its grace time to at least twice that.
+2. In **Connections > Alerts > Heartbeat**, paste the check's address, tick **Send a heartbeat while the console is watching**, and save. **Send a test** calls the address once.
+
+| The console | Heartbeat |
+|---|---|
+| Is watching, everything fine or not | Sent |
+| Is watching, but a source or cluster doesn't answer | Sent. The console is working, and reports that on your alert channels |
+| Can't complete its own checks, for example its database is unavailable | Held back |
+| Polling loop stuck or ended | Held back |
+| Stopped, or its server is down | Nothing is sent |
+
+The address is treated as a secret: it is stored encrypted and never shown again, only its host name. The call is a plain `GET` with no data about your systems.
+
+The console also sends **"The console can't complete its checks"** to your alert channels after three failed checks in a row, and a recovery message when they work again. Don't rely on that alone: when its database is down, it often can't send it. The heartbeat covers that case.
+
 ## Incoming webhooks
 
 Two addresses let other tools push to the console:

@@ -22,7 +22,7 @@ from .integrations import IntegrationWatch
 from .polling import SourcePolling
 from .problems import ProblemTracking
 from .signals import COVERAGE_CHECKS
-from .state import (INTEGRATION_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
+from .state import (BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, INTEGRATION_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
                     SourceState, log)
 from .summary import headline_for, material_hash, ranked_problems, summarize_alerts, summarize_rules
 
@@ -143,6 +143,9 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
                 except Exception as error:  # One failed poll, such as a database restart, must not end monitoring.
                     log.exception("context poll failed for organization %s", self.org_id)
                     self._poll_failed(error)
+                    await self._say_if_blind(error)
+                else:
+                    await self._say_if_seeing_again()
                 if self.states:
                     delay = float(min(min(state.poll_seconds for state in self.states.values()), NO_SOURCE_POLL_S if self.integration_kinds else 3600))
             else:
@@ -163,10 +166,37 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
     def _poll_failed(self, error: Exception) -> None:
         """Keeps the last picture, marked as out of date, and tells open pages. The next poll tries again."""
         self.poll_failures += 1
+        self.failed_polls_in_a_row += 1
         POLL_FAILURES.inc()
         health = {**self.context.get("health", {}), "error": scrub(f"The console couldn't finish its last check ({type(error).__name__}). It will try again.")}
         self.context = {**self.context, "health": health, "stale": True}
         self.broker.publish({"type": "context", "data": self.public_context()})
+
+    async def _say_if_blind(self, error: Exception) -> None:
+        """After several failed polls in a row, the alert channels hear that the console can't complete its checks.
+
+        This often can't be delivered, because what stops the polls, usually the database, also stops the message.
+        The heartbeat covers that case from outside.
+        """
+        if self.failed_polls_in_a_row != BLIND_AFTER_POLLS or self._blind_announced:
+            return
+        try:
+            await self.record_event("polling_started", "critical", CONSOLE_FINGERPRINT, "The console can't complete its checks",
+                                    {"summary": f"{BLIND_AFTER_POLLS} checks in a row ended with an error ({type(error).__name__}), so problems in your systems "
+                                                "may go unnoticed until this clears. Look at the console's log and its database."})
+            self._blind_announced = True
+        except Exception:
+            log.exception("couldn't record that polling is failing")
+
+    async def _say_if_seeing_again(self) -> None:
+        self.failed_polls_in_a_row = 0
+        if not self._blind_announced:
+            return
+        self._blind_announced = False
+        try:
+            await self.record_event("polling_cleared", "info", CONSOLE_FINGERPRINT, "The console completes its checks again", {})
+        except Exception:
+            log.exception("couldn't record that polling works again")
 
     def public_context(self) -> dict[str, Any]:
         context = dict(self.context)

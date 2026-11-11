@@ -444,3 +444,110 @@ async def test_a_record_removed_during_a_request_gives_a_clear_answer_not_a_serv
     response = await client.get("/api/org")
     console.ctx.db.get = real
     assert me["org_id"] and response.status_code == 404 and "no longer exists" in response.json()["detail"]
+
+
+# Heartbeat ------------------------------------------------------------------
+class Beats(BaseHTTPRequestHandler):
+    """The outside service that expects a call every few minutes."""
+    calls: list = []
+    status = 200
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        Beats.calls.append(self.path)
+        self.send_response(Beats.status)
+        self.end_headers()
+
+
+@pytest.fixture
+def beat_server():
+    Beats.calls, Beats.status = [], 200
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Beats)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/ping/secret-check-id"
+    server.shutdown()
+
+
+async def test_the_heartbeat_is_sent_while_watching_and_held_back_when_checks_fail(console, prom_server, beat_server):
+    client, org_id, engine = await _company_with_source(console, prom_server)
+    heartbeat = console.ctx.heartbeat
+    assert (await client.get("/api/org/heartbeat")).json() == {"enabled": False, "every_minutes": 5, "url_set": False, "url_host": "", "last_status": "never",
+                                                                "last_at": None, "last_ok_at": None, "last_error": ""}
+    assert (await client.put("/api/org/heartbeat", json={"enabled": True})).status_code == 422, "on needs an address"
+    assert (await client.put("/api/org/heartbeat", json={"enabled": True, "url": "ftp://nope"})).status_code == 422
+    saved = await client.put("/api/org/heartbeat", json={"enabled": True, "url": beat_server, "every_minutes": 2})
+    assert saved.status_code == 200 and saved.json()["url_set"] is True and saved.json()["url_host"] == "127.0.0.1"
+    assert "secret-check-id" not in saved.text, "the address is a secret and is never sent back"
+    stored = await console.ctx.db.get("SELECT value FROM settings WHERE org_id = ? AND key = 'heartbeat'", (org_id,))
+    assert "secret-check-id" not in stored["value"], "and it is stored encrypted"
+    # Watching: one heartbeat now, and no second one before its turn.
+    assert await heartbeat.run_due() == 1 and Beats.calls == ["/ping/secret-check-id"]
+    assert await heartbeat.run_due() == 0 and len(Beats.calls) == 1
+    state = (await client.get("/api/org/heartbeat")).json()
+    assert state["last_status"] == "ok" and state["last_ok_at"]
+    # Sources that don't answer are the customer's outage. The console is working, so the heartbeat continues.
+    prom_server.shutdown()
+    prom_server.server_close()
+    await engine.refresh_now()
+    heartbeat._last.clear()
+    assert await heartbeat.run_due() == 1 and len(Beats.calls) == 2
+    # The console can't complete its own checks: no heartbeat, so the outside service raises the alarm.
+    engine.failed_polls_in_a_row = 1
+    heartbeat._last.clear()
+    assert await heartbeat.run_due() == 1 and len(Beats.calls) == 2
+    state = (await client.get("/api/org/heartbeat")).json()
+    assert state["last_status"] == "held" and "couldn't be completed" in state["last_error"] and state["last_ok_at"]
+    # A test is sent either way, so the address can be checked.
+    assert (await client.post("/api/org/heartbeat/test")).json() == {"status": "ok", "error": ""}
+    Beats.status = 500
+    assert (await client.post("/api/org/heartbeat/test")).json()["status"] == "failed"
+    # Keeping the saved address while changing something else, and turning it off.
+    off = await client.put("/api/org/heartbeat", json={"enabled": False, "every_minutes": 10})
+    assert off.json()["url_set"] is True and off.json()["every_minutes"] == 10
+    heartbeat._last.clear()
+    assert await heartbeat.run_due() == 0
+    audit = await console.ctx.db.all("SELECT detail FROM audit_log WHERE org_id = ? AND action = 'heartbeat_changed'", (org_id,))
+    assert len(audit) == 2 and all("secret-check-id" not in row["detail"] for row in audit)
+
+
+async def test_only_admins_set_the_heartbeat(console):
+    from test_security import _invite
+    admin = await console.admin()
+    viewer = await _invite(console, admin, "v@test.example", "viewer")
+    assert (await viewer.get("/api/org/heartbeat")).status_code == 403
+    assert (await viewer.put("/api/org/heartbeat", json={"enabled": False})).status_code == 403
+    assert (await viewer.post("/api/org/heartbeat/test")).status_code == 403
+    assert (await console.client().get("/api/org/heartbeat")).status_code == 401
+
+
+async def test_the_console_says_on_its_channels_when_it_cannot_complete_its_checks(console, prom_server, flaky_hook):
+    from app.context.state import BLIND_AFTER_POLLS
+    client, org_id, engine = await _company_with_source(console, prom_server)
+    assert (await client.post("/api/org/channels", json={"kind": "slack", "name": "ops", "url": flaky_hook, "min_severity": "warning"})).status_code == 201
+    real = engine.poll
+    broken = True
+
+    async def poll():
+        if broken:
+            raise RuntimeError("something inside the console broke")
+        return await real()
+
+    engine.poll = poll
+    for _ in range(BLIND_AFTER_POLLS):
+        engine._wake.set()
+        await asyncio.sleep(0.15)
+    assert engine.failed_polls_in_a_row >= BLIND_AFTER_POLLS and engine.still_active("console:polling")
+    await _wait_for(lambda: asyncio.sleep(0, len(FlakyHook.received) == 1))
+    assert "[CRITICAL] The console can't complete its checks" in FlakyHook.received[0]["text"] and "may go unnoticed" in FlakyHook.received[0]["text"]
+    # More failures don't repeat it.
+    engine._wake.set()
+    await asyncio.sleep(0.2)
+    assert len(FlakyHook.received) == 1
+    # It works again: the same channel hears that too.
+    broken = False
+    engine._wake.set()
+    await _wait_for(lambda: asyncio.sleep(0, len(FlakyHook.received) == 2))
+    assert "[RESOLVED] The console completes its checks again" in FlakyHook.received[1]["text"]
+    assert engine.failed_polls_in_a_row == 0 and not engine.still_active("console:polling")

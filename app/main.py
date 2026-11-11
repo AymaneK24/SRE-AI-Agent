@@ -26,6 +26,7 @@ from .config import Config
 from .context.manager import EngineManager
 from .costs import budget_problem
 from .db import Database, RowMissing, utcnow
+from .heartbeat import Heartbeat
 from .investigation.runner import InvestigationManager, Run
 from .llm.base import ProviderError
 from .mailer import Mailer
@@ -125,7 +126,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     engines = EngineManager(db, box, config, notifier.handle_event)
     investigations = InvestigationManager(db, engines, box, config)
     ctx = AppContext(config=config, db=db, box=box, engines=engines, investigations=investigations, mailer=mailer,
-                     notifier=notifier, limiter=RateLimiter())
+                     notifier=notifier, limiter=RateLimiter(), heartbeat=Heartbeat(db, box, config, engines))
     auto = AutoInvestigator(ctx)
     notifier.on_critical = auto.handle
     investigations.on_finished = auto.finished
@@ -143,7 +144,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         await engines.start_active()
         background = [asyncio.create_task(maintenance_loop(db), name="maintenance"),
                       asyncio.create_task(notifier.retry_loop(), name="delivery-retries"),
-                      asyncio.create_task(engines.watchdog(), name="polling-watchdog")]
+                      asyncio.create_task(engines.watchdog(), name="polling-watchdog"),
+                      asyncio.create_task(ctx.heartbeat.loop(), name="heartbeat")]
         yield
         for task in background:
             task.cancel()

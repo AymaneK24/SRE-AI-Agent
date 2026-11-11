@@ -71,6 +71,13 @@ class NoiseBody(BaseModel):
     respect_verdicts: bool | None = None
 
 
+class HeartbeatBody(BaseModel):
+    enabled: bool
+    # Left out or empty keeps the saved address, which is never sent back to the browser.
+    url: str | None = Field(default=None, max_length=2000)
+    every_minutes: int = Field(default=5, ge=1, le=1440)
+
+
 class AutoInvestigateBody(BaseModel):
     enabled: bool = False
     per_hour: int = Field(default=5, ge=1, le=60)
@@ -365,6 +372,31 @@ async def put_noise(body: NoiseBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
     await ctx.db.set_setting(user.org_id, "noise", settings)
     await ctx.db.audit(user.org_id, "noise_control_changed", "organization", changes, actor=user.actor)
     return await get_noise(user, ctx)
+
+
+# Heartbeat: the console tells an outside service that it is still watching ----
+@router.get("/org/heartbeat")
+async def get_heartbeat(user: Admin, ctx: Ctx) -> dict[str, Any]:
+    return await ctx.heartbeat.public(user.org_id)
+
+
+@router.put("/org/heartbeat")
+async def put_heartbeat(body: HeartbeatBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
+    try:
+        await ctx.heartbeat.save(user.org_id, body.enabled, (body.url or "").strip() or None, body.every_minutes)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    saved = await ctx.heartbeat.public(user.org_id)
+    await ctx.db.audit(user.org_id, "heartbeat_changed", "organization", {"enabled": saved["enabled"], "every_minutes": saved["every_minutes"], "host": saved["url_host"]}, actor=user.actor)
+    return saved
+
+
+@router.post("/org/heartbeat/test")
+async def test_heartbeat(user: Admin, ctx: Ctx) -> dict[str, Any]:
+    if not ctx.limiter.allow(f"heartbeat-test:{user.org_id}", 10, 60):
+        raise HTTPException(429, "Too many tests. Try again in a minute.")
+    state = await ctx.heartbeat.beat(user.org_id, test=True)
+    return {"status": state["status"], "error": state["error"]}
 
 
 # Workflows ------------------------------------------------------------------

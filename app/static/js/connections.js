@@ -1,5 +1,5 @@
 // Connections: metric sources, logs and Kubernetes, alert channels, webhooks, and AI models.
-import { api, can, clear, confirmDialog, h, live, refreshAi, statusBadge, toast } from './core.js';
+import { api, can, clear, confirmDialog, h, live, refreshAi, statusBadge, timeAgo, toast } from './core.js';
 
 function field(label, control, hint, span = 'span-2', extra = '') {
   return h('label', { class: `field ${span} ${extra}` }, h('span', {}, label), control, hint ? h('small', {}, hint) : null);
@@ -21,11 +21,58 @@ export function mount(container) {
   const formHost = h('div');
   const listHost = h('div');
   const integrationsHost = h('div');
+  // Heartbeat ------------------------------------------------------------------
+  // A console that stops is silent. An outside service notices when the heartbeat stops.
+  async function renderHeartbeat() {
+    const settings = await api('/api/org/heartbeat');
+    if (disposed) return;
+    const enabled = h('input', { type: 'checkbox', checked: settings.enabled });
+    const url = h('input', { class: 'input', type: 'url', autocomplete: 'off', spellcheck: 'false',
+      placeholder: settings.url_set ? `Saved (${settings.url_host}). Enter a new address to replace it.` : 'https://hc-ping.com/your-check-id' });
+    const every = h('input', { class: 'input', type: 'number', min: 1, max: 1440, step: 1, value: settings.every_minutes });
+    const result = h('div');
+    const states = {
+      ok: ['badge ok', `Last heartbeat sent ${timeAgo(settings.last_ok_at)}`],
+      failed: ['badge critical', `The address didn’t accept the last heartbeat: ${settings.last_error}`],
+      held: ['badge warning', `Held back, so the outside service raises the alarm: ${settings.last_error}`],
+      never: ['badge neutral', 'No heartbeat sent yet'],
+    };
+    const [tone, text] = states[settings.last_status] || states.never;
+    const body = () => ({ enabled: enabled.checked, url: url.value.trim() || null, every_minutes: Number(every.value) });
+    clear(heartbeatHost,
+      h('h3', { class: 'noise-title' }, 'Heartbeat'),
+      h('p', { class: 'body-text' }, 'If the console itself stops, it can’t tell you: no message looks the same as no problem. With a heartbeat, the console calls an address every few minutes while it is watching. A service such as Healthchecks.io, Better Stack or Cronitor alerts you when the calls stop.'),
+      settings.enabled ? h('p', { class: 'heartbeat-state' }, h('span', { class: tone }, text)) : null,
+      h('form', { class: 'savings-form heartbeat-form', 'aria-label': 'Heartbeat', onSubmit: async (event) => {
+        event.preventDefault();
+        try {
+          await api('/api/org/heartbeat', { method: 'PUT', body: body() });
+          toast('Heartbeat saved');
+          renderHeartbeat();
+        } catch (error) { showResult(result, false, error.message); }
+      } },
+        h('label', { class: 'check' }, enabled, h('b', {}, 'Send a heartbeat while the console is watching')),
+        h('div', { class: 'form-grid' },
+          field('Address to call', url, 'Treated as a secret: it is stored encrypted and never shown again.', 'span-4'),
+          field('Every, minutes', every, 'Set the service’s grace time to at least twice this.', 'span-2')),
+        result,
+        h('div', { class: 'form-actions' },
+          h('button', { class: 'button primary', type: 'submit' }, 'Save heartbeat'),
+          h('button', { class: 'button', type: 'button', onClick: async () => {
+            try {
+              if (url.value.trim()) await api('/api/org/heartbeat', { method: 'PUT', body: body() });
+              const out = await api('/api/org/heartbeat/test', { method: 'POST', body: {} });
+              showResult(result, out.status === 'ok', out.status === 'ok' ? 'The address accepted a test heartbeat.' : out.error);
+            } catch (error) { showResult(result, false, error.message); }
+          } }, 'Send a test'))));
+  }
+
   const channelsHost = h('div');
   const webhooksHost = h('div');
   const aiHost = h('div');
   const savingsHost = h('div');
   const noiseHost = h('div');
+  const heartbeatHost = h('div');
 
   clear(container, h('div', { class: 'page' },
     h('h1', { class: 'page-title' }, 'Point it at your systems.'),
@@ -37,7 +84,7 @@ export function mount(container) {
     h('section', { class: 'section', 'aria-labelledby': 'alerts-title' },
       h('div', { class: 'section-head' }, h('h2', { id: 'alerts-title' }, 'Alerts')),
       h('p', { class: 'read-only-banner' }, h('b', {}, 'Alerts are read-only. '), 'Messages describe the problem and link to suggested steps. They can’t change anything.'),
-      channelsHost, editable ? noiseHost : null),
+      channelsHost, editable ? noiseHost : null, editable ? heartbeatHost : null),
     h('section', { class: 'section', 'aria-labelledby': 'more-title' },
       h('div', { class: 'section-head' }, h('h2', { id: 'more-title' }, 'Logs and Kubernetes')),
       h('p', { class: 'body-text', style: 'margin-bottom:14px' }, 'These add evidence to investigations. Use a read-only token.'),
@@ -663,6 +710,7 @@ export function mount(container) {
   renderAi().catch((error) => clear(aiHost, h('p', { class: 'error-note' }, error.message)));
   if (editable) renderSavings().catch((error) => clear(savingsHost, h('p', { class: 'error-note' }, error.message)));
   if (editable) renderNoise().catch((error) => clear(noiseHost, h('p', { class: 'error-note' }, error.message)));
+  if (editable) renderHeartbeat().catch((error) => clear(heartbeatHost, h('p', { class: 'error-note' }, error.message)));
   const unsubscribe = live.subscribe((type) => { if (type === 'context') renderSources().catch(() => {}); });
   return () => { disposed = true; unsubscribe(); };
 }
