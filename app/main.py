@@ -23,7 +23,7 @@ from .api import ai_routes, auth_routes, data_routes, docs_routes, hook_routes, 
 from .api.deps import AppContext
 from .auth import RateLimiter, ensure_default_admin, load_principal
 from .config import Config
-from .context.engine import EngineManager
+from .context.manager import EngineManager
 from .costs import budget_problem
 from .db import Database, utcnow
 from .investigation.runner import InvestigationManager, Run

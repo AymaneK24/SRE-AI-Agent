@@ -389,7 +389,7 @@ def test_the_rate_limiter_forgets_keys_with_no_recent_attempts(monkeypatch):
 
 
 async def test_clusters_are_read_at_the_same_time_and_one_failing_does_not_hide_the_others(console, monkeypatch):
-    from app.context import engine as engine_module
+    from app.context import integrations as engine_module
     from app.sources.base import SourceError
     client = await console.company("ManyCo", "m@test.example")
     org_id = (await client.get("/api/auth/me")).json()["org_id"]

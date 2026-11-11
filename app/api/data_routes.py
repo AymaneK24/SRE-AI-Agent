@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .. import ai_settings
 from ..access import context_for, live_message_for
-from ..context.engine import build_integration
+from ..context.connections import build_integration
 from ..context.render import focus_context, render_context
 from ..db import utcnow
 from ..investigation.prompts import build_system, system_text

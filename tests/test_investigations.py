@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.ai_settings import Selection
-from app.context.engine import compute_baseline, headline_for, material_hash, robust_z
+from app.context.summary import compute_baseline, headline_for, material_hash, robust_z
 from app.context.render import render_context
 from app.costs import compute_cost
 from app.investigation.verification import check_numbers, corpus_numbers, missing_sections, verify_answer

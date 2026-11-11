@@ -195,7 +195,7 @@ async def test_cluster_alone_gives_a_full_context(console, kube_only):
 
 
 async def test_cluster_problems_start_and_clear_as_events(console, kube_only, monkeypatch):
-    import app.context.engine as engine_module
+    import app.context.problems as engine_module
 
     monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
     client, org_id, engine = kube_only
@@ -378,7 +378,7 @@ def test_a_crash_loop_stays_one_problem_while_the_pod_briefly_runs():
 
 
 async def test_a_problem_must_stay_gone_before_it_clears(console, kube_only, monkeypatch):
-    import app.context.engine as engine_module
+    import app.context.problems as engine_module
 
     client, org_id, engine = kube_only
     FakeKube.state.heal()
