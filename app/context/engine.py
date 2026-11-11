@@ -22,7 +22,7 @@ from .integrations import IntegrationWatch
 from .polling import SourcePolling
 from .problems import ProblemTracking
 from .signals import COVERAGE_CHECKS
-from .state import (BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, INTEGRATION_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
+from .state import (NEVER, BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, INTEGRATION_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
                     SourceState, log)
 from .summary import headline_for, material_hash, ranked_problems, summarize_alerts, summarize_rules
 
@@ -105,7 +105,7 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
     async def integrations_changed(self) -> None:
         """A log store or cluster was added or removed: read it on the next poll, without waiting."""
         await self._load_integration_kinds()
-        self._integrations_at = 0.0
+        self._integrations_at = NEVER
         if "kubernetes" not in self.integration_kinds:
             self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
         if not self.states and not self.integration_kinds:
@@ -123,12 +123,12 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
         self._state_known = False
         self._targets_up = set()
         self._targets_unknown = set()
-        self._snapshot_at = 0.0
+        self._snapshot_at = NEVER
         self._material_hash = ""
         self._last_ok_mono = None
         self.integration_summary, self.integration_list = {}, []
         self.k8s_snapshot, self.k8s_snapshots, self.k8s_problems = None, {}, []
-        self._integrations_at = 0.0
+        self._integrations_at = NEVER
         self.recent_events.clear()
 
     async def _loop(self) -> None:
