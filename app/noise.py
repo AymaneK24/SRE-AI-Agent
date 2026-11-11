@@ -61,11 +61,13 @@ class NoiseControl:
         self._batches: dict[int, Batch] = {}
         self._channel_sent: dict[int, deque[float]] = {}
         self.overflow: dict[int, list[str]] = {}
+        self._calls = 0
 
     def flapping(self, org_id: int, fingerprint: str) -> str | None:
         """None if this start can go out; "first" the first time it flaps; "quiet" while it keeps flapping."""
         now = time.monotonic()
         key = (org_id, fingerprint)
+        self._forget_old(now)
         starts = self._starts.setdefault(key, deque())
         starts.append(now)
         while starts and now - starts[0] > FLAP_WINDOW_S:
@@ -80,6 +82,17 @@ class NoiseControl:
             self._flapping[key] = now
             return "first"
         return None
+
+    def _forget_old(self, now: float) -> None:
+        """Problems that haven't started for an hour are forgotten, so this doesn't grow with every problem ever seen."""
+        self._calls += 1
+        if self._calls % 500:
+            return
+        for key in [key for key, starts in self._starts.items() if not starts or now - starts[-1] > FLAP_WINDOW_S]:
+            del self._starts[key]
+            self._flapping.pop(key, None)
+        for channel_id in [channel_id for channel_id, sent in self._channel_sent.items() if not sent or now - sent[-1] > 3600]:
+            del self._channel_sent[channel_id]
 
     def join(self, org_id: int, event: dict[str, Any], detail: dict[str, Any]) -> bool:
         """Adds a problem to its organization's open group. True when it opened the group, so the caller sends it."""

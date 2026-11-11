@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
-import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import Config
-from .db import Database, utcnow
+from prometheus_client import Counter
+
+from .db import Database, utc_after, utcnow
 from . import noise
-from .mailer import MailError, Mailer
+from .mailer import MailError, Mailer, paragraph
 from .net_guard import check_url, guarded_transport
 from .investigation_report import build_email, build_pdf, collect_evidence, reviewed_workflows, split_sections
 from .secrets_store import SecretBox, scrub
@@ -27,6 +30,70 @@ ALERT_EMAIL_REASON = ("You receive this because an administrator of {company} ad
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 COOLDOWN_S = 900
+# A message a channel didn't accept is tried again after each of these waits: about a day in all, then it is given up.
+RETRY_AFTER_S = (30, 120, 600, 1800, 3600, 7200, 14400, 28800, 28800)
+RETRY_POLL_S = 15
+MAX_QUEUED_BYTES = 4_000_000
+DELIVERIES = Counter("rcc_deliveries_total", "Alert messages by outcome", ["status"])
+
+
+class DeliveryError(Exception):
+    """A channel didn't take a message. `permanent` means trying again can't help, such as a deleted webhook."""
+
+    def __init__(self, message: str, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+def _age_seconds(iso: str) -> float:
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        return float("inf")
+
+
+def _pack(message: dict[str, Any]) -> str:
+    """A message as text for the retry queue. Charts and the PDF are kept unless that makes it too large."""
+    def encode(value: Any) -> Any:
+        if isinstance(value, (bytes, bytearray)):
+            return {"__bytes__": base64.b64encode(bytes(value)).decode()}
+        if isinstance(value, dict):
+            return {key: encode(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [encode(item) for item in value]
+        return value
+
+    packed = json.dumps(encode(message), default=str)
+    if len(packed) > MAX_QUEUED_BYTES:
+        slim = {key: value for key, value in message.items() if key not in {"attachments", "images", "body_html"}}
+        packed = json.dumps(encode(slim), default=str)
+    return packed
+
+
+def _unpack(text: str) -> dict[str, Any]:
+    def decode(value: Any) -> Any:
+        if isinstance(value, dict):
+            if set(value) == {"__bytes__"}:
+                return base64.b64decode(value["__bytes__"])
+            return {key: decode(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [decode(item) for item in value]
+        return value
+
+    return decode(json.loads(text))
+
+
+def _delayed(message: dict[str, Any], first_tried_at: str) -> dict[str, Any]:
+    """Says plainly that the message is late, so nobody reads an old alert as a new one."""
+    note = f"Delayed message. This channel didn't accept it at {first_tried_at[11:16]} UTC on {first_tried_at[:10]}, so it arrives late. Check the console for the current state."
+    late = dict(message)
+    late["subject"] = f"[DELAYED] {message.get('subject', '')}"[:200]
+    late["text"] = f"{note}\n\n{message.get('text', '')}"
+    if message.get("email_text"):
+        late["email_text"] = f"{note}\n\n{message['email_text']}"
+    if message.get("body_html"):
+        late["body_html"] = paragraph(note) + message["body_html"]
+    return late
 WEBHOOK_HOSTS = {
     "slack": ("hooks.slack.com",),
     "google_chat": ("chat.googleapis.com",),
@@ -110,7 +177,6 @@ def _escape_slack(text: str) -> str:
 class Notifier:
     def __init__(self, db: Database, box: SecretBox, config: Config, mailer: Mailer) -> None:
         self.db, self.box, self.config, self.mailer = db, box, config, mailer
-        self._sent: dict[tuple[int, str], float] = {}
         self.on_critical: Any = None
         self.engines: Any = None
         self._waiting: set[asyncio.Task[None]] = set()
@@ -119,6 +185,25 @@ class Notifier:
     def close(self) -> None:
         for task in self._waiting:
             task.cancel()
+
+    # Which channel heard about which problem. Kept in the database, so a recovery still goes there after a restart.
+    async def _sent_at(self, channel_id: int, fingerprint: str) -> str | None:
+        row = await self.db.one("SELECT sent_at FROM alert_sent WHERE channel_id = ? AND fingerprint = ?", (channel_id, fingerprint))
+        return row["sent_at"] if row else None
+
+    async def _mark_sent(self, org_id: int, channel_id: int, fingerprints: list[str]) -> None:
+        now = utcnow()
+        for fingerprint in fingerprints:
+            await self.db.execute(
+                "INSERT INTO alert_sent(channel_id, fingerprint, org_id, sent_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(channel_id, fingerprint) DO UPDATE SET sent_at = excluded.sent_at", (channel_id, fingerprint, org_id, now))
+
+    async def forget_sent(self, org_id: int, channel_id: int | None = None, fingerprint: str | None = None) -> None:
+        """Forgets what was sent: one problem on one channel when it clears, or everything for an organization."""
+        if channel_id is None:
+            await self.db.execute("DELETE FROM alert_sent WHERE org_id = ?", (org_id,))
+        else:
+            await self.db.execute("DELETE FROM alert_sent WHERE channel_id = ? AND fingerprint = ?", (channel_id, fingerprint))
 
     async def handle_event(self, org_id: int, event: dict[str, Any], detail: dict[str, Any]) -> None:
         try:
@@ -129,10 +214,11 @@ class Notifier:
             reason = await self._gate(org_id, event, settings)
             if reason:
                 await self._suppressed(org_id, event, reason)
+                await self._handled([event])
                 return
             if not self.noise.join(org_id, event, detail):
                 await self._suppressed(org_id, event, "grouped")
-                return  # Another problem opened a group a moment ago; this one goes out with it.
+                return  # Another problem opened a group a moment ago; this one goes out with it, and is handled then.
             await noise.sleep(float(settings["group_window_s"]))
             items = self.noise.close(org_id)
         except Exception:  # Notification failures must not affect monitoring.
@@ -142,6 +228,16 @@ class Notifier:
             await self._send_one(org_id, event, detail, settings)
         else:
             await self._send_group(org_id, items, settings)
+        await self._handled([item for item, _ in items] or [event])
+
+    async def _handled(self, events: list[dict[str, Any]]) -> None:
+        """Records that these starts were sent or deliberately held back. Until then, a restart sends them again."""
+        ids = [int(event["id"]) for event in events if event.get("id")]
+        try:
+            for event_id in ids:
+                await self.db.execute("UPDATE events SET handled = 1 WHERE id = ?", (event_id,))
+        except Exception:  # Worst case, the message is sent once more after a restart.
+            log.exception("couldn't mark an alert as handled")
 
     async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any]) -> str | None:
         """Why this start shouldn't be sent, or None. Waits out the grace period."""
@@ -160,11 +256,15 @@ class Notifier:
                         "fingerprint": f"flapping:{event['fingerprint']}"}
                 await self._dispatch(org_id, flap, {"summary": f"It started {noise.FLAP_STARTS} times or more in the last hour. Further changes won't be sent until it has been stable for {noise.FLAP_QUIET_S // 60} minutes."}, settings=settings)
                 return "flapping"
+        # An alert pushed by Alertmanager already waited out its own "for" period there, and the console
+        # has no state of its own to check it against, so it isn't made to wait again.
+        if event["kind"] == "alertmanager_alert":
+            return None
         grace = float(settings["grace_critical_s"] if event["severity"] == "critical" else settings["grace_warning_s"])
         if grace > 0:
             await noise.sleep(grace)
             engine = await self.engines.get(org_id) if self.engines else None
-            if engine is not None and event["fingerprint"] not in engine._active:
+            if engine is not None and not engine.still_active(event["fingerprint"]):
                 return "blip"
         return None
 
@@ -194,9 +294,14 @@ class Notifier:
         worst = items[0][0]
         changes = noise.changes_since(await self.db.all("SELECT ts, title FROM change_events WHERE org_id = ? ORDER BY ts DESC LIMIT 20", (org_id,)))
         hints = noise.common_causes(items, changes)
-        lines = [f"- {event['title']}" for event, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        prefix = "Already active when the console connected. "
+        at_connect = all(item["title"].startswith(prefix) for item, _ in items)
+        lines = [f"- {item['title'].removeprefix(prefix)}" for item, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        if at_connect:
+            hints = ["They were already running when the console connected, so their start time is unknown.", *hints]
         summary = "\n".join(lines + ([""] + hints if hints else []))
-        event = {**worst, "title": f"{len(items)} problems started together: {worst['title']}" + (" and others" if len(items) > 1 else ""),
+        together = "problems found when the console connected" if at_connect else "problems started together"
+        event = {**worst, "title": f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""),
                  "fingerprint": f"group:{worst['fingerprint']}", "group": [item["fingerprint"] for item, _ in items]}
         detail = {"summary": summary, "group": [{"title": item["title"], "fingerprint": item["fingerprint"]} for item, _ in items], "hints": hints}
         prepared = None
@@ -218,7 +323,7 @@ class Notifier:
         channels = await self.db.all("SELECT * FROM channels WHERE org_id = ? AND enabled = 1", (org_id,))
         if not channels:
             return
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
         cleared = event["kind"].endswith(("_cleared", "_recovered"))
         names = [str(detail.get("name"))] if detail.get("name") else (["targetdown"] if event["kind"].startswith("target") else [])
         signals = [str(detail["signal_id"])] if detail.get("signal_id") else []
@@ -234,25 +339,23 @@ class Notifier:
         for channel in channels:
             if cleared:
                 # Only report recovery on channels that heard about the problem.
-                if (channel["id"], event["fingerprint"]) not in self._sent:
+                if not await self._sent_at(channel["id"], event["fingerprint"]):
                     continue
-                self._sent.pop((channel["id"], event["fingerprint"]), None)
+                await self.forget_sent(org_id, channel["id"], event["fingerprint"])
                 # This email hasn't gone out yet, and when it does it will say the alert cleared.
                 if waiting and channel["kind"] == "email":
                     continue
             else:
                 if SEVERITY_RANK.get(event["severity"], 0) < SEVERITY_RANK.get(channel["min_severity"], 1):
                     continue
-                key = (channel["id"], event["fingerprint"])
-                if time.monotonic() - self._sent.get(key, -COOLDOWN_S) < COOLDOWN_S:
+                sent_at = await self._sent_at(channel["id"], event["fingerprint"])
+                if sent_at and _age_seconds(sent_at) < COOLDOWN_S:
                     continue
                 if settings and not self.noise.allow(channel["id"], int(settings["max_per_hour"])):
                     self._overflow(org_id, channel, event)
                     continue
-                self._sent[key] = time.monotonic()
                 # A grouped message stands for each problem in it, so each one's recovery goes to this channel too.
-                for member in members or []:
-                    self._sent[(channel["id"], member)] = time.monotonic()
+                await self._mark_sent(org_id, channel["id"], [event["fingerprint"], *(members or [])])
                 # Email waits so it can carry the findings. Chat channels hear about the alert straight away.
                 if investigation_id is not None and channel["kind"] == "email":
                     held_ids.append(channel["id"])
@@ -277,7 +380,7 @@ class Notifier:
         channel = await self.db.one("SELECT * FROM channels WHERE id = ? AND org_id = ? AND enabled = 1", (channel_id, org_id))
         if not titles or not channel:
             return
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
         event = {"severity": "warning", "title": f"{len(titles)} more problems started in the last hour", "ts": utcnow(), "fingerprint": f"digest:{channel_id}"}
         summary = "This channel reached its hourly limit, so these were held back:\n" + "\n".join(f"- {title}" for title in titles[:30])
         await self.deliver(channel, org_id, event["fingerprint"], _message(org["name"], event, summary, [], f"{self.config.public_url}/#/overview"))
@@ -320,7 +423,8 @@ class Notifier:
         for row in await self.db.all("SELECT conversation_id FROM held_alerts"):
             await self.release_held(row["conversation_id"], "The console restarted before the automatic investigation finished, so this message has only the alert.", final=True)
 
-    async def deliver(self, channel: dict[str, Any], org_id: int, fingerprint: str, message: dict[str, str]) -> dict[str, Any]:
+    async def deliver(self, channel: dict[str, Any], org_id: int, fingerprint: str, message: dict[str, Any], retry: bool = True) -> dict[str, Any]:
+        """Sends now, with three quick tries. If the channel still doesn't take it, the message waits in the queue and is tried again later."""
         status, error = "sent", ""
         last_error: Exception | None = None
         for attempt in range(3):
@@ -328,19 +432,73 @@ class Notifier:
                 await self._send(channel, message)
                 last_error = None
                 break
-            except (httpx.HTTPError, MailError, ValueError) as caught:
+            except (httpx.HTTPError, MailError, DeliveryError, ValueError) as caught:
                 last_error = caught
+                if getattr(caught, "permanent", False):
+                    break
                 await asyncio.sleep(attempt + 0.2)
         if last_error is not None:
-            status, error = "failed", scrub(str(last_error))[:300]
-        await self.db.insert(
+            error = scrub(str(last_error))[:300]
+            status = "retrying" if retry and not getattr(last_error, "permanent", False) else "failed"
+        delivery_id = await self.db.insert(
             "INSERT INTO deliveries(org_id, channel_id, fingerprint, title, status, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (org_id, channel["id"], fingerprint, message["subject"][:300], status, error, utcnow()),
+            (org_id, channel["id"], fingerprint, str(message["subject"])[:300], status, error, utcnow()),
         )
+        if status == "retrying":
+            now = utcnow()
+            await self.db.insert(
+                "INSERT INTO delivery_queue(org_id, channel_id, delivery_id, fingerprint, message, attempts, first_tried_at, next_try_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                (org_id, channel["id"], delivery_id, fingerprint, _pack(message), now, utc_after(seconds=RETRY_AFTER_S[0])))
+        DELIVERIES.labels(status).inc()
         return {"status": status, "error": error}
 
-    async def _send(self, channel: dict[str, Any], message: dict[str, str]) -> None:
-        settings = self.box.decrypt_json(channel["config_enc"])
+    async def retry_due(self) -> int:
+        """Tries again every queued message whose wait is over. Returns how many were delivered."""
+        delivered = 0
+        rows = await self.db.all("SELECT * FROM delivery_queue WHERE next_try_at <= ? ORDER BY id LIMIT 25", (utcnow(),))
+        for row in rows:
+            channel = await self.db.one("SELECT * FROM channels WHERE id = ? AND org_id = ? AND enabled = 1", (row["channel_id"], row["org_id"]))
+            if not channel:
+                await self._retry_ended(row, "failed", "The channel was removed or paused before the message could be delivered.")
+                continue
+            attempts = int(row["attempts"]) + 1
+            try:
+                await self._send(channel, _delayed(_unpack(row["message"]), row["first_tried_at"]))
+            except (httpx.HTTPError, MailError, DeliveryError, ValueError) as caught:
+                error = scrub(str(caught))[:300]
+                if getattr(caught, "permanent", False) or attempts >= len(RETRY_AFTER_S):
+                    await self._retry_ended(row, "failed", f"Given up after {attempts + 1} tries. {error}"[:300])
+                else:
+                    await self.db.execute("UPDATE delivery_queue SET attempts = ?, next_try_at = ? WHERE id = ?",
+                                          (attempts, utc_after(seconds=RETRY_AFTER_S[attempts]), row["id"]))
+                    await self.db.execute("UPDATE deliveries SET error = ? WHERE id = ?", (error, row["delivery_id"]))
+                continue
+            except Exception as caught:  # A message that can't even be rebuilt is given up, not retried forever.
+                log.exception("queued message couldn't be sent")
+                await self._retry_ended(row, "failed", scrub(f"The queued message couldn't be sent: {caught}")[:300])
+                continue
+            await self._retry_ended(row, "sent", f"Delivered late, after {attempts + 1} tries.")
+            delivered += 1
+        return delivered
+
+    async def _retry_ended(self, row: dict[str, Any], status: str, note: str) -> None:
+        await self.db.execute("UPDATE deliveries SET status = ?, error = ? WHERE id = ?", (status, note, row["delivery_id"]))
+        await self.db.execute("DELETE FROM delivery_queue WHERE id = ?", (row["id"],))
+        DELIVERIES.labels(status).inc()
+
+    async def retry_loop(self) -> None:
+        while True:
+            try:
+                await self.retry_due()
+            except Exception:  # The queue is tried again on the next round.
+                log.exception("retrying queued messages failed")
+            await asyncio.sleep(RETRY_POLL_S)
+
+    async def _send(self, channel: dict[str, Any], message: dict[str, Any]) -> None:
+        try:
+            settings = self.box.decrypt_json(channel["config_enc"])
+        except ValueError as error:
+            raise DeliveryError(str(error), permanent=True) from error
         kind = channel["kind"]
         if kind == "email":
             for address in settings.get("recipients", []):
@@ -358,11 +516,13 @@ class Notifier:
                 "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4",
                 "body": [{"type": "TextBlock", "text": message["text"], "wrap": True}]}}]}
         else:
-            raise ValueError(f"Unknown channel type: {kind}")
+            raise DeliveryError(f"Unknown channel type: {kind}", permanent=True)
         async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False, transport=guarded_transport(self.config.target_policy)) as client:
             response = await client.post(settings["url"], content=json.dumps(payload), headers={"Content-Type": "application/json"})
         if response.status_code >= 300:
-            raise ValueError(f"The service returned HTTP {response.status_code}.")
+            # A refused address or payload stays refused. Busy or failing services are worth another try.
+            permanent = 400 <= response.status_code < 500 and response.status_code not in {408, 425, 429}
+            raise DeliveryError(f"The service returned HTTP {response.status_code}.", permanent=permanent)
 
     async def notify_investigation(self, org_id: int, conversation_id: int, title: str, answer: str, verification: dict[str, Any]) -> None:
         """Chat channels get a short summary. Email gets the findings, charts, commands, and a PDF, clearly labeled as advice to verify."""
@@ -393,8 +553,8 @@ class Notifier:
                 await self.deliver(channel, org_id, f"investigation:{conversation_id}", rich)
 
     async def _investigation_email(self, org_id: int, conversation_id: int, title: str, answer: str, confidence: str, link: str, held: dict[str, Any] | None) -> dict[str, Any]:
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
-        conversation = await self.db.one("SELECT created_at FROM conversations WHERE id = ?", (conversation_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        conversation = await self.db.get("SELECT created_at FROM conversations WHERE id = ?", (conversation_id,))
         event = json.loads(held["event"]) if held else {"title": title, "ts": conversation["created_at"], "kind": "alert", "severity": "critical", "fingerprint": ""}
         detail = json.loads(held["detail"]) if held else {}
         cleared_at = held["cleared_at"] if held else None
@@ -412,9 +572,10 @@ class Notifier:
             engine = await self.engines.get(org_id)
             evidence = await collect_evidence(self.db, engine, conversation_id, event, detail)
             workflows = await reviewed_workflows(self.db, org_id, event, detail)
-            message.update(build_email(facts, sections, evidence, workflows))
+            # Charts and the PDF are drawn off the main loop, so polling and live pages don't pause meanwhile.
+            message.update(await asyncio.to_thread(build_email, facts, sections, evidence, workflows))
             message["email_text"] = message["text"]
-            pdf = build_pdf(facts, sections, evidence, workflows)
+            pdf = await asyncio.to_thread(build_pdf, facts, sections, evidence, workflows)
             message["attachments"] = [{"filename": f"incident-report-{conversation_id}.pdf", "data": pdf, "mime": "application/pdf"}]
         except Exception:
             # The findings still go out as text if charts or the PDF can't be made.

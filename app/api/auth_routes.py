@@ -16,8 +16,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..auth import (
-    client_ip, consume_email_token, create_email_token, create_organization, create_session, end_session, hash_password,
-    normalize_email, org_policies, password_problem, verify_password,
+    client_ip, consume_email_token, create_email_token, create_organization, create_session, end_session, hash_password_async,
+    normalize_email, org_policies, password_problem, verify_password_async,
 )
 from ..db import PLATFORM_ORG, sha256_text, utc_after, utcnow
 from ..mailer import MailError
@@ -121,7 +121,7 @@ async def login(body: LoginBody, request: Request, response: Response, ctx: Ctx)
         await asyncio.sleep(min(2 ** (failures - LOGIN_FAIL_LIMIT), LOGIN_MAX_DELAY_S))
     user = await ctx.db.one(
         "SELECT u.*, o.status AS org_status FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.email = ? LIMIT 1", (identifier,))
-    valid = verify_password(user["password_hash"] if user else "", body.password)
+    valid = await verify_password_async(user["password_hash"] if user else "", body.password)
     if not user or not valid or not user["is_active"]:
         ctx.limiter.record(key)
         ctx.limiter.record(ip_key)
@@ -158,7 +158,7 @@ async def logout(request: Request, response: Response, ctx: Ctx, user: User) -> 
 
 @router.get("/auth/me")
 async def me(user: User, ctx: Ctx) -> dict[str, Any]:
-    row = await ctx.db.one("SELECT email_verified_at, pending_email, sso_subject FROM users WHERE id = ?", (user.user_id,))
+    row = await ctx.db.get("SELECT email_verified_at, pending_email, sso_subject FROM users WHERE id = ?", (user.user_id,))
     return {
         "id": user.user_id, "org_id": user.org_id, "email": user.email, "name": user.name, "role": user.role, "org_name": user.org_name,
         "must_change_password": user.must_change_password, "email_verified": bool(row["email_verified_at"]),
@@ -180,12 +180,12 @@ async def update_me(body: ProfileBody, request: Request, response: Response, use
 async def _change_email(body: ProfileBody, request: Request, response: Response, user: Any, ctx: AppContext) -> dict[str, Any]:
     """The email signs people in and resets passwords, so a stolen session alone must not be able to change it."""
     email = normalize_email(body.email or "")
-    row = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,))
+    row = await ctx.db.get("SELECT * FROM users WHERE id = ?", (user.user_id,))
     if row["sso_subject"]:
         raise HTTPException(409, "Your email comes from single sign-on, so change it there.")
     if not ctx.limiter.allow(f"email-change:{user.user_id}", LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW_S):
         raise HTTPException(429, "Too many attempts. Wait 15 minutes and try again.")
-    if not body.current_password or not verify_password(row["password_hash"], body.current_password):
+    if not body.current_password or not await verify_password_async(row["password_hash"], body.current_password):
         raise HTTPException(401, "Your current password isn't correct.")
     if email == row["email"]:
         return {"updated": True, "pending_email": None}
@@ -198,7 +198,7 @@ async def _change_email(body: ProfileBody, request: Request, response: Response,
         # No email server means no reset links can leave this server, so there's nothing to confirm by email.
         await ctx.db.execute("UPDATE users SET email = ?, username = ?, pending_email = NULL WHERE id = ?", (email, email, user.user_id))
         await ctx.db.execute("DELETE FROM sessions WHERE user_id = ?", (user.user_id,))
-        await create_session(ctx.db, ctx.config, response, request, await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,)))
+        await create_session(ctx.db, ctx.config, response, request, await ctx.db.get("SELECT * FROM users WHERE id = ?", (user.user_id,)))
         await ctx.db.audit(user.org_id, "email_changed", f"user:{user.user_id}", {"to": email}, actor=email)
         return {"updated": True, "pending_email": None}
     # The sign-in address stays the same until the new address proves it can receive mail.
@@ -223,8 +223,8 @@ async def _change_email(body: ProfileBody, request: Request, response: Response,
 
 @router.post("/auth/change-password")
 async def change_password(body: ChangePasswordBody, request: Request, response: Response, user: User, ctx: Ctx) -> dict[str, bool]:
-    row = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,))
-    if not verify_password(row["password_hash"], body.current_password):
+    row = await ctx.db.get("SELECT * FROM users WHERE id = ?", (user.user_id,))
+    if not await verify_password_async(row["password_hash"], body.current_password):
         raise HTTPException(401, "Your current password isn't correct.")
     if body.current_password == body.new_password:
         raise HTTPException(422, "Choose a password different from your current one.")
@@ -232,9 +232,9 @@ async def change_password(body: ChangePasswordBody, request: Request, response: 
     problem = password_problem(body.new_password, policies, row["email"], row["name"])
     if problem:
         raise HTTPException(422, problem)
-    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", (hash_password(body.new_password), user.user_id))
+    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", (await hash_password_async(body.new_password), user.user_id))
     await ctx.db.execute("DELETE FROM sessions WHERE user_id = ?", (user.user_id,))
-    fresh = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,))
+    fresh = await ctx.db.get("SELECT * FROM users WHERE id = ?", (user.user_id,))
     await create_session(ctx.db, ctx.config, response, request, fresh)
     await ctx.db.audit(user.org_id, "password_changed", f"user:{user.user_id}", {}, actor=user.actor)
     return {"changed": True}
@@ -262,7 +262,7 @@ async def signup(body: SignupBody, request: Request, ctx: Ctx) -> dict[str, Any]
     org_id = await create_organization(ctx.db, body.company.strip(), email)
     user_id = await ctx.db.insert(
         "INSERT INTO users(org_id, username, email, name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, 'owner', ?)",
-        (org_id, email, email, body.name, hash_password(body.password), utcnow()),
+        (org_id, email, email, body.name, await hash_password_async(body.password), utcnow()),
     )
     await ctx.db.audit(org_id, "organization_created", f"org:{org_id}", {"name": body.company.strip()}, actor=email)
     await _send_verification(ctx, user_id, email)
@@ -327,7 +327,7 @@ async def reset(body: ResetBody, ctx: Ctx) -> dict[str, bool]:
     user = await consume_email_token(ctx.db, "reset", body.token)
     if not user:
         raise HTTPException(400, "This link is invalid or has expired. Request a new one.")
-    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?", (hash_password(body.password), utcnow(), user["id"]))
+    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?", (await hash_password_async(body.password), utcnow(), user["id"]))
     await ctx.db.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
     await ctx.db.audit(user["org_id"], "password_reset", f"user:{user['id']}", {}, actor=user["email"])
     return {"reset": True}
@@ -346,8 +346,8 @@ async def accept_invite(body: AcceptBody, request: Request, response: Response, 
     if not user:
         raise HTTPException(400, "This invitation is invalid or has expired. Ask your admin for a new one.")
     await ctx.db.execute("UPDATE users SET name = ?, password_hash = ?, is_active = 1, email_verified_at = ? WHERE id = ?",
-                         (body.name, hash_password(body.password), utcnow(), user["id"]))
-    fresh = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user["id"],))
+                         (body.name, await hash_password_async(body.password), utcnow(), user["id"]))
+    fresh = await ctx.db.get("SELECT * FROM users WHERE id = ?", (user["id"],))
     await create_session(ctx.db, ctx.config, response, request, fresh)
     await ctx.db.audit(user["org_id"], "invitation_accepted", f"user:{user['id']}", {}, actor=user["email"])
     return {"authenticated": True}
@@ -438,7 +438,7 @@ async def sso_callback(request: Request, ctx: Ctx, state: str = "", code: str = 
             (org_id, email, email, sanitize_stored_name(str(info.get("name") or ""), name_from_email(email)), settings.get("default_role", "viewer"), utcnow(), subject, utcnow()),
         )
         await ctx.db.audit(org_id, "sso_user_created", f"user:{user_id}", {}, actor=email)
-        user = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user_id,))
+        user = await ctx.db.get("SELECT * FROM users WHERE id = ?", (user_id,))
     elif not user["is_active"]:
         return failure
     elif user["sso_subject"] and user["sso_subject"] != subject:

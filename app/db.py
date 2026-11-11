@@ -20,6 +20,10 @@ log = logging.getLogger("rcc.db")
 PLATFORM_ORG = 0
 
 
+class RowMissing(LookupError):
+    """A row that had to exist is gone, such as an account removed while its request was running."""
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -52,7 +56,8 @@ class Database:
             from psycopg.rows import dict_row
             from psycopg_pool import ConnectionPool
 
-            self._pool = ConnectionPool(url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True, timeout=15)
+            # Rows are dictionaries because of row_factory. That is set at run time, so the type checker is told "anything".
+            self._pool: Any = ConnectionPool(url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True, timeout=15)
             self._migrate_postgres()
         else:
             assert path is not None
@@ -165,9 +170,9 @@ class Database:
         if self.is_postgres:
             with self._pool.connection() as conn, conn.cursor() as cursor:
                 cursor.execute(self._pg_sql(sql) + " RETURNING id", args)
-                return cursor.fetchone()["id"]
+                return int(cursor.fetchone()["id"])
         with self._lock, self._conn:
-            return self._conn.execute(sql, args).lastrowid
+            return int(self._conn.execute(sql, args).lastrowid or 0)
 
     def _all(self, sql: str, args: tuple | list = ()) -> list[dict[str, Any]]:
         if self.is_postgres:
@@ -190,6 +195,13 @@ class Database:
     async def one(self, sql: str, args: tuple | list = ()) -> dict[str, Any] | None:
         rows = await self.all(sql, args)
         return rows[0] if rows else None
+
+    async def get(self, sql: str, args: tuple | list = ()) -> dict[str, Any]:
+        """The one row that must exist: a count, or something the caller just checked or created."""
+        rows = await self.all(sql, args)
+        if not rows:
+            raise RowMissing("A record this request needs no longer exists.")
+        return rows[0]
 
     # Settings ---------------------------------------------------------------
     async def get_setting(self, org_id: int, key: str, default: Any = None) -> Any:

@@ -1,4 +1,5 @@
 """Kubernetes and logs as first-class connections: problems, events, context, tools, and answer checks."""
+import asyncio
 import json
 import datetime as dt
 import ssl
@@ -194,7 +195,7 @@ async def test_cluster_alone_gives_a_full_context(console, kube_only):
 
 
 async def test_cluster_problems_start_and_clear_as_events(console, kube_only, monkeypatch):
-    import app.context.engine as engine_module
+    import app.context.problems as engine_module
 
     monkeypatch.setattr(engine_module, "K8S_CLEAR_AFTER_S", 0)
     client, org_id, engine = kube_only
@@ -282,6 +283,13 @@ def test_diagnoses_name_the_cause_with_evidence():
     pull = _problem(pod("a", "web-5b5568b987-1", "web", waiting="ImagePullBackOff", ready=False, image="shop/web:9.9"))
     pull["facts"]["message"] = "Back-off pulling image: manifest unknown"
     assert "doesn't exist in the registry" in diagnose(pull)["cause"]
+    # Most of the time the pod only says "Back-off pulling image"; the reason is in the ErrImagePull events.
+    backoff = _problem(pod("a", "web-5b5568b987-1", "web", waiting="ImagePullBackOff", ready=False, image="shop/web:9.9"))
+    backoff["facts"]["message"] = 'Back-off pulling image "shop/web:9.9"'
+    assert diagnose(backoff)["cause"] == "The node can't pull the image shop/web:9.9."
+    failed = [{"namespace": "a", "name": "web-5b5568b987-1", "reason": "Failed",
+               "message": 'Failed to pull image "shop/web:9.9": manifest unknown: manifest tagged by "9.9" is not found'}]
+    assert diagnose(backoff, [], failed)["cause"] == "The image shop/web:9.9 or its tag doesn't exist in the registry."
 
     pending = _problem(pod("a", "big-5b5568b987-1", "big", phase="Pending", ready=False, unschedulable="0/3 nodes are available: 3 Insufficient memory."))
     assert diagnose(pending)["cause"] == "No node can take the pod: not enough free memory."
@@ -370,7 +378,7 @@ def test_a_crash_loop_stays_one_problem_while_the_pod_briefly_runs():
 
 
 async def test_a_problem_must_stay_gone_before_it_clears(console, kube_only, monkeypatch):
-    import app.context.engine as engine_module
+    import app.context.problems as engine_module
 
     client, org_id, engine = kube_only
     FakeKube.state.heal()
@@ -547,7 +555,9 @@ async def test_a_deployment_already_broken_at_connect_is_alerted_once(console, k
     assert message["Subject"].startswith("[CRITICAL]") and "checkout" in message["Subject"] and "can't pull its image" in message["Subject"]
 
     # A restart finds it again. It was already announced, so nobody gets a second email for the same outage.
-    console.ctx.notifier._sent.clear()
+    while await console.ctx.db.all("SELECT id FROM events WHERE handled = 0"):  # The notifier finishes its bookkeeping first.
+        await asyncio.sleep(0.02)
+    await console.ctx.notifier.forget_sent(engine.org_id)  # Even without the 15-minute repeat guard.
     engine._reset_state()
     await engine.refresh_now()
     await _wait_for(lambda: len(alerts()) > 1, seconds=2)

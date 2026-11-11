@@ -23,9 +23,10 @@ from .api import ai_routes, auth_routes, data_routes, docs_routes, hook_routes, 
 from .api.deps import AppContext
 from .auth import RateLimiter, ensure_default_admin, load_principal
 from .config import Config
-from .context.engine import EngineManager
+from .context.manager import EngineManager
 from .costs import budget_problem
-from .db import Database, utcnow
+from .db import Database, RowMissing, utcnow
+from .heartbeat import Heartbeat
 from .investigation.runner import InvestigationManager, Run
 from .llm.base import ProviderError
 from .mailer import Mailer
@@ -81,6 +82,8 @@ class AutoInvestigator:
             log.warning("automatic investigation skipped: %s", getattr(error, "message", error))
             return None
         self._recent[key] = time.monotonic()
+        for old in [item for item, at in self._recent.items() if time.monotonic() - at >= 3600]:
+            del self._recent[old]
         title = str(event.get("title", "Critical alert"))[:90]
         now = utcnow()
         conversation_id = await ctx.db.insert(
@@ -123,7 +126,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     engines = EngineManager(db, box, config, notifier.handle_event)
     investigations = InvestigationManager(db, engines, box, config)
     ctx = AppContext(config=config, db=db, box=box, engines=engines, investigations=investigations, mailer=mailer,
-                     notifier=notifier, limiter=RateLimiter())
+                     notifier=notifier, limiter=RateLimiter(), heartbeat=Heartbeat(db, box, config, engines))
     auto = AutoInvestigator(ctx)
     notifier.on_critical = auto.handle
     investigations.on_finished = auto.finished
@@ -133,12 +136,19 @@ def create_app(config: Config | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await ensure_default_admin(db, config)
+        # A restart ends every running investigation. Without this they would show as running forever.
+        await db.execute("UPDATE messages SET status = 'failed', error = ? WHERE status = 'running'",
+                         ("The console restarted before this investigation finished. Ask again to run it.",))
         await notifier.release_after_restart()
         await db.audit(0, "console_started", "", {"mode": config.mode, "database": "postgresql" if db.is_postgres else "sqlite"})
         await engines.start_active()
-        maintenance = asyncio.create_task(maintenance_loop(db))
+        background = [asyncio.create_task(maintenance_loop(db), name="maintenance"),
+                      asyncio.create_task(notifier.retry_loop(), name="delivery-retries"),
+                      asyncio.create_task(engines.watchdog(), name="polling-watchdog"),
+                      asyncio.create_task(ctx.heartbeat.loop(), name="heartbeat")]
         yield
-        maintenance.cancel()
+        for task in background:
+            task.cancel()
         notifier.close()
         await investigations.stop_all()
         await engines.stop_all()
@@ -152,9 +162,19 @@ def create_app(config: Config | None = None) -> FastAPI:
     async def validation_error(_: Request, error: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": friendly_validation_error(list(error.errors()))}, status_code=422)
 
+    @app.exception_handler(RowMissing)
+    async def row_missing(_: Request, error: RowMissing) -> JSONResponse:
+        # For example an account or a panel deleted while another request for it was running.
+        return JSONResponse({"detail": "This no longer exists. Reload the page."}, status_code=404)
+
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> JSONResponse:
+        # Alive means watching. A polling loop that is stuck can only be cured by a restart, so this says so
+        # and the container's health check or Kubernetes restarts the console. Unreachable sources don't count:
+        # that is the customer's system failing, which is exactly when the console must stay up.
+        if engines.stalled():
+            return JSONResponse({"status": "stalled"}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:

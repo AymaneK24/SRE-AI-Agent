@@ -25,6 +25,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
+      - run: python -m mypy
       - run: pip install pip-audit && pip-audit -r requirements.txt
       - run: pytest
         env:

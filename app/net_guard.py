@@ -62,8 +62,8 @@ def _allowlisted(name: str, ip: Any, policy: TargetPolicy) -> bool:
 
 
 def _check_address(address: str, policy: TargetPolicy, name: str = "") -> None:
-    ip = ipaddress.ip_address(address.split("%")[0])
-    if getattr(ip, "ipv4_mapped", None):
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(address.split("%")[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
     elif ip.version == 6 and ip in _NAT64:
         # IPv6-only networks with DNS64 return public IPv4 services inside this prefix. Check the IPv4 address it carries.
@@ -104,7 +104,7 @@ def _check_name(host: str) -> str:
             ip = ipaddress.ip_address(name.split("%")[0])
         except ValueError as error:
             raise BlockedTarget(f"{host} isn't a valid address.") from error
-        if ip.ipv4_mapped or ip.sixtofour or ip.teredo:
+        if isinstance(ip, ipaddress.IPv6Address) and (ip.ipv4_mapped or ip.sixtofour or ip.teredo):
             raise BlockedTarget(f"{host} hides an IPv4 address inside IPv6. Write the IPv4 address directly.")
     return name
 

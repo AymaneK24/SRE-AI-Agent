@@ -89,7 +89,8 @@ def diagnose(problem: dict[str, Any], log_lines: list[str] | None = None, events
             confidence = "low"
     elif kind == "image_pull":
         message = facts.get("message", "")
-        lowered = message.lower()
+        # In ImagePullBackOff the pod only says "Back-off pulling image"; the reason is in the ErrImagePull events.
+        lowered = " ".join([message, *(str(event.get("message", "")) for event in related)]).lower()
         if "not found" in lowered or "manifest unknown" in lowered:
             cause = f"The image {facts.get('image') or ''} or its tag doesn't exist in the registry.".replace("  ", " ")
         elif any(word in lowered for word in ("unauthorized", "denied", "authentication", "forbidden")):
