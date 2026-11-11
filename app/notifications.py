@@ -2,18 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
-import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import Config
-from .db import Database, utcnow
+from prometheus_client import Counter
+
+from .db import Database, utc_after, utcnow
 from . import noise
-from .mailer import MailError, Mailer
+from .mailer import MailError, Mailer, paragraph
 from .net_guard import check_url, guarded_transport
 from .investigation_report import build_email, build_pdf, collect_evidence, reviewed_workflows, split_sections
 from .secrets_store import SecretBox, scrub
@@ -27,6 +30,70 @@ ALERT_EMAIL_REASON = ("You receive this because an administrator of {company} ad
 
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
 COOLDOWN_S = 900
+# A message a channel didn't accept is tried again after each of these waits: about a day in all, then it is given up.
+RETRY_AFTER_S = (30, 120, 600, 1800, 3600, 7200, 14400, 28800, 28800)
+RETRY_POLL_S = 15
+MAX_QUEUED_BYTES = 4_000_000
+DELIVERIES = Counter("rcc_deliveries_total", "Alert messages by outcome", ["status"])
+
+
+class DeliveryError(Exception):
+    """A channel didn't take a message. `permanent` means trying again can't help, such as a deleted webhook."""
+
+    def __init__(self, message: str, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+def _age_seconds(iso: str) -> float:
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        return float("inf")
+
+
+def _pack(message: dict[str, Any]) -> str:
+    """A message as text for the retry queue. Charts and the PDF are kept unless that makes it too large."""
+    def encode(value: Any) -> Any:
+        if isinstance(value, (bytes, bytearray)):
+            return {"__bytes__": base64.b64encode(bytes(value)).decode()}
+        if isinstance(value, dict):
+            return {key: encode(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [encode(item) for item in value]
+        return value
+
+    packed = json.dumps(encode(message), default=str)
+    if len(packed) > MAX_QUEUED_BYTES:
+        slim = {key: value for key, value in message.items() if key not in {"attachments", "images", "body_html"}}
+        packed = json.dumps(encode(slim), default=str)
+    return packed
+
+
+def _unpack(text: str) -> dict[str, Any]:
+    def decode(value: Any) -> Any:
+        if isinstance(value, dict):
+            if set(value) == {"__bytes__"}:
+                return base64.b64decode(value["__bytes__"])
+            return {key: decode(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [decode(item) for item in value]
+        return value
+
+    return decode(json.loads(text))
+
+
+def _delayed(message: dict[str, Any], first_tried_at: str) -> dict[str, Any]:
+    """Says plainly that the message is late, so nobody reads an old alert as a new one."""
+    note = f"Delayed message. This channel didn't accept it at {first_tried_at[11:16]} UTC on {first_tried_at[:10]}, so it arrives late. Check the console for the current state."
+    late = dict(message)
+    late["subject"] = f"[DELAYED] {message.get('subject', '')}"[:200]
+    late["text"] = f"{note}\n\n{message.get('text', '')}"
+    if message.get("email_text"):
+        late["email_text"] = f"{note}\n\n{message['email_text']}"
+    if message.get("body_html"):
+        late["body_html"] = paragraph(note) + message["body_html"]
+    return late
 WEBHOOK_HOSTS = {
     "slack": ("hooks.slack.com",),
     "google_chat": ("chat.googleapis.com",),
@@ -110,7 +177,6 @@ def _escape_slack(text: str) -> str:
 class Notifier:
     def __init__(self, db: Database, box: SecretBox, config: Config, mailer: Mailer) -> None:
         self.db, self.box, self.config, self.mailer = db, box, config, mailer
-        self._sent: dict[tuple[int, str], float] = {}
         self.on_critical: Any = None
         self.engines: Any = None
         self._waiting: set[asyncio.Task[None]] = set()
@@ -119,6 +185,25 @@ class Notifier:
     def close(self) -> None:
         for task in self._waiting:
             task.cancel()
+
+    # Which channel heard about which problem. Kept in the database, so a recovery still goes there after a restart.
+    async def _sent_at(self, channel_id: int, fingerprint: str) -> str | None:
+        row = await self.db.one("SELECT sent_at FROM alert_sent WHERE channel_id = ? AND fingerprint = ?", (channel_id, fingerprint))
+        return row["sent_at"] if row else None
+
+    async def _mark_sent(self, org_id: int, channel_id: int, fingerprints: list[str]) -> None:
+        now = utcnow()
+        for fingerprint in fingerprints:
+            await self.db.execute(
+                "INSERT INTO alert_sent(channel_id, fingerprint, org_id, sent_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(channel_id, fingerprint) DO UPDATE SET sent_at = excluded.sent_at", (channel_id, fingerprint, org_id, now))
+
+    async def forget_sent(self, org_id: int, channel_id: int | None = None, fingerprint: str | None = None) -> None:
+        """Forgets what was sent: one problem on one channel when it clears, or everything for an organization."""
+        if channel_id is None:
+            await self.db.execute("DELETE FROM alert_sent WHERE org_id = ?", (org_id,))
+        else:
+            await self.db.execute("DELETE FROM alert_sent WHERE channel_id = ? AND fingerprint = ?", (channel_id, fingerprint))
 
     async def handle_event(self, org_id: int, event: dict[str, Any], detail: dict[str, Any]) -> None:
         try:
@@ -254,25 +339,23 @@ class Notifier:
         for channel in channels:
             if cleared:
                 # Only report recovery on channels that heard about the problem.
-                if (channel["id"], event["fingerprint"]) not in self._sent:
+                if not await self._sent_at(channel["id"], event["fingerprint"]):
                     continue
-                self._sent.pop((channel["id"], event["fingerprint"]), None)
+                await self.forget_sent(org_id, channel["id"], event["fingerprint"])
                 # This email hasn't gone out yet, and when it does it will say the alert cleared.
                 if waiting and channel["kind"] == "email":
                     continue
             else:
                 if SEVERITY_RANK.get(event["severity"], 0) < SEVERITY_RANK.get(channel["min_severity"], 1):
                     continue
-                key = (channel["id"], event["fingerprint"])
-                if time.monotonic() - self._sent.get(key, -COOLDOWN_S) < COOLDOWN_S:
+                sent_at = await self._sent_at(channel["id"], event["fingerprint"])
+                if sent_at and _age_seconds(sent_at) < COOLDOWN_S:
                     continue
                 if settings and not self.noise.allow(channel["id"], int(settings["max_per_hour"])):
                     self._overflow(org_id, channel, event)
                     continue
-                self._sent[key] = time.monotonic()
                 # A grouped message stands for each problem in it, so each one's recovery goes to this channel too.
-                for member in members or []:
-                    self._sent[(channel["id"], member)] = time.monotonic()
+                await self._mark_sent(org_id, channel["id"], [event["fingerprint"], *(members or [])])
                 # Email waits so it can carry the findings. Chat channels hear about the alert straight away.
                 if investigation_id is not None and channel["kind"] == "email":
                     held_ids.append(channel["id"])
@@ -340,7 +423,8 @@ class Notifier:
         for row in await self.db.all("SELECT conversation_id FROM held_alerts"):
             await self.release_held(row["conversation_id"], "The console restarted before the automatic investigation finished, so this message has only the alert.", final=True)
 
-    async def deliver(self, channel: dict[str, Any], org_id: int, fingerprint: str, message: dict[str, str]) -> dict[str, Any]:
+    async def deliver(self, channel: dict[str, Any], org_id: int, fingerprint: str, message: dict[str, Any], retry: bool = True) -> dict[str, Any]:
+        """Sends now, with three quick tries. If the channel still doesn't take it, the message waits in the queue and is tried again later."""
         status, error = "sent", ""
         last_error: Exception | None = None
         for attempt in range(3):
@@ -348,19 +432,73 @@ class Notifier:
                 await self._send(channel, message)
                 last_error = None
                 break
-            except (httpx.HTTPError, MailError, ValueError) as caught:
+            except (httpx.HTTPError, MailError, DeliveryError, ValueError) as caught:
                 last_error = caught
+                if getattr(caught, "permanent", False):
+                    break
                 await asyncio.sleep(attempt + 0.2)
         if last_error is not None:
-            status, error = "failed", scrub(str(last_error))[:300]
-        await self.db.insert(
+            error = scrub(str(last_error))[:300]
+            status = "retrying" if retry and not getattr(last_error, "permanent", False) else "failed"
+        delivery_id = await self.db.insert(
             "INSERT INTO deliveries(org_id, channel_id, fingerprint, title, status, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (org_id, channel["id"], fingerprint, message["subject"][:300], status, error, utcnow()),
+            (org_id, channel["id"], fingerprint, str(message["subject"])[:300], status, error, utcnow()),
         )
+        if status == "retrying":
+            now = utcnow()
+            await self.db.insert(
+                "INSERT INTO delivery_queue(org_id, channel_id, delivery_id, fingerprint, message, attempts, first_tried_at, next_try_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                (org_id, channel["id"], delivery_id, fingerprint, _pack(message), now, utc_after(seconds=RETRY_AFTER_S[0])))
+        DELIVERIES.labels(status).inc()
         return {"status": status, "error": error}
 
+    async def retry_due(self) -> int:
+        """Tries again every queued message whose wait is over. Returns how many were delivered."""
+        delivered = 0
+        rows = await self.db.all("SELECT * FROM delivery_queue WHERE next_try_at <= ? ORDER BY id LIMIT 25", (utcnow(),))
+        for row in rows:
+            channel = await self.db.one("SELECT * FROM channels WHERE id = ? AND org_id = ? AND enabled = 1", (row["channel_id"], row["org_id"]))
+            if not channel:
+                await self._retry_ended(row, "failed", "The channel was removed or paused before the message could be delivered.")
+                continue
+            attempts = int(row["attempts"]) + 1
+            try:
+                await self._send(channel, _delayed(_unpack(row["message"]), row["first_tried_at"]))
+            except (httpx.HTTPError, MailError, DeliveryError, ValueError) as caught:
+                error = scrub(str(caught))[:300]
+                if getattr(caught, "permanent", False) or attempts >= len(RETRY_AFTER_S):
+                    await self._retry_ended(row, "failed", f"Given up after {attempts + 1} tries. {error}"[:300])
+                else:
+                    await self.db.execute("UPDATE delivery_queue SET attempts = ?, next_try_at = ? WHERE id = ?",
+                                          (attempts, utc_after(seconds=RETRY_AFTER_S[attempts]), row["id"]))
+                    await self.db.execute("UPDATE deliveries SET error = ? WHERE id = ?", (error, row["delivery_id"]))
+                continue
+            except Exception as caught:  # A message that can't even be rebuilt is given up, not retried forever.
+                log.exception("queued message couldn't be sent")
+                await self._retry_ended(row, "failed", scrub(f"The queued message couldn't be sent: {caught}")[:300])
+                continue
+            await self._retry_ended(row, "sent", f"Delivered late, after {attempts + 1} tries.")
+            delivered += 1
+        return delivered
+
+    async def _retry_ended(self, row: dict[str, Any], status: str, note: str) -> None:
+        await self.db.execute("UPDATE deliveries SET status = ?, error = ? WHERE id = ?", (status, note, row["delivery_id"]))
+        await self.db.execute("DELETE FROM delivery_queue WHERE id = ?", (row["id"],))
+        DELIVERIES.labels(status).inc()
+
+    async def retry_loop(self) -> None:
+        while True:
+            try:
+                await self.retry_due()
+            except Exception:  # The queue is tried again on the next round.
+                log.exception("retrying queued messages failed")
+            await asyncio.sleep(RETRY_POLL_S)
+
     async def _send(self, channel: dict[str, Any], message: dict[str, str]) -> None:
-        settings = self.box.decrypt_json(channel["config_enc"])
+        try:
+            settings = self.box.decrypt_json(channel["config_enc"])
+        except ValueError as error:
+            raise DeliveryError(str(error), permanent=True) from error
         kind = channel["kind"]
         if kind == "email":
             for address in settings.get("recipients", []):
@@ -378,11 +516,13 @@ class Notifier:
                 "$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard", "version": "1.4",
                 "body": [{"type": "TextBlock", "text": message["text"], "wrap": True}]}}]}
         else:
-            raise ValueError(f"Unknown channel type: {kind}")
+            raise DeliveryError(f"Unknown channel type: {kind}", permanent=True)
         async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False, transport=guarded_transport(self.config.target_policy)) as client:
             response = await client.post(settings["url"], content=json.dumps(payload), headers={"Content-Type": "application/json"})
         if response.status_code >= 300:
-            raise ValueError(f"The service returned HTTP {response.status_code}.")
+            # A refused address or payload stays refused. Busy or failing services are worth another try.
+            permanent = 400 <= response.status_code < 500 and response.status_code not in {408, 425, 429}
+            raise DeliveryError(f"The service returned HTTP {response.status_code}.", permanent=permanent)
 
     async def notify_investigation(self, org_id: int, conversation_id: int, title: str, answer: str, verification: dict[str, Any]) -> None:
         """Chat channels get a short summary. Email gets the findings, charts, commands, and a PDF, clearly labeled as advice to verify."""

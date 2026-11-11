@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -110,6 +110,31 @@ ALTER TABLE messages ADD COLUMN answer_style TEXT NOT NULL DEFAULT 'report';
 # deliberately held back, so one that was still waiting when the console stopped is sent after it starts again.
 # Older rows count as handled.
 V9_COLUMNS = """ALTER TABLE events ADD COLUMN handled INTEGER NOT NULL DEFAULT 1;
+"""
+
+# Version 10: alert state that outlives the process. alert_sent remembers which channel heard about which
+# problem, so its recovery goes there after a restart too. delivery_queue holds messages a channel didn't
+# accept, to try again later. The index serves "the latest event of each problem".
+V10_TABLES = """CREATE TABLE alert_sent (
+  channel_id BIGINT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  org_id BIGINT NOT NULL,
+  sent_at TEXT NOT NULL,
+  PRIMARY KEY (channel_id, fingerprint)
+);
+CREATE TABLE delivery_queue (
+  id {PK},
+  org_id BIGINT NOT NULL,
+  channel_id BIGINT NOT NULL,
+  delivery_id BIGINT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  message TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_tried_at TEXT NOT NULL,
+  next_try_at TEXT NOT NULL
+);
+CREATE INDEX idx_delivery_queue_due ON delivery_queue(next_try_at);
+CREATE INDEX idx_events_org_fingerprint ON events(org_id, fingerprint, id);
 """
 
 COMMON = """
@@ -450,15 +475,17 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         statements += _split(V8_COLUMNS)
     if version < 9:
         statements += _split(V9_COLUMNS)
+    if version < 10:
+        statements += _split(V10_TABLES.format(**types))
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + V10_TABLES.format(**SQLITE_TYPES) + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS)
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS) + _split(V10_TABLES.format(**POSTGRES_TYPES))
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

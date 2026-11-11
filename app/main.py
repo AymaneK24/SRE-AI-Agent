@@ -139,9 +139,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         await notifier.release_after_restart()
         await db.audit(0, "console_started", "", {"mode": config.mode, "database": "postgresql" if db.is_postgres else "sqlite"})
         await engines.start_active()
-        maintenance = asyncio.create_task(maintenance_loop(db))
+        background = [asyncio.create_task(maintenance_loop(db), name="maintenance"),
+                      asyncio.create_task(notifier.retry_loop(), name="delivery-retries"),
+                      asyncio.create_task(engines.watchdog(), name="polling-watchdog")]
         yield
-        maintenance.cancel()
+        for task in background:
+            task.cancel()
         notifier.close()
         await investigations.stop_all()
         await engines.stop_all()
@@ -156,8 +159,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         return JSONResponse({"detail": friendly_validation_error(list(error.errors()))}, status_code=422)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> JSONResponse:
+        # Alive means watching. A polling loop that is stuck can only be cured by a restart, so this says so
+        # and the container's health check or Kubernetes restarts the console. Unreachable sources don't count:
+        # that is the customer's system failing, which is exactly when the console must stay up.
+        if engines.stalled():
+            return JSONResponse({"status": "stalled"}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:

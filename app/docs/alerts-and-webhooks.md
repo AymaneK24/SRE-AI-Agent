@@ -19,6 +19,14 @@ Messages describe the problem and link to the console. They have no buttons that
 
 > **Security:** Alert messages contain host names, queries, and findings, whatever the recipient's role in the console. Choose each channel's recipients with care, and treat Slack and Teams webhook addresses like passwords: anyone with one can post to that channel.
 
+### When a channel doesn't answer, or the console restarts
+
+An alert must not depend on everything working at the same moment.
+
+- **A channel that refuses a message gets it later.** After three quick tries, the message waits and is tried again after 30 seconds, 2 minutes, 10 minutes, 30 minutes, then every one to eight hours, for about a day. When it arrives it starts with *Delayed message* and the time it was first tried, so nobody reads an old alert as a new one. An address the service refuses for good, such as a deleted webhook (HTTP 404), isn't retried. A test message is never queued.
+- **A restart loses nothing.** A problem whose message was still waiting out its grace period is sent after the console starts again. A recovery still goes to the channels that heard about the problem, because that is remembered in the database.
+- **What isn't kept across a restart:** flapping counts, the group being collected, and each channel's hourly count start again.
+
 ### Automatic investigations
 
 With **Investigate critical alerts automatically** on, a critical alert starts an investigation by itself:
