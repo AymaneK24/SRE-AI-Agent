@@ -89,7 +89,7 @@ class GoogleServiceAccountAuth(_TokenAuth):
 
     async def _fetch(self) -> tuple[str, float]:
         from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
         now = int(time.time())
         token_uri = self.account.get("token_uri", "https://oauth2.googleapis.com/token")
@@ -101,6 +101,8 @@ class GoogleServiceAccountAuth(_TokenAuth):
             "iss": self.account["client_email"], "scope": self.scope, "aud": token_uri, "iat": now, "exp": now + 3600,
         })
         key = serialization.load_pem_private_key(self.account["private_key"].encode(), password=None)
+        if not isinstance(key, rsa.RSAPrivateKey):
+            raise httpx.TransportError("This service account key isn't an RSA key. Download a new JSON key from Google Cloud.")
         signature = key.sign(body, padding.PKCS1v15(), hashes.SHA256())
         assertion = body + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")
         async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
