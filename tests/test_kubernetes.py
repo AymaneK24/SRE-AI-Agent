@@ -1,4 +1,5 @@
 """Kubernetes and logs as first-class connections: problems, events, context, tools, and answer checks."""
+import asyncio
 import json
 import datetime as dt
 import ssl
@@ -554,7 +555,9 @@ async def test_a_deployment_already_broken_at_connect_is_alerted_once(console, k
     assert message["Subject"].startswith("[CRITICAL]") and "checkout" in message["Subject"] and "can't pull its image" in message["Subject"]
 
     # A restart finds it again. It was already announced, so nobody gets a second email for the same outage.
-    console.ctx.notifier._sent.clear()
+    while await console.ctx.db.all("SELECT id FROM events WHERE handled = 0"):  # The notifier finishes its bookkeeping first.
+        await asyncio.sleep(0.02)
+    await console.ctx.notifier.forget_sent(engine.org_id)  # Even without the 15-minute repeat guard.
     engine._reset_state()
     await engine.refresh_now()
     await _wait_for(lambda: len(alerts()) > 1, seconds=2)

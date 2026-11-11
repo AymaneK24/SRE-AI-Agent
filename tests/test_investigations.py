@@ -433,7 +433,9 @@ async def test_alerts_already_active_on_connect_are_sent_once(console, prom_serv
     events = (await client.get("/api/events")).json()
     assert any(event["title"].startswith("Already active") for event in events), "the start time is unknown, and the title says so"
     # A restart sees the same alert again. It was announced already.
-    console.ctx.notifier._sent.clear()
+    while await console.ctx.db.all("SELECT id FROM events WHERE handled = 0"):  # The notifier finishes its bookkeeping first.
+        await asyncio.sleep(0.02)
+    await console.ctx.notifier.forget_sent(engine.org_id)  # Even without the 15-minute repeat guard.
     engine._reset_state()
     await engine.refresh_now()
     await asyncio.sleep(0.5)

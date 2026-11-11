@@ -17,6 +17,8 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from prometheus_client import Counter
+
 from ..broker import Broker
 from ..config import Config
 from ..db import Database, sha256_text, utcnow
@@ -50,6 +52,11 @@ MAX_SERIES_PER_SIGNAL = 10
 ANOMALY_Z = 4.0
 ANOMALY_SUSTAIN_POLLS = 2
 EVENT_MEMORY = 50
+# A polling loop that hasn't come round for this long after it was due is stuck, not slow.
+STALLED_AFTER_S = 300
+WATCHDOG_EVERY_S = 30
+POLL_FAILURES = Counter("rcc_poll_failures_total", "Polls that ended with an unexpected error")
+LOOP_RESTARTS = Counter("rcc_polling_restarts_total", "Polling loops restarted after ending unexpectedly")
 SEED_WINDOW_S = 300
 MAX_SEEDED_PANELS = 6
 
@@ -143,11 +150,39 @@ class ContextEngine:
         self._k8s_missing_since: dict[str, float] = {}
         self._event_tasks: set[asyncio.Task[None]] = set()
         self.poll_failures = 0
+        self._loop_beat = time.monotonic()
+        self._loop_delay = float(NO_SOURCE_POLL_S)
 
     # Lifecycle --------------------------------------------------------------
     async def start(self) -> None:
         await self.reload_sources()
+        self._start_loop()
+
+    def _start_loop(self) -> None:
+        self._loop_beat = time.monotonic()
         self._task = asyncio.create_task(self._loop(), name=f"context-engine-{self.org_id}")
+
+    @property
+    def loop_ended(self) -> bool:
+        """The polling loop ended although nobody stopped it."""
+        return bool(self._task and self._task.done() and not self._stopping)
+
+    @property
+    def stalled(self) -> bool:
+        """The polling loop is stuck: it hasn't come round long after it was due."""
+        if self._stopping or self._task is None or self._task.done():
+            return False
+        return time.monotonic() - self._loop_beat > self._loop_delay + STALLED_AFTER_S
+
+    def revive(self) -> bool:
+        """Starts the polling loop again if it ended unexpectedly. True when it did."""
+        if not self.loop_ended:
+            return False
+        error = None if self._task is None or self._task.cancelled() else self._task.exception()
+        log.error("the polling loop for organization %s ended unexpectedly (%s); starting it again", self.org_id, error or "cancelled")
+        LOOP_RESTARTS.inc()
+        self._start_loop()
+        return True
 
     async def stop(self) -> None:
         # The flag and the wake-up end the loop even if a cancellation is lost. That happens when it arrives at the
@@ -226,6 +261,7 @@ class ContextEngine:
 
     async def _loop(self) -> None:
         while not self._stopping:
+            self._loop_beat = time.monotonic()
             delay = float(NO_SOURCE_POLL_S)
             if self.has_connections:
                 try:
@@ -243,6 +279,7 @@ class ContextEngine:
                 self.broker.publish({"type": "context", "data": self.public_context()})
             if self._stopping:
                 return
+            self._loop_beat, self._loop_delay = time.monotonic(), delay
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -254,6 +291,7 @@ class ContextEngine:
     def _poll_failed(self, error: Exception) -> None:
         """Keeps the last picture, marked as out of date, and tells open pages. The next poll tries again."""
         self.poll_failures += 1
+        POLL_FAILURES.inc()
         health = {**self.context.get("health", {}), "error": scrub(f"The console couldn't finish its last check ({type(error).__name__}). It will try again.")}
         self.context = {**self.context, "health": health, "stale": True}
         self.broker.publish({"type": "context", "data": self.public_context()})
@@ -940,6 +978,22 @@ class EngineManager:
         for engine in list(self.engines.values()):
             await engine.stop()
         self.engines = {}
+
+    def stalled(self) -> list[int]:
+        """Organizations whose polling loop is stuck. A restart of the console is the only cure."""
+        return [org_id for org_id, engine in self.engines.items() if engine.stalled]
+
+    def revive(self) -> int:
+        """Restarts polling loops that ended unexpectedly. Returns how many."""
+        return sum(1 for engine in list(self.engines.values()) if engine.revive())
+
+    async def watchdog(self) -> None:
+        while True:
+            await asyncio.sleep(WATCHDOG_EVERY_S)
+            try:
+                self.revive()
+            except Exception:  # The watchdog itself must keep running.
+                log.exception("the polling watchdog failed")
 
 
 MAIN_KINDS = ("metrics", "loki", "kubernetes")

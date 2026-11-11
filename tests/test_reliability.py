@@ -1,12 +1,42 @@
 """The console keeps watching and keeps its promises across failures and restarts."""
 import asyncio
+import json
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
 from conftest import PG_URL, Console, FakeProm, _reset_postgres
 from test_investigations import _company_with_source, _set_ollama
 
 from app.db import Database, utcnow
 from app.main import create_app
+from app.notifications import RETRY_AFTER_S
+
+
+class FlakyHook(BaseHTTPRequestHandler):
+    """A chat webhook that can be told to refuse messages."""
+    received: list = []
+    status = 200
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if FlakyHook.status == 200:
+            FlakyHook.received.append(json.loads(body))
+        self.send_response(FlakyHook.status)
+        self.end_headers()
+
+
+@pytest.fixture
+def flaky_hook():
+    FlakyHook.received, FlakyHook.status = [], 200
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FlakyHook)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}/hook"
+    server.shutdown()
 
 
 async def _wait_for(check, seconds=10.0):
@@ -167,7 +197,7 @@ def test_upgrading_from_version_8_keeps_old_events_as_handled(tmp_path):
     from app import schema
     path = tmp_path / "console.db"
     conn = sqlite3.connect(path)
-    conn.executescript(schema.sqlite_statements().replace(schema.V9_COLUMNS, ""))
+    conn.executescript(schema.sqlite_statements().replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), ""))
     conn.execute("INSERT INTO events(org_id, ts, kind, severity, fingerprint, title) VALUES (1, 'now', 'alert_started', 'critical', 'alert:x', 'Old alert')")
     conn.execute("PRAGMA user_version=8")
     conn.commit()
@@ -176,3 +206,144 @@ def test_upgrading_from_version_8_keeps_old_events_as_handled(tmp_path):
     assert db._all("SELECT title, handled FROM events") == [{"title": "Old alert", "handled": 1}]
     assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
     db.close()
+
+
+# Durable alerts -------------------------------------------------------------
+async def test_a_recovery_reaches_the_channel_that_heard_the_problem_even_after_a_restart(make_config, prom_server, flaky_hook):
+    if PG_URL:
+        _reset_postgres()
+    app = create_app(make_config())
+    async with app.router.lifespan_context(app):
+        first = Console(app)
+        client = await first.company("TestCo", "o@test.example")
+        org_id = (await client.get("/api/auth/me")).json()["org_id"]
+        assert (await client.post("/api/org/channels", json={"kind": "slack", "name": "ops", "url": flaky_hook, "min_severity": "warning"})).status_code == 201
+        await client.post("/api/sources", json={"name": "lab", "poll_seconds": 5, "config": {"host": "127.0.0.1", "port": prom_server.server_address[1]}, "secrets": {}})
+        engine = await first.ctx.engines.get(org_id)
+        await engine.refresh_now()
+        FakeProm.state.firing = True
+        await engine.refresh_now()
+        await _wait_for(lambda: asyncio.sleep(0, len(FlakyHook.received) == 1))
+        await _wait_for(lambda: _all_handled(first.ctx.db))
+    app = create_app(make_config())
+    async with app.router.lifespan_context(app):
+        second = Console(app)
+        engine = await second.ctx.engines.get(org_id)
+        await engine.refresh_now()
+        FakeProm.state.firing = False
+        await engine.refresh_now()
+        await _wait_for(lambda: asyncio.sleep(0, len(FlakyHook.received) == 2))
+        assert "RESOLVED" in FlakyHook.received[1]["text"] and "HighErrorRate" in FlakyHook.received[1]["text"]
+        assert await second.ctx.db.all("SELECT fingerprint FROM alert_sent WHERE org_id = ?", (org_id,)) == []
+
+
+async def _all_handled(db):
+    return not await db.all("SELECT id FROM events WHERE handled = 0")
+
+
+async def _slack_with_firing_alert(console, prom_server, url):
+    client, org_id, engine = await _company_with_source(console, prom_server)
+    made = await client.post("/api/org/channels", json={"kind": "slack", "name": "ops", "url": url, "min_severity": "warning"})
+    assert made.status_code == 201, made.text
+    FakeProm.state.firing = True
+    await engine.refresh_now()
+    return client, org_id, made.json()["id"]
+
+
+async def test_a_message_the_channel_refused_is_delivered_later_and_says_it_is_late(console, prom_server, flaky_hook):
+    FlakyHook.status = 503
+    client, org_id, channel_id = await _slack_with_firing_alert(console, prom_server, flaky_hook)
+    db, notifier = console.ctx.db, console.ctx.notifier
+
+    async def queued():
+        return await db.all("SELECT * FROM delivery_queue WHERE org_id = ?", (org_id,))
+
+    row = (await _wait_for(queued, 15))[0]
+    assert row["attempts"] == 0 and row["next_try_at"] > utcnow()
+    assert [item["status"] for item in await db.all("SELECT status FROM deliveries WHERE org_id = ?", (org_id,))] == ["retrying"]
+    assert await notifier.retry_due() == 0 and not FlakyHook.received, "not before its wait is over"
+    # Still refused when its turn comes: it waits longer.
+    await db.execute("UPDATE delivery_queue SET next_try_at = ?", ("2000-01-01T00:00:00.000Z",))
+    assert await notifier.retry_due() == 0
+    row = (await queued())[0]
+    assert row["attempts"] == 1 and row["next_try_at"] > utcnow()
+    # The service is back.
+    FlakyHook.status = 200
+    await db.execute("UPDATE delivery_queue SET next_try_at = ?", ("2000-01-01T00:00:00.000Z",))
+    assert await notifier.retry_due() == 1
+    text = FlakyHook.received[0]["text"]
+    assert text.startswith("Delayed message.") and "HighErrorRate" in text
+    assert await queued() == []
+    delivery = (await db.all("SELECT status, error FROM deliveries WHERE org_id = ?", (org_id,)))[0]
+    assert delivery["status"] == "sent" and "late" in delivery["error"]
+    week = (await client.get("/api/org/noise")).json()["week"]
+    assert week["messages_sent"] == 1 and week["retrying"] == 0
+
+
+async def test_a_message_is_given_up_after_its_last_retry_or_when_its_channel_is_removed(console, prom_server, flaky_hook):
+    FlakyHook.status = 503
+    client, org_id, channel_id = await _slack_with_firing_alert(console, prom_server, flaky_hook)
+    db, notifier = console.ctx.db, console.ctx.notifier
+
+    async def queued():
+        return await db.all("SELECT * FROM delivery_queue WHERE org_id = ?", (org_id,))
+
+    await _wait_for(queued, 15)
+    await db.execute("UPDATE delivery_queue SET next_try_at = ?, attempts = ?", ("2000-01-01T00:00:00.000Z", len(RETRY_AFTER_S) - 1))
+    await notifier.retry_due()
+    assert await queued() == []
+    delivery = (await db.all("SELECT status, error FROM deliveries WHERE org_id = ?", (org_id,)))[0]
+    assert delivery["status"] == "failed" and "Given up" in delivery["error"]
+    # A test message is never queued: the person pressing the button sees the result at once.
+    result = (await client.post(f"/api/org/channels/{channel_id}/test")).json()
+    assert result["status"] == "failed" and await queued() == []
+    # A queued message whose channel is deleted is dropped.
+    await db.insert("INSERT INTO delivery_queue(org_id, channel_id, delivery_id, fingerprint, message, attempts, first_tried_at, next_try_at) VALUES (?, 12345, 1, 'x', '{}', 0, ?, ?)",
+                    (org_id, utcnow(), "2000-01-01T00:00:00.000Z"))
+    await notifier.retry_due()
+    assert await queued() == []
+
+
+async def test_an_address_the_service_refuses_for_good_is_not_retried(console, prom_server, flaky_hook):
+    FlakyHook.status = 404
+    client, org_id, channel_id = await _slack_with_firing_alert(console, prom_server, flaky_hook)
+    db = console.ctx.db
+
+    async def failed():
+        return await db.all("SELECT error FROM deliveries WHERE org_id = ? AND status = 'failed'", (org_id,))
+
+    rows = await _wait_for(failed)
+    assert "404" in rows[0]["error"] and await db.all("SELECT id FROM delivery_queue") == []
+
+
+def test_a_queued_message_keeps_its_charts_and_report():
+    from app.notifications import _delayed, _pack, _unpack
+    message = {"subject": "[CRITICAL] x", "text": "t", "body_html": "<p>b</p>", "images": {"chart1": b"\x89PNG"}, "attachments": [{"filename": "r.pdf", "data": b"%PDF", "mime": "application/pdf"}]}
+    assert _unpack(_pack(message)) == message
+    late = _delayed(message, "2026-11-11T10:02:00.000Z")
+    assert late["subject"] == "[DELAYED] [CRITICAL] x" and "10:02 UTC" in late["text"] and "10:02 UTC" in late["body_html"]
+    assert message["subject"] == "[CRITICAL] x", "the queued copy isn't changed"
+
+
+# The console watches itself ---------------------------------------------------
+async def test_health_says_when_polling_is_stuck_and_a_loop_that_ended_is_started_again(console, prom_server):
+    client, org_id, engine = await _company_with_source(console, prom_server)
+    anon = console.client()
+    assert (await anon.get("/healthz")).json() == {"status": "ok"}
+    # Sources that don't answer are the customer's outage, not the console's: it stays healthy.
+    prom_server.shutdown()
+    prom_server.server_close()
+    await engine.refresh_now()
+    assert engine.context["health"]["status"] == "unreachable" and (await anon.get("/healthz")).status_code == 200
+    # A loop that hasn't come round long after it was due is stuck.
+    engine._loop_beat -= 3600
+    response = await anon.get("/healthz")
+    assert response.status_code == 503 and response.json() == {"status": "stalled"}
+    engine._loop_beat += 3600
+    # A loop that ended is started again by the watchdog.
+    engine._task.cancel()
+    await asyncio.gather(engine._task, return_exceptions=True)
+    assert engine.loop_ended and console.ctx.engines.revive() == 1
+    assert not engine._task.done() and not engine.loop_ended
+    assert console.ctx.engines.revive() == 0
+    assert (await anon.get("/healthz")).status_code == 200

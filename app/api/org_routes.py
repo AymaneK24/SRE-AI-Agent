@@ -271,7 +271,7 @@ async def delete_org(request: Request, user: Owner, ctx: Ctx) -> Response:
     if body.get("confirm_name") != org["name"]:
         raise HTTPException(422, "Type the organization's exact name to confirm.")
     await ctx.engines.remove(user.org_id)
-    for table in ("project_reports", "projects", "settings", "events", "change_events", "context_snapshots", "deliveries", "search_index", "llm_calls", "tool_calls", "workflow_records"):
+    for table in ("project_reports", "projects", "settings", "events", "change_events", "context_snapshots", "deliveries", "alert_sent", "delivery_queue", "search_index", "llm_calls", "tool_calls", "workflow_records"):
         await ctx.db.execute(f"DELETE FROM {table} WHERE org_id = ?", (user.org_id,))  # noqa: S608
     await ctx.db.execute("DELETE FROM organizations WHERE id = ?", (user.org_id,))
     await ctx.db.audit(0, "organization_deleted", f"org:{user.org_id}", {"name": org["name"]}, actor=user.actor)
@@ -309,6 +309,7 @@ async def create_channel(body: ChannelBody, user: Admin, ctx: Ctx) -> dict[str, 
 @router.delete("/org/channels/{channel_id}", status_code=204)
 async def delete_channel(channel_id: int, user: Admin, ctx: Ctx) -> Response:
     await ctx.db.execute("DELETE FROM channels WHERE id = ? AND org_id = ?", (channel_id, user.org_id))
+    await ctx.db.execute("DELETE FROM alert_sent WHERE channel_id = ? AND org_id = ?", (channel_id, user.org_id))
     await ctx.db.audit(user.org_id, "alert_channel_deleted", f"channel:{channel_id}", {}, actor=user.actor)
     return Response(status_code=204)
 
@@ -319,7 +320,7 @@ async def test_channel(channel_id: int, user: Admin, ctx: Ctx) -> dict[str, Any]
     if not row:
         raise HTTPException(404, "This channel no longer exists.")
     message = {"subject": "[TEST] Root Cause Console alert channel", "text": "This is a test from Root Cause Console. Alerts for your organization will arrive here.\nRead-only notification. Root Cause Console didn't change anything."}
-    return await ctx.notifier.deliver(row, user.org_id, "test", message)
+    return await ctx.notifier.deliver(row, user.org_id, "test", message, retry=False)
 
 
 @router.get("/org/deliveries")
@@ -352,7 +353,7 @@ async def get_noise(user: Admin, ctx: Ctx) -> dict[str, Any]:
     counts = {row["status"]: int(row["n"]) for row in rows}
     held = {key.split(":", 1)[1]: value for key, value in counts.items() if key.startswith("suppressed:")}
     return {**await noise.load(ctx.db, user.org_id, ctx.config),
-            "week": {"problems_started": int(started["n"] or 0), "messages_sent": counts.get("sent", 0), "failed": counts.get("failed", 0),
+            "week": {"problems_started": int(started["n"] or 0), "messages_sent": counts.get("sent", 0), "failed": counts.get("failed", 0), "retrying": counts.get("retrying", 0),
                      "held_back": held, "held_back_total": sum(held.values())}}
 
 
