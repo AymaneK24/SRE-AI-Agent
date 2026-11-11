@@ -39,8 +39,6 @@ def defaults(config: Any) -> dict[str, Any]:
         "max_per_hour": 12,
         "flapping": True,
         "respect_verdicts": True,
-        # Off by default: an alert explained by a broken dependency is still sent, with its likely cause named.
-        "hold_symptoms": False,
     }
 
 

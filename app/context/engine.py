@@ -13,18 +13,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..net_guard import BlockedTarget
 from ..db import utcnow
 from ..secrets_store import scrub
 from ..sources.base import SourceError
 from ..sources.registry import build_source
-from ..topology import OBSERVED_QUERIES, Topology, link_problems, parse_observed, public_map
 from .connections import main_connections, pick_main
 from .integrations import IntegrationWatch
 from .polling import SourcePolling
 from .problems import ProblemTracking
 from .signals import COVERAGE_CHECKS
-from .state import (NEVER, BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, INTEGRATION_EVERY_S, OBSERVED_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
+from .state import (NEVER, BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, INTEGRATION_EVERY_S, LOOP_RESTARTS, NO_SOURCE_POLL_S, POLL_FAILURES, SNAPSHOT_EVERY_S, STALLED_AFTER_S, STOP_TIMEOUT_S,
                     SourceState, log)
 from .summary import headline_for, material_hash, ranked_problems, summarize_alerts, summarize_rules
 
@@ -89,8 +87,6 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
         async with self._poll_lock:
             await self._close_sources()
             self._reset_state()
-            # A source just added or changed may have traces or mesh metrics: read them on the next poll, not in 5 minutes.
-            self._observed_at = None
             rows = await self.db.all("SELECT * FROM sources WHERE org_id = ? AND enabled = 1 ORDER BY id", (self.org_id,))
             self.source_errors = []
             for row in rows:
@@ -220,54 +216,6 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
             raise SourceError("No metric source is connected, so metric queries can't run. Use the log and Kubernetes tools instead.", "bad_data")
         raise SourceError("That metric source isn't connected.", "bad_data")
 
-    async def _refresh_observed(self) -> None:
-        """Calls seen in traces or a service mesh, from the metric sources. Read every few minutes: they change slowly."""
-        if self._observed_at is not None and time.monotonic() - self._observed_at < OBSERVED_EVERY_S:
-            return
-        self._observed_at = time.monotonic()
-        observed: dict[str, list[dict[str, Any]]] = {}
-        for state in self.states.values():
-            if state.source.kind != "prometheus" or state.failures:
-                continue
-            for kind, total_query, failed_query, client_keys, server_keys in OBSERVED_QUERIES:
-                try:
-                    total = await state.source.query(total_query)
-                    if not total.get("result"):
-                        continue
-                    failed = await state.source.query(failed_query)
-                except (SourceError, BlockedTarget, ValueError, KeyError):
-                    continue
-                observed.setdefault(kind, []).extend(parse_observed(kind, total, failed, client_keys, server_keys))
-        self._observed = observed
-
-    def _map_problems(self, current: dict[str, dict[str, Any]], now_iso: str) -> None:
-        """Rebuilds the dependency map and marks problems that are likely symptoms of another."""
-        topology = Topology()
-        main_cluster = self.main_connections.get("kubernetes")
-        names = {item["id"]: item["name"] for item in self.integration_list if item["kind"] == "kubernetes"}
-        for cluster_id, snapshot in self.k8s_snapshots.items():
-            topology.add_cluster(cluster_id, names.get(cluster_id, str(cluster_id)), snapshot, main=cluster_id == main_cluster or len(self.k8s_snapshots) == 1)
-        for kind, calls in self._observed.items():
-            topology.add_observed(kind, calls)
-        try:
-            links = link_problems(topology, current)
-        except Exception:  # The map is extra help. A bug in it must never stop problems being reported.
-            log.exception("linking problems on the dependency map failed")
-            links = {}
-        for fingerprint, link in links.items():
-            detail = current[fingerprint]["detail"]
-            detail["map_node"] = link["node"]
-            for key in ("caused_by", "affects", "impact"):
-                if link.get(key):
-                    detail[key] = link[key]
-                else:
-                    detail.pop(key, None)
-        self.topology, self.topology_links, self.topology_current = topology, links, current
-        self.topology_built_at = now_iso
-
-    def dependency_map(self) -> dict[str, Any]:
-        return public_map(self.topology, self.topology_current, self.topology_links, self.topology_built_at)
-
     async def poll(self) -> None:
         async with self._poll_lock:
             if not self.has_connections:
@@ -275,7 +223,6 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
             started = time.monotonic()
             results = list(await asyncio.gather(*(self._poll_source(state) for state in self.states.values())))
             await self._refresh_integrations()
-            await self._refresh_observed()
             await self._merge(results, started)
 
     async def _merge(self, results: list[dict[str, Any] | None], started: float) -> None:
@@ -314,7 +261,6 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
         rule_state = summarize_rules(groups_raw)
         anomalies = self._find_anomalies(signals)
         current = self._current_problems(target_state, alert_state, rule_state, anomalies)
-        self._map_problems(current, now_iso)
         if any_ok:
             await self._diff_and_record(current)
             self._last_ok_mono = time.monotonic()
