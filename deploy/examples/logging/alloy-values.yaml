@@ -1,0 +1,58 @@
+# Grafana Alloy, collecting every pod's logs through the Kubernetes API and sending them to Loki,
+# for use with Root Cause Console. Alloy replaces Promtail, which reached end of life on 2 March 2026.
+#
+#   helm repo add grafana https://grafana.github.io/helm-charts
+#   helm upgrade --install alloy grafana/alloy -n logging --create-namespace -f alloy-values.yaml
+#
+# Change LOKI_URL below first. Inside the same cluster it's usually
+# http://loki-gateway.loki.svc.cluster.local/loki/api/v1/push
+#
+# Each stream gets the labels namespace, pod, container and app, plus job="<namespace>/<container>".
+# The console counts log lines and errors per job, so keep the job label.
+
+alloy:
+  configMap:
+    content: |-
+      discovery.kubernetes "pod" {
+        role = "pod"
+      }
+
+      discovery.relabel "pod_logs" {
+        targets = discovery.kubernetes.pod.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_container_name"]
+          separator     = "/"
+          target_label  = "job"
+        }
+      }
+
+      loki.source.kubernetes "pod_logs" {
+        targets    = discovery.relabel.pod_logs.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "LOKI_URL"
+        }
+      }
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }

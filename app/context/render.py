@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .engine import age_seconds, label_text
+from .summary import age_seconds, label_text
 
 
 def format_value(value: float | None, unit: str) -> str:

@@ -15,7 +15,7 @@ DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
 
 # The order of the navigation. Each page is app/docs/<slug>.md, and its first line is "# Title".
 SECTIONS: list[tuple[str, list[str]]] = [
-    ("Get started", ["introduction", "quick-start", "concepts"]),
+    ("Get started", ["introduction", "whats-new", "quick-start", "customer-setup", "concepts"]),
     ("Use the platform", ["overview-page", "investigations", "projects-and-reports", "runbooks", "alerts-and-webhooks", "logs-and-audit"]),
     ("Connections", ["connections", "prometheus", "loki", "kubernetes", "cloud-sources", "finding-connection-details"]),
     ("AI models", ["ai-models", "accuracy-benchmark"]),

@@ -212,6 +212,8 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .savings-list .segments { justify-self: start; }
 .noise-title { margin-top: 30px; font-size: 18px; }
 .noise-steps { list-style: none; counter-reset: none; }
+.heartbeat-state { margin: 10px 0 12px; }
+.heartbeat-form { display: grid; gap: 12px; max-width: 900px; }
 
 /* Source picker: a pill like the segmented controls, naming which connection a part of the page shows.
    It only appears when there is more than one to choose from. */
@@ -413,11 +415,21 @@ textarea.query-input { font: 400 13px/1.45 var(--mono); }
 .two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px 56px; }
 .plain-list li { padding: 10px 0; border-top: 1px solid var(--line); color: var(--body); }
 .plain-list b { color: var(--ink); }
-.site-footer { flex: none; border-top: 1px solid var(--line); color: var(--muted); font-size: 13.5px; }
-.site-footer-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 24px; max-width: 1520px; margin: 0 auto; padding: 16px clamp(16px, 4vw, 56px); }
-.site-footer nav { display: flex; flex-wrap: wrap; gap: 6px 20px; }
-.site-footer a { text-decoration: none; }
-.site-footer a:hover { text-decoration: underline; }
+.site-footer { flex: none; background: var(--raised); border-top: 1px solid var(--line); color: var(--body); font-size: 13.5px; }
+.site-footer-inner { display: grid; grid-template-columns: minmax(240px, 1.6fr) repeat(3, auto); gap: 20px clamp(28px, 5vw, 72px); align-items: start; max-width: 1520px; margin: 0 auto; padding: 22px clamp(16px, 4vw, 56px) 20px; }
+.footer-brand p { max-width: 42ch; margin: 6px 0 0; line-height: 1.45; }
+.footer-brand .footer-fine { margin-top: 8px; color: var(--muted); font-size: 12.5px; }
+.footer-name { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-size: 15px; font-weight: 600; text-decoration: none; }
+.footer-logo { display: inline-flex; }
+.footer-col h2 { margin: 2px 0 8px; color: var(--muted); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.footer-col ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.footer-legal ul { grid-template-columns: repeat(2, auto); column-gap: 26px; }
+.site-footer a { color: var(--body); text-decoration: none; }
+.site-footer a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 860px) {
+  .site-footer-inner { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .footer-brand { grid-column: 1 / -1; }
+}
 .legal { max-width: 74ch; padding-top: 40px; }
 .legal h1 { font-size: clamp(36px, 4vw, 54px); font-weight: 600; line-height: 1.05; letter-spacing: -.04em; }
 .legal h2 { margin-top: 28px; font-size: 20px; }
@@ -578,7 +590,7 @@ pre.prompt-text { max-height: 58vh; margin: 8px 0 0; padding: 12px; overflow: au
 }
 
 /* Dropdowns: one look for every choice list. The native select stays hidden behind it (select.js). */
-.select-native { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; pointer-events: none; }
+select.select-native, .select-native { position: absolute !important; left: 0 !important; top: 0 !important; width: 1px !important; min-width: 0 !important; max-width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); border: 0 !important; opacity: 0; pointer-events: none; }
 .select-button { position: relative; display: inline-flex; align-items: center; min-width: 0; padding: 8px 36px 8px 11px; background: var(--raised); border: 1px solid var(--line); border-radius: 9px; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
 .select-button:hover:not(:disabled) { border-color: var(--muted); }
 .select-button[aria-expanded="true"] { border-color: var(--ink); }
@@ -593,3 +605,6 @@ pre.prompt-text { max-height: 58vh; margin: 8px 0 0; padding: 12px; overflow: au
 .select-item[aria-selected="true"]::after { content: ""; position: absolute; top: 50%; right: 13px; width: 5px; height: 10px; border-right: 2px solid var(--ink); border-bottom: 2px solid var(--ink); transform: translateY(-65%) rotate(45deg); }
 .select-item[aria-disabled="true"] { color: var(--muted); cursor: default; }
 @media (prefers-reduced-motion: reduce) { .select-button::after { transition: none; } }
+
+/* On small screens a wide table scrolls by itself instead of widening the page. */
+@media (max-width: 860px) { table.data-table { display: block; max-width: 100%; overflow-x: auto; } }

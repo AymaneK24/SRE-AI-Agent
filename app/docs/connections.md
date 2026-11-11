@@ -9,11 +9,11 @@ Admins add connections in **Connections**. Engineers and viewers see what's conn
 | [Prometheus](/docs/prometheus) | Firing alerts, targets, golden signals, saved charts | `run_instant_query`, `run_range_query`, `list_metrics` | Many |
 | [Amazon CloudWatch](/docs/cloud-sources#amazon-cloudwatch) | Alarms, chosen metrics, CloudTrail changes | Metric and log queries | Many |
 | [Azure Monitor](/docs/cloud-sources#azure-monitor) | Alerts, chosen metrics, Activity Log changes | Metric and log queries | Many |
-| [Loki](/docs/loki) | Log streams and error counts | `query_logs` | One |
-| [Kubernetes](/docs/kubernetes) | Workload problems, diagnoses, namespaces | `get_kubernetes_state`, `describe_object`, `get_pod_logs` | One |
+| [Loki](/docs/loki) | Log streams and error counts | `query_logs` | Many |
+| [Kubernetes](/docs/kubernetes) | Workload problems, diagnoses, namespaces | `get_kubernetes_state`, `describe_object`, `get_pod_logs` | Many |
 | [Alertmanager and CI/CD](/docs/alerts-and-webhooks#incoming-webhooks) | Alerts and changes, pushed by webhook | `get_recent_changes` | One pair of addresses |
 
-Any single connection is enough. The more you connect, the more evidence the model can check.
+Any single connection is enough. The more you connect, the more evidence the model can check, and the more problems are found: see [Set up a customer's environment](/docs/customer-setup) for what each one covers.
 
 ## Many sources, one view
 

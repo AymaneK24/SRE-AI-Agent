@@ -51,7 +51,7 @@ The database schema is upgraded on start, keeping your data. Ask people to reloa
 
 | Check | Meaning |
 |---|---|
-| `GET /healthz` | The process is up |
+| `GET /healthz` | The process is up and its polling isn't stuck. It answers 503 with `stalled` when a company's polling loop hasn't come round for 5 minutes after it was due, so Docker or Kubernetes restarts the console. Sources that don't answer don't count: that is when the console must stay up |
 | `GET /readyz` | The database answers |
 | `docker compose ps` | Each container's state and health |
 | `docker compose logs console` | The app's log: start-up problems, connection errors, and invitation or reset links when no email server is set |
@@ -59,6 +59,8 @@ The database schema is upgraded on start, keeping your data. Ask people to reloa
 The image has no shell, so `docker exec ... sh` doesn't work by design. Use the logs.
 
 ## Monitor the console itself
+
+The simplest check needs no Prometheus: a [heartbeat](/docs/alerts-and-webhooks#heartbeat-know-when-the-console-itself-stops) to an outside service that alerts you when the console stops calling.
 
 The console exposes Prometheus metrics at `/metrics`. Caddy blocks that path on the public address, so scrape the console directly on its internal port, with a token:
 
@@ -78,6 +80,15 @@ RCC_METRICS_TOKEN=$(openssl rand -hex 32)
 ```
 
 The scraper must use a host name in `RCC_ALLOWED_HOSTS`, or the console answers `400`. Add `console` to that list when scraping by Service name.
+
+Metrics worth an alert rule of your own:
+
+| Metric | Alert when |
+|---|---|
+| `rcc_poll_failures_total` | It keeps rising: the console can't finish its checks, often because its database is unavailable |
+| `rcc_polling_restarts_total` | It rises at all: a polling loop ended and was started again |
+| `rcc_deliveries_total{status="failed"}` | It rises: an alert message was given up |
+| `rcc_deliveries_total{status="retrying"}` | It rises fast: a channel is refusing messages |
 
 ## Scan the images
 

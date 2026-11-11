@@ -85,9 +85,9 @@ class GeminiProvider:
                     parts += [{"functionCall": {"name": call["name"], "args": call["arguments"]}} for call in message["tool_calls"]]
                     if message.get("other_model"):
                         # Calls made by another model carry no thought signature of this one. Google documents this value for that case.
-                        for part in parts:
-                            if "functionCall" in part:
-                                part["thoughtSignature"] = "skip_thought_signature_validator"
+                        for call_part in parts:
+                            if "functionCall" in call_part:
+                                call_part["thoughtSignature"] = "skip_thought_signature_validator"
                     contents.append({"role": "model", "parts": parts})
                 elif message.get("content"):
                     contents.append({"role": "model", "parts": [{"text": message["content"]}]})

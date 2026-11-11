@@ -43,8 +43,7 @@ function renderNav(name) {
   const account = document.getElementById('account-area');
   const me = live.me;
   const links = me && !me.must_change_password ? NAV.filter(([id]) => can(APP_ROUTES[id][0])) : [];
-  clear(nav, links.map(([id, label]) => h('a', { href: `#/${id}`, 'aria-current': id === name ? 'page' : null }, id === 'investigate' && !can('engineer') ? 'Investigations' : label)),
-    links.length ? h('a', { href: '/docs' }, 'Docs') : null);
+  clear(nav, links.map(([id, label]) => h('a', { href: `#/${id}`, 'aria-current': id === name ? 'page' : null }, id === 'investigate' && !can('engineer') ? 'Investigations' : label)));
   if (me) {
     clear(account,
       h('a', { class: 'account-name', href: '#/account', title: `${me.email}, ${me.role}. Your account.` }, me.name),
@@ -136,6 +135,7 @@ async function start() {
   setAuthHandler(() => {
     live.me = null;
     disconnectLive();
+    document.getElementById('site-footer').replaceWith(footer());
     location.hash = '#/signin';
     route();
   });
@@ -145,7 +145,10 @@ async function start() {
   live.subscribe((type) => {
     if (type === 'context' || type === 'connection') renderLiveChip();
     if (type === 'ai') renderModelChip();
-    if (type === 'me') renderNav(parseHash().name);
+    if (type === 'me') {
+      renderNav(parseHash().name);
+      document.getElementById('site-footer').replaceWith(footer());
+    }
   });
   live.info = await api('/api/public/info').catch(() => ({}));
   live.me = await api('/api/auth/me').catch(() => null);

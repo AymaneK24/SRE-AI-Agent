@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 deploy/certs/*.pem
 backups/
 # Secrets files used in the docs, so they are never committed by mistake

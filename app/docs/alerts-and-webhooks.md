@@ -19,6 +19,14 @@ Messages describe the problem and link to the console. They have no buttons that
 
 > **Security:** Alert messages contain host names, queries, and findings, whatever the recipient's role in the console. Choose each channel's recipients with care, and treat Slack and Teams webhook addresses like passwords: anyone with one can post to that channel.
 
+### When a channel doesn't answer, or the console restarts
+
+An alert must not depend on everything working at the same moment.
+
+- **A channel that refuses a message gets it later.** After three quick tries, the message waits and is tried again after 30 seconds, 2 minutes, 10 minutes, 30 minutes, then every one to eight hours, for about a day. When it arrives it starts with *Delayed message* and the time it was first tried, so nobody reads an old alert as a new one. An address the service refuses for good, such as a deleted webhook (HTTP 404), isn't retried. A test message is never queued.
+- **A restart loses nothing.** A problem whose message was still waiting out its grace period is sent after the console starts again. A recovery still goes to the channels that heard about the problem, because that is remembered in the database.
+- **What isn't kept across a restart:** flapping counts, the group being collected, and each channel's hourly count start again.
+
 ### Automatic investigations
 
 With **Investigate critical alerts automatically** on, a critical alert starts an investigation by itself:
@@ -58,6 +66,27 @@ The panel also shows the last 7 days: problems started, messages sent, and how m
 **Why it matters for cost.** An email or chat message costs almost nothing. What costs money is the automatic investigation a critical message starts, since each one calls the AI model, and the hours people spend reading alerts that needed no action. The grace period stops investigations for blips, and grouping turns an incident with ten symptoms into one investigation instead of ten.
 
 Server-wide defaults: `RCC_ALERT_GRACE_SECONDS`, `RCC_ALERT_WARNING_GRACE_SECONDS`, `RCC_ALERT_GROUP_SECONDS`.
+
+## Heartbeat: know when the console itself stops
+
+A monitoring tool that stops is silent, and silence looks like "all is well". The console can't message you about its own death: whatever stopped it, such as a lost database or a dead server, stops its messages too. So an outside service has to notice.
+
+With a **heartbeat**, the console calls an address of your choice every few minutes while it is watching. A dead man's switch service alerts you when the calls stop. Healthchecks.io, Better Stack, Cronitor and Uptime Kuma (push monitor) all work this way, and so does an endpoint of your own.
+
+1. Create a check in that service. Set its period to the console's interval (5 minutes by default) and its grace time to at least twice that.
+2. In **Connections > Alerts > Heartbeat**, paste the check's address, tick **Send a heartbeat while the console is watching**, and save. **Send a test** calls the address once.
+
+| The console | Heartbeat |
+|---|---|
+| Is watching, everything fine or not | Sent |
+| Is watching, but a source or cluster doesn't answer | Sent. The console is working, and reports that on your alert channels |
+| Can't complete its own checks, for example its database is unavailable | Held back |
+| Polling loop stuck or ended | Held back |
+| Stopped, or its server is down | Nothing is sent |
+
+The address is treated as a secret: it is stored encrypted and never shown again, only its host name. The call is a plain `GET` with no data about your systems.
+
+The console also sends **"The console can't complete its checks"** to your alert channels after three failed checks in a row, and a recovery message when they work again. Don't rely on that alone: when its database is down, it often can't send it. The heartbeat covers that case.
 
 ## Incoming webhooks
 

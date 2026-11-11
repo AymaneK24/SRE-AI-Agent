@@ -33,7 +33,7 @@ An issue that keeps clearing within minutes gets a suggestion that it may be a f
 - **False alarm:** the alert was wrong.
 - **Expected:** it happens on purpose, such as a nightly batch job.
 
-Both stop that issue counting towards project health and the real totals. Reports say how many occurrences were set aside.
+Both stop that issue counting towards project health and the real totals, and stop its alert messages: it still shows in the console, but nobody is messaged about it. Reports say how many occurrences were set aside. An admin can turn the second part off in [Noise control](/docs/alerts-and-webhooks#noise-control-fewer-better-messages).
 
 ## Reports
 

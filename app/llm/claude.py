@@ -68,11 +68,13 @@ class ClaudeProvider:
         if isinstance(system, list):
             # The first part stays the same for the whole investigation and is the one worth caching.
             blocks = [{"type": "text", "text": part} for part in system if part]
-            system = blocks if len(blocks) > 1 else (blocks[0]["text"] if blocks else "")
+            system_field: Any = blocks if len(blocks) > 1 else (blocks[0]["text"] if blocks else "")
+        else:
+            system_field = system
         request: dict[str, Any] = {
             "model": model,
             "max_tokens": self.max_tokens,
-            "system": system,
+            "system": system_field,
             "messages": converted,
             "stream": True,
         }

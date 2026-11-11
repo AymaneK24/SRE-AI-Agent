@@ -9,6 +9,9 @@ class _Engine:
     def __init__(self):
         self._active = {}
 
+    def still_active(self, fingerprint):
+        return fingerprint in self._active
+
 
 class _Engines:
     def __init__(self, engine):
@@ -81,7 +84,7 @@ async def test_a_flapping_problem_gets_one_message_saying_so(console):
     event = _event("Flappy")
     for _ in range(5):
         await notifier.handle_event(org_id, event, {})
-        notifier._sent.clear()  # Let the 15-minute repeat guard pass, to test flapping alone.
+        await notifier.forget_sent(org_id)  # Let the 15-minute repeat guard pass, to test flapping alone.
     subjects = [mail["Subject"] for mail in _mails(console)]
     assert len(subjects) == 3, subjects
     assert sum("keeps starting and stopping" in subject for subject in subjects) == 1
@@ -120,7 +123,7 @@ async def test_the_hourly_limit_holds_the_rest_for_one_summary(console, monkeypa
 async def test_recoveries_go_out_without_waiting(console):
     client, org_id, notifier, engine = await _setup(console, grace_warning_s=600)
     event = _event("Quick")
-    notifier._sent[(1, event["fingerprint"])] = 0  # Not a channel that heard about it: nothing to send.
+    await notifier._mark_sent(org_id, 999, [event["fingerprint"]])  # Not a channel that heard about it: nothing to send.
     await asyncio.wait_for(notifier.handle_event(org_id, {**event, "kind": "alert_cleared", "severity": "info"}, {}), 2)
 
 

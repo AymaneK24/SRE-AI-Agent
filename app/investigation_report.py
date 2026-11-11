@@ -90,7 +90,7 @@ async def _query_chart(engine: Any, query: str, source_id: int | None, title: st
     except Exception as error:  # Evidence is a bonus. It must never stop the email.
         log.info("evidence chart skipped: %s", error)
         return None
-    series = [{"label": series_label(item.get("metric") or {}), "points": points_of(item)} for item in data.get("result", []) if isinstance(item, dict)]
+    series: list[dict[str, Any]] = [{"label": series_label(item.get("metric") or {}), "points": points_of(item)} for item in data.get("result", []) if isinstance(item, dict)]
     series = [item for item in series if item["points"]]
     series.sort(key=lambda item: max(value for _, value in item["points"]), reverse=True)
     png = draw_chart(series[:MAX_SERIES], unit, limit, began)

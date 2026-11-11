@@ -13,7 +13,8 @@ from prometheus_client import Counter
 
 from ..ai_settings import Selection
 from ..config import Config
-from ..context.engine import EngineManager, material_hash
+from ..context.manager import EngineManager
+from ..context.summary import material_hash
 from ..context.render import focus_context, render_context
 from ..costs import cache_saving, compute_cost, spend_settings
 from ..db import Database, sha256_text, utcnow
