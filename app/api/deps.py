@@ -8,7 +8,8 @@ from fastapi import Depends, HTTPException, Request
 
 from ..auth import Principal, RateLimiter, load_principal
 from ..config import Config
-from ..context.engine import ContextEngine, EngineManager
+from ..context.engine import ContextEngine
+from ..context.manager import EngineManager
 from ..db import Database
 from ..investigation.runner import InvestigationManager
 from ..mailer import Mailer

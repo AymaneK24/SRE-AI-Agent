@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..context.engine import store_change_event
+from ..context.connections import store_change_event
 from ..db import sha256_text, utcnow
 from ..secrets_store import scrub
 from .deps import AppContext, Ctx
@@ -64,7 +64,7 @@ async def alertmanager(token: str, request: Request, ctx: Ctx) -> dict[str, int]
         detail = {"name": name, "severity": labels.get("severity", ""), "labels": labels, "summary": scrub(str(annotations.get("summary") or annotations.get("description") or ""))}
         # When a source is connected, its own poll sends the notification and starts any automatic investigation,
         # so this avoids a duplicate. Without one, this event goes through the same steps as any other problem.
-        await engine._record_event("alertmanager_alert", severity, fingerprint, f"Alertmanager: {name}", detail, None, notify=not engine.states)
+        await engine.record_event("alertmanager_alert", severity, fingerprint, f"Alertmanager: {name}", detail, None, notify=not engine.states)
         accepted += 1
     return {"accepted": accepted}
 

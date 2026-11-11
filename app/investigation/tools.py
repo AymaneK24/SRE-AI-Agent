@@ -9,7 +9,8 @@ import json
 import time
 from typing import Any
 
-from ..context.engine import ContextEngine, build_integration, pick_main
+from ..context.connections import build_integration, pick_main
+from ..context.engine import ContextEngine
 from ..db import Database
 from ..net_guard import BlockedTarget
 from ..secrets_store import scrub
