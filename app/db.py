@@ -56,7 +56,8 @@ class Database:
             from psycopg.rows import dict_row
             from psycopg_pool import ConnectionPool
 
-            self._pool = ConnectionPool(url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True, timeout=15)
+            # Rows are dictionaries because of row_factory. That is set at run time, so the type checker is told "anything".
+            self._pool: Any = ConnectionPool(url, min_size=1, max_size=12, kwargs={"row_factory": dict_row}, open=True, timeout=15)
             self._migrate_postgres()
         else:
             assert path is not None
