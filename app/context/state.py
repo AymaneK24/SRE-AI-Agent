@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections import deque
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable, Coroutine
 
 from prometheus_client import Counter
 
@@ -45,7 +45,7 @@ LOOP_RESTARTS = Counter("rcc_polling_restarts_total", "Polling loops restarted a
 SEED_WINDOW_S = 300
 MAX_SEEDED_PANELS = 6
 
-EventHook = Callable[[int, dict[str, Any], dict[str, Any]], Awaitable[None]]
+EventHook = Callable[[int, dict[str, Any], dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 class SourceState:
@@ -149,6 +149,6 @@ class EngineState:
         self.broker.publish({"type": "event", "data": event})
         if will_notify and self.on_event:
             # The loop keeps only a weak reference to a task, so hold one until it ends.
-            task = asyncio.create_task(self.on_event(self.org_id, event, detail))
+            task: asyncio.Task[None] = asyncio.create_task(self.on_event(self.org_id, event, detail))
             self._event_tasks.add(task)
             task.add_done_callback(self._event_tasks.discard)

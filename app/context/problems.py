@@ -92,7 +92,8 @@ class ProblemTracking(EngineState):
         for alert in alerts["firing"]:
             # A Prometheus alert about a workload the console already reports, such as KubePodCrashLooping for a
             # crash loop it found itself, is the same problem. It joins that problem instead of becoming a second one.
-            merged_into = workloads.get(alert_workload(alert, self._pod_owners()))
+            about = alert_workload(alert, self._pod_owners())
+            merged_into = workloads.get(about) if about else None
             alert.pop("merged_into", None)
             if merged_into:
                 alert["merged_into"] = merged_into

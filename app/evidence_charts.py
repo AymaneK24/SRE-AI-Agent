@@ -42,7 +42,7 @@ def _nice_ticks(low: float, high: float, count: int = 4) -> list[float]:
     power = 10 ** math.floor(math.log10(rough))
     step = next((item * power for item in (1, 2, 2.5, 5, 10) if item * power >= rough), 10 * power)
     start = math.floor(low / step) * step
-    ticks = []
+    ticks: list[float] = []
     value = start
     while value <= high + step * 0.999 and len(ticks) < 12:
         ticks.append(round(value, 10))

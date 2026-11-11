@@ -147,14 +147,14 @@ async def get_savings(user: Admin, ctx: Ctx) -> dict[str, Any]:
     """The cost-saving settings, and what they saved this month."""
     settings = await ai_settings.load_savings(ctx.db, user.org_id)
     start = month_start()
-    calls = await ctx.db.one(
+    calls = await ctx.db.get(
         "SELECT count(*) AS calls, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
         "COALESCE(SUM(saved_usd), 0) AS saved_usd, COALESCE(SUM(cost_usd), 0) AS cost_usd, "
         "SUM(CASE WHEN purpose = 'evidence' THEN 1 ELSE 0 END) AS evidence_calls, "
         "COALESCE(SUM(CASE WHEN purpose = 'evidence' THEN cost_usd ELSE 0 END), 0) AS evidence_cost_usd "
         "FROM llm_calls WHERE org_id = ? AND started_at >= ? AND provider <> 'ollama'", (user.org_id, start))
-    console = await ctx.db.one("SELECT count(*) AS n FROM tool_calls WHERE org_id = ? AND origin = 'console' AND ok = 1 AND created_at >= ?", (user.org_id, start))
-    focused = await ctx.db.one(
+    console = await ctx.db.get("SELECT count(*) AS n FROM tool_calls WHERE org_id = ? AND origin = 'console' AND ok = 1 AND created_at >= ?", (user.org_id, start))
+    focused = await ctx.db.get(
         "SELECT count(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id "
         "WHERE c.org_id = ? AND m.role = 'user' AND m.focus <> '[]' AND m.created_at >= ?", (user.org_id, start))
     input_tokens = int(calls["input_tokens"] or 0)
@@ -257,7 +257,8 @@ async def _changeable(ctx: AppContext, user: Any, conversation_id: int) -> dict[
 
 @router.get("/conversations")
 async def list_conversations(user: Engineer, ctx: Ctx, q: str = "", status: str = "", limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)) -> dict[str, Any]:
-    where, args = ["c.org_id = ?"], [user.org_id]
+    where: list[str] = ["c.org_id = ?"]
+    args: list[Any] = [user.org_id]
     if not user.can("admin"):
         where.append("(c.owner_id = ? OR c.visibility = 'team')")
         args.append(user.user_id)
@@ -272,7 +273,7 @@ async def list_conversations(user: Engineer, ctx: Ctx, q: str = "", status: str 
         args.extend(ids)
     clause = " AND ".join(where)
     # `clause` only joins fixed fragments. All user values are bound parameters.
-    total = await ctx.db.one(f"SELECT count(*) AS n FROM conversations c WHERE {clause}", args)  # noqa: S608
+    total = await ctx.db.get(f"SELECT count(*) AS n FROM conversations c WHERE {clause}", args)  # noqa: S608
     rows = await ctx.db.all(
         f"""SELECT c.*,
               (SELECT count(*) FROM llm_calls l WHERE l.conversation_id = c.id) AS model_calls,
@@ -326,7 +327,7 @@ async def conversation_pdf(conversation_id: int, user: Engineer, ctx: Ctx) -> Re
                               "AND content <> '' ORDER BY id DESC LIMIT 1", (conversation_id,))
     if not answer:
         raise HTTPException(404, "This investigation has no finished answer yet.")
-    org = await ctx.db.one("SELECT name FROM organizations WHERE id = ?", (user.org_id,))
+    org = await ctx.db.get("SELECT name FROM organizations WHERE id = ?", (user.org_id,))
     verification = json.loads(answer["verification"] or "{}")
     event = {"title": row["title"], "ts": row["created_at"], "kind": "investigation", "severity": "", "fingerprint": ""}
     engine = await ctx.engines.get(user.org_id)
@@ -481,7 +482,7 @@ async def draft_workflow(conversation_id: int, user: Engineer, ctx: Ctx) -> dict
         (user.org_id, draft["name"], draft["summary"], json.dumps(draft["match"]), draft["risk"], json.dumps(draft["steps"]), user.actor, now, now),
     )
     await ctx.db.audit(user.org_id, "workflow_drafted_by_ai", f"workflow:{workflow_id}", {"conversation": conversation_id, "model": selection.model}, actor=user.actor)
-    return public_workflow(await ctx.db.one("SELECT * FROM workflows WHERE id = ?", (workflow_id,)))
+    return public_workflow(await ctx.db.get("SELECT * FROM workflows WHERE id = ?", (workflow_id,)))
 
 
 # Plain results for everyone ---------------------------------------------------
@@ -496,7 +497,7 @@ async def list_results(user: User, ctx: Ctx, q: str = "", limit: int = Query(50,
         where.append(f"id IN ({','.join('?' * len(ids))})")
         args.extend(ids)
     clause = " AND ".join(where)
-    total = await ctx.db.one(f"SELECT count(*) AS n FROM conversations WHERE {clause}", args)  # noqa: S608
+    total = await ctx.db.get(f"SELECT count(*) AS n FROM conversations WHERE {clause}", args)  # noqa: S608
     rows = await ctx.db.all(f"SELECT id, title, status, trigger, updated_at FROM conversations WHERE {clause} ORDER BY updated_at DESC LIMIT ? OFFSET ?", [*args, limit, offset])  # noqa: S608
     return {"items": rows, "total": total["n"]}
 

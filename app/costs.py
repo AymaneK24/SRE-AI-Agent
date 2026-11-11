@@ -84,7 +84,7 @@ async def spend_settings(db: Database, org_id: int) -> dict[str, Any]:
 
 
 async def month_spend(db: Database, org_id: int) -> float:
-    row = await db.one("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM llm_calls WHERE org_id = ? AND started_at >= ?", (org_id, month_start()))
+    row = await db.get("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM llm_calls WHERE org_id = ? AND started_at >= ?", (org_id, month_start()))
     return float(row["total"])
 
 
@@ -104,7 +104,7 @@ async def usage_summary(db: Database, org_id: int) -> dict[str, Any]:
         "COALESCE(SUM(cost_usd), 0) AS cost_usd, COALESCE(SUM(duration_ms), 0) AS duration_ms, "
         "SUM(CASE WHEN cost_usd IS NULL AND provider <> 'ollama' AND status = 'complete' THEN 1 ELSE 0 END) AS unpriced_calls "
         "FROM llm_calls WHERE org_id = ? AND started_at >= ? GROUP BY provider, model ORDER BY cost_usd DESC", (org_id, start))
-    investigations = await db.one(
+    investigations = await db.get(
         "SELECT count(*) AS n, COALESCE(AVG(m.cost_usd), 0) AS avg_cost, COALESCE(AVG(m.duration_ms), 0) AS avg_ms FROM messages m JOIN conversations c ON c.id = m.conversation_id "
         "WHERE c.org_id = ? AND m.role = 'assistant' AND m.status = 'complete' AND m.created_at >= ?", (org_id, start))
     spent = sum(float(row["cost_usd"]) for row in rows)

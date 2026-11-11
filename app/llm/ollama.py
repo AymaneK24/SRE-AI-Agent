@@ -75,14 +75,14 @@ class OllamaProvider:
             async with self._client.stream("POST", "/api/chat", json=request) as response:
                 if response.status_code != 200:
                     body = (await response.aread()).decode(errors="replace")
-                    message = _error_text(body) or f"HTTP {response.status_code}"
-                    if "does not support tools" in message:
-                        raise ToolsUnsupported(message)
+                    problem = _error_text(body) or f"HTTP {response.status_code}"
+                    if "does not support tools" in problem:
+                        raise ToolsUnsupported(problem)
                     if response.status_code == 404:
                         raise ProviderError(
                             f"Ollama doesn't have this model: {request['model']}. Run: ollama pull {request['model']}"
                         )
-                    raise ProviderError(f"Ollama returned an error: {message}")
+                    raise ProviderError(f"Ollama returned an error: {problem}")
                 async for line in response.aiter_lines():
                     if not line.strip():
                         continue

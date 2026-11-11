@@ -323,7 +323,7 @@ class Notifier:
         channels = await self.db.all("SELECT * FROM channels WHERE org_id = ? AND enabled = 1", (org_id,))
         if not channels:
             return
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
         cleared = event["kind"].endswith(("_cleared", "_recovered"))
         names = [str(detail.get("name"))] if detail.get("name") else (["targetdown"] if event["kind"].startswith("target") else [])
         signals = [str(detail["signal_id"])] if detail.get("signal_id") else []
@@ -380,7 +380,7 @@ class Notifier:
         channel = await self.db.one("SELECT * FROM channels WHERE id = ? AND org_id = ? AND enabled = 1", (channel_id, org_id))
         if not titles or not channel:
             return
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
         event = {"severity": "warning", "title": f"{len(titles)} more problems started in the last hour", "ts": utcnow(), "fingerprint": f"digest:{channel_id}"}
         summary = "This channel reached its hourly limit, so these were held back:\n" + "\n".join(f"- {title}" for title in titles[:30])
         await self.deliver(channel, org_id, event["fingerprint"], _message(org["name"], event, summary, [], f"{self.config.public_url}/#/overview"))
@@ -494,7 +494,7 @@ class Notifier:
                 log.exception("retrying queued messages failed")
             await asyncio.sleep(RETRY_POLL_S)
 
-    async def _send(self, channel: dict[str, Any], message: dict[str, str]) -> None:
+    async def _send(self, channel: dict[str, Any], message: dict[str, Any]) -> None:
         try:
             settings = self.box.decrypt_json(channel["config_enc"])
         except ValueError as error:
@@ -553,8 +553,8 @@ class Notifier:
                 await self.deliver(channel, org_id, f"investigation:{conversation_id}", rich)
 
     async def _investigation_email(self, org_id: int, conversation_id: int, title: str, answer: str, confidence: str, link: str, held: dict[str, Any] | None) -> dict[str, Any]:
-        org = await self.db.one("SELECT name FROM organizations WHERE id = ?", (org_id,))
-        conversation = await self.db.one("SELECT created_at FROM conversations WHERE id = ?", (conversation_id,))
+        org = await self.db.get("SELECT name FROM organizations WHERE id = ?", (org_id,))
+        conversation = await self.db.get("SELECT created_at FROM conversations WHERE id = ?", (conversation_id,))
         event = json.loads(held["event"]) if held else {"title": title, "ts": conversation["created_at"], "kind": "alert", "severity": "critical", "fingerprint": ""}
         detail = json.loads(held["detail"]) if held else {}
         cleared_at = held["cleared_at"] if held else None

@@ -420,3 +420,27 @@ async def test_clusters_are_read_at_the_same_time_and_one_failing_does_not_hide_
     states = {item["name"]: item["status"] for item in engine.context["connections"]}
     assert states == {"cluster-0": "ok", "cluster-1": "error", "cluster-2": "ok"}
     assert sorted(engine.k8s_snapshots) == sorted(row["id"] for row in await console.ctx.db.all("SELECT id FROM integrations WHERE org_id = ? AND name <> 'cluster-1'", (org_id,)))
+
+
+async def test_a_record_removed_during_a_request_gives_a_clear_answer_not_a_server_error(console):
+    from app.db import RowMissing
+    client = await console.company("GoneCo", "g@test.example")
+    try:
+        await console.ctx.db.get("SELECT id FROM users WHERE id = ?", (987654,))
+        raise AssertionError("a missing row must be reported")
+    except RowMissing:
+        pass
+    assert (await console.ctx.db.get("SELECT count(*) AS n FROM users WHERE id = ?", (987654,)))["n"] == 0
+    # The account is deleted while its session is still open: the next request says so plainly.
+    me = (await client.get("/api/auth/me")).json()
+    real = console.ctx.db.get
+
+    async def gone(sql, args=()):
+        if "FROM organizations WHERE id" in sql:
+            raise RowMissing("gone")
+        return await real(sql, args)
+
+    console.ctx.db.get = gone
+    response = await client.get("/api/org")
+    console.ctx.db.get = real
+    assert me["org_id"] and response.status_code == 404 and "no longer exists" in response.json()["detail"]

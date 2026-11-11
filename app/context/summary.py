@@ -54,7 +54,8 @@ def alert_severity(alert: dict[str, Any]) -> str:
 
 
 def summarize_alerts(alerts: list[tuple[Any, dict[str, Any], bool]]) -> dict[str, Any]:
-    firing, pending = [], []
+    firing: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
     for source, alert, multi in alerts:
         labels = alert.get("labels", {})
         annotations = alert.get("annotations", {})

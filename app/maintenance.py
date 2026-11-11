@@ -19,8 +19,8 @@ async def purge_org(db: Database, org_id: int) -> dict[str, int]:
         await db.unindex(row["id"])
     if old:
         await db.execute("DELETE FROM conversations WHERE org_id = ? AND updated_at < ?", (org_id, cutoff))
-    events = await db.one("SELECT count(*) AS n FROM events WHERE org_id = ? AND ts < ?", (org_id, cutoff))
-    snapshots = await db.one("SELECT count(*) AS n FROM context_snapshots WHERE org_id = ? AND ts < ?", (org_id, cutoff))
+    events = await db.get("SELECT count(*) AS n FROM events WHERE org_id = ? AND ts < ?", (org_id, cutoff))
+    snapshots = await db.get("SELECT count(*) AS n FROM context_snapshots WHERE org_id = ? AND ts < ?", (org_id, cutoff))
     if events["n"]:
         await db.execute("DELETE FROM events WHERE org_id = ? AND ts < ?", (org_id, cutoff))
     if snapshots["n"]:

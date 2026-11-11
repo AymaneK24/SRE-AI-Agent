@@ -114,7 +114,7 @@ def is_small_model(name: str) -> bool:
     if any(word in lowered for word in (":mini", "-mini", ":tiny", "-tiny")):
         return True
     match = SMALL_MODEL_RE.search(lowered)
-    return bool(match) and float(match.group(1)) <= 8
+    return match is not None and float(match.group(1)) <= 8
 
 
 async def build_provider(db: Database, org_id: int, box: SecretBox, config: Config, name: str | None = None) -> tuple[Provider, dict[str, Any]]:

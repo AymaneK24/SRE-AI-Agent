@@ -434,7 +434,7 @@ async def _write_notes(ctx: AppContext, org_id: int, actor: str, user_id: int | 
     provider = selection.provider
     conversation_id = None
     try:
-        report = await ctx.db.one("SELECT data FROM project_reports WHERE id = ?", (report_id,))
+        report = await ctx.db.get("SELECT data FROM project_reports WHERE id = ?", (report_id,))
         facts = json.dumps(_facts_for_model(json.loads(report["data"])), ensure_ascii=False)
         request = provider.build_request(selection.model, NOTES_PROMPT, [{"role": "user", "content": facts}], None)
         request_json = json.dumps(request, ensure_ascii=False)
@@ -454,7 +454,7 @@ async def _write_notes(ctx: AppContext, org_id: int, actor: str, user_id: int | 
         if not notes:
             raise ProviderError("The model returned an empty answer. Try again, or choose another model.")
         spend = await spend_settings(ctx.db, org_id)
-        cost = compute_cost(provider.name, selection.model, finished.input_tokens, finished.output_tokens, spend.get("prices"))
+        cost = compute_cost(provider.name, selection.model, finished.input_tokens, finished.output_tokens, spend.get("prices") or {})
         await ctx.db.insert(
             "INSERT INTO llm_calls(org_id, conversation_id, round, provider, model, endpoint, request_json, request_sha256, response_text, stop_reason, input_tokens, output_tokens, cost_usd, status, started_at, finished_at) "
             "VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)",
