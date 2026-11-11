@@ -388,6 +388,19 @@ export function mount(container) {
       can('engineer') ? h('a', { class: 'button compact', href: `#/investigate?${query}` }, 'Investigate') : null);
   }
 
+  // What the dependency map says: the likely cause of this problem, or what else fails because of it.
+  function dependencyNote(detail) {
+    if (!can('engineer') || !detail) return null;
+    const map = detail.map_node ? h('a', { class: 'map-link', href: `#/dependencies?focus=${encodeURIComponent(detail.map_node)}` }, 'Show on map') : null;
+    if (detail.caused_by) {
+      return h('span', { class: 'dependency-note' }, 'Likely caused by ', h('b', {}, detail.caused_by.title), ', which it depends on. ', map);
+    }
+    if (detail.affects?.length) {
+      return h('span', { class: 'dependency-note is-cause' }, h('b', {}, 'Likely cause. '), `Also failing because of it: ${detail.affects.slice(0, 4).join(', ')}${detail.affects.length > 4 ? ` and ${detail.affects.length - 4} more` : ''}. `, map);
+    }
+    return null;
+  }
+
   function renderAttention(context) {
     const rows = [];
     // An alert about a workload the console already reports is shown on that row, not as a second problem.
@@ -396,7 +409,7 @@ export function mount(container) {
       rows.push(h('li', { class: 'row' }, icon(severe ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, alert.name, ' ', h('span', { class: 'muted small' }, `${alert.severity} alert`)),
         h('span', { class: 'row-side' }, investigateLink(`Why is the ${alert.name} alert firing (${labelText(alert.labels)})? Find the root cause.`, `alert=${encodeURIComponent(alert.name)}`, alert.fingerprint)),
-        h('span', { class: 'row-detail' }, `${alert.summary || (can('engineer') ? labelText(alert.labels) : 'Alert firing')}. Firing since ${timeAgo(alert.active_at)}.`)));
+        h('span', { class: 'row-detail' }, `${alert.summary || (can('engineer') ? labelText(alert.labels) : 'Alert firing')}. Firing since ${timeAgo(alert.active_at)}.`, dependencyNote(alert))));
     }
     for (const target of context.targets?.down_list || []) {
       rows.push(h('li', { class: 'row' }, icon('critical'),
@@ -411,7 +424,8 @@ export function mount(container) {
         h('span', { class: 'row-title' }, item.title),
         h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail), item.fingerprint)),
         h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem',
-          detail.also_firing?.length ? h('span', { class: 'also-firing' }, `Also firing in Prometheus: ${detail.also_firing.join(', ')}`) : null)));
+          detail.also_firing?.length ? h('span', { class: 'also-firing' }, `Also firing in Prometheus: ${detail.also_firing.join(', ')}`) : null,
+          dependencyNote(detail))));
     }
     for (const rule of context.rules?.failing || []) {
       rows.push(h('li', { class: 'row' }, icon('warning'),
@@ -424,7 +438,7 @@ export function mount(container) {
       rows.push(h('li', { class: 'row' }, icon('warning'),
         h('span', { class: 'row-title' }, `${item.title}: ${formatValue(item.value, item.unit)}`),
         h('span', { class: 'row-side' }, investigateLink(`${item.title} is ${formatValue(item.value, item.unit)} on ${labelText(item.labels)}${usual}. What is causing this?`, `signal=${encodeURIComponent(item.signal_id)}`, item.fingerprint)),
-        h('span', { class: 'row-detail' }, can('engineer') ? labelText(item.labels) : 'Out of range', usual, limit)));
+        h('span', { class: 'row-detail' }, can('engineer') ? labelText(item.labels) : 'Out of range', usual, limit, dependencyNote(item))));
     }
     if (rows.length) clear(attention, h('ul', { class: 'rows scroll-rows' }, rows));
     else clear(attention, h('p', { class: 'empty' }, context.as_of ? 'No alerts, down targets, failing workloads, failing rules, or unusual signals.' : 'Nothing to show until something is connected.'));

@@ -86,6 +86,15 @@ DESCRIBE_TOOL = {
         "namespace": {"type": "string"},
         "name": {"type": "string", "description": "Pod name, or a Deployment, StatefulSet, DaemonSet, or Job name."}, **_CONNECTION_PROP}, "required": ["namespace", "name"]},
 }
+DEPENDENCY_TOOL = {
+    "name": "get_dependencies",
+    "description": "The service dependency map around one workload: what it calls, what calls it, how each link is known "
+                   "(Kubernetes configuration, or calls seen in traces or a service mesh, with request and error rates), "
+                   "and which of them have a problem now. Use it to tell a cause from its symptoms.",
+    "input_schema": {"type": "object", "properties": {
+        "name": {"type": "string", "description": "Workload or service name, such as payments or shop/payments."},
+        "depth": {"type": "integer", "description": "How many calls away to look, 1 to 4. Defaults to 2."}}, "required": ["name"]},
+}
 METRIC_TOOL_NAMES = {"run_instant_query", "run_range_query", "list_metrics"}
 TOOL_DEFINITIONS = BASE_TOOLS + [LOGS_TOOL, KUBERNETES_TOOL, POD_LOGS_TOOL, DESCRIBE_TOOL]
 
@@ -109,6 +118,8 @@ class ToolRunner:
             tools.append(LOGS_TOOL)
         if "kubernetes" in kinds:
             tools += [KUBERNETES_TOOL, POD_LOGS_TOOL, DESCRIBE_TOOL]
+        if self.engine.topology.edges:
+            tools.append(DEPENDENCY_TOOL)
         return tools
 
     async def _hint(self, name: str) -> str:
@@ -136,7 +147,7 @@ class ToolRunner:
                 "run_instant_query": self._instant, "run_range_query": self._range, "list_metrics": self._metrics,
                 "get_recent_changes": self._changes, "search_past_investigations": self._past,
                 "query_logs": self._logs, "get_kubernetes_state": self._kubernetes,
-                "get_pod_logs": self._pod_logs, "describe_object": self._describe,
+                "get_pod_logs": self._pod_logs, "describe_object": self._describe, "get_dependencies": self._dependencies,
             }.get(name)
             if handler is None:
                 available = ", ".join(tool["name"] for tool in await self.definitions())
@@ -207,6 +218,37 @@ class ToolRunner:
         if text:
             rows = [row for row in rows if text in f"{row['service']} {row['title']}".lower()]
         return {"total": len(rows), "changes": rows[:40]}
+
+    async def _dependencies(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        topology = self.engine.topology
+        wanted = str(arguments.get("name", "")).strip().lower()
+        depth = max(1, min(int(arguments.get("depth") or 2), 4))
+        matches = [node for node in topology.nodes if topology.name(node).lower() == wanted]
+        if not matches:
+            matches = [node for node, item in topology.nodes.items() if str(item.get("name", "")).lower() == wanted.rsplit("/", 1)[-1]]
+        if not matches:
+            known = sorted(topology.name(node) for node in topology.nodes)
+            raise ValueError(f"No workload called {arguments.get('name')!r} is on the map. Known: {', '.join(known[:40])}")
+        problems: dict[str, list[str]] = {}
+        for fingerprint, link in self.engine.topology_links.items():
+            problems.setdefault(link["node"], []).append(self.engine.topology_current[fingerprint]["title"])
+
+        def describe(node: str, distance: int, forward: bool) -> dict[str, Any]:
+            item = topology.nodes[node]
+            edge = next((edge for edge in topology.edges.values() if (edge["to"] == node if forward else edge["from"] == node)), {})
+            return {"name": topology.name(node), "kind": item.get("kind"), "calls_away": distance, "problems": problems.get(node, []),
+                    "known_from": edge.get("sources", []), "requests_per_s": edge.get("rps"), "error_ratio": edge.get("error_ratio")}
+
+        out = []
+        for node in matches[:3]:
+            out.append({
+                "workload": topology.name(node), "cluster": topology.nodes[node].get("cluster"), "problems": problems.get(node, []),
+                "calls": [describe(other, distance, True) for other, distance in sorted(topology.reachable(node, True, depth).items(), key=lambda pair: pair[1])][:30],
+                "called_by": [describe(other, distance, False) for other, distance in sorted(topology.reachable(node, False, depth).items(), key=lambda pair: pair[1])][:30],
+            })
+        note = ("Links known only from configuration show what a workload is set up to call, not that it calls it now."
+                if not any(source != "config" for source in topology.sources) else "")
+        return {"results": out, "note": note}
 
     async def _past(self, arguments: dict[str, Any]) -> dict[str, Any]:
         terms = str(arguments.get("text", "")).split()

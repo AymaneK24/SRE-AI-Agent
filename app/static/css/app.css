@@ -608,3 +608,65 @@ select.select-native, .select-native { position: absolute !important; left: 0 !i
 
 /* On small screens a wide table scrolls by itself instead of widening the page. */
 @media (max-width: 860px) { table.data-table { display: block; max-width: 100%; overflow-x: auto; } }
+
+/* Dependency map ------------------------------------------------------------- */
+.map-note { margin-top: 16px; max-width: 90ch; padding: 10px 14px; border-left: 3px solid var(--warning); background: var(--warning-wash); border-radius: 0 9px 9px 0; color: var(--ink); font-size: 14px; }
+.map-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 22px 0 14px; }
+.map-toolbar .input { width: auto; min-width: 180px; }
+.map-toolbar input[type=search] { min-width: 220px; }
+.map-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: stretch; }
+.map-canvas { position: relative; min-height: 360px; height: 68vh; background: var(--raised); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+  background-image: radial-gradient(var(--grid) 1px, transparent 1.2px); background-size: 22px 22px; }
+.map-svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; user-select: none; }
+.map-svg:active { cursor: grabbing; }
+.map-zoom { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 6px; }
+.map-zoom .button { background: var(--page); min-width: 38px; }
+.map-edge { fill: none; stroke-width: 1.6; transition: opacity .15s; }
+.map-edge.observed { stroke: var(--body); }
+.map-edge.config { stroke: var(--muted); stroke-dasharray: 5 4; }
+.map-edge.failing { stroke: var(--critical); stroke-width: 2.4; }
+.map-edge.is-dim, .map-node.is-dim { opacity: .18; }
+.map-arrow.observed { fill: var(--body); } .map-arrow.config { fill: var(--muted); } .map-arrow.failing { fill: var(--critical); }
+.map-node { cursor: pointer; transition: opacity .15s; outline: none; }
+.map-box { fill: var(--page); stroke: var(--line); stroke-width: 1.2; }
+.map-node:hover .map-box, .map-node:focus-visible .map-box { stroke: var(--ink); }
+.map-node.is-selected .map-box { stroke: var(--ink); stroke-width: 2.2; }
+.map-bar { fill: var(--ok); }
+.map-node.status-warning .map-bar { fill: var(--warning); }
+.map-node.status-critical .map-bar { fill: var(--critical); }
+.map-node.status-critical .map-box { fill: var(--critical-wash); stroke: var(--critical); }
+.map-node.status-warning .map-box { fill: var(--warning-wash); stroke: var(--warning); }
+.map-node.is-external .map-box, .map-node.is-traced .map-box { stroke-dasharray: 4 3; }
+.map-node.is-external .map-bar, .map-node.is-traced .map-bar { fill: var(--muted); }
+.map-ring { fill: none; stroke: var(--critical); stroke-width: 2.5; }
+.map-name { fill: var(--ink); font: 600 14px var(--sans); }
+.map-sub { fill: var(--muted); font: 12px var(--sans); }
+.map-tag.cause { fill: var(--critical); } .map-tag.symptom { fill: var(--muted); }
+.map-tag-text { fill: #fff; font: 600 11px var(--sans); }
+.map-side { min-width: 0; padding: 18px; background: var(--raised); border: 1px solid var(--line); border-radius: 14px; overflow: auto; max-height: 68vh; }
+.map-side-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.map-side-title { font-size: 18px; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.map-side-sub { margin-top: 18px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.map-list { list-style: none; margin-top: 8px; display: grid; gap: 8px; }
+.map-list li { display: grid; gap: 2px; }
+.map-list .link-button { display: inline-flex; align-items: center; gap: 8px; text-align: left; overflow-wrap: anywhere; }
+.map-problems { list-style: none; margin-top: 12px; display: grid; gap: 10px; }
+.map-problem { display: grid; gap: 8px; justify-items: start; padding: 12px; border-radius: 10px; background: var(--page); border-left: 4px solid var(--warning); }
+.map-problem.critical { border-left-color: var(--critical); }
+.map-ok { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.map-legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 14px; font-size: 13px; color: var(--muted); }
+.map-legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend-line { display: inline-block; width: 28px; border-top: 2px solid var(--body); }
+.legend-line.config { border-top: 2px dashed var(--muted); } .legend-line.failing { border-top-color: var(--critical); border-top-width: 3px; }
+.legend-node { display: inline-block; width: 18px; height: 12px; border-radius: 4px; border: 1.5px solid var(--critical); background: var(--critical-wash); }
+.legend-node.cause { outline: 2px solid var(--critical); outline-offset: 2px; background: var(--page); border-color: var(--line); }
+.dependency-note { display: block; margin-top: 4px; color: var(--ink); }
+.dependency-note.is-cause b { color: var(--critical); }
+.map-link { margin-left: 4px; white-space: nowrap; }
+@media (max-width: 900px) {
+  .map-layout { grid-template-columns: 1fr; }
+  .map-canvas { min-height: 360px; }
+  .map-side { max-height: none !important; }
+  .map-toolbar .input, .map-toolbar input[type=search] { width: 100%; min-width: 0; }
+}
+.map-problem p .link-button { display: inline; text-align: left; }
