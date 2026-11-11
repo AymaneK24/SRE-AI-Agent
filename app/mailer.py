@@ -132,6 +132,7 @@ class Mailer:
         heading = title or re.sub(r"^\[[A-Z]+\]\s*", "", clean_subject)
         message.add_alternative(self._html(heading, subtitle, content, link, link_label, company, notices, tone, bool(_LOGO)), subtype="html")
         html_part = message.get_body(preferencelist=("html",))
+        assert html_part is not None  # Added two lines above.
         if _LOGO:
             html_part.add_related(_LOGO, maintype="image", subtype="png", cid="<rcc-logo>", filename="logo.png", disposition="inline")
         for name, data in (images or {}).items():

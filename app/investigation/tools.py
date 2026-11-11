@@ -279,7 +279,7 @@ class ToolRunner:
                         return {"services": [], "note": "This token may not list services. Add get and list on services to its role."}
                     raise
             if resource == "nodes":
-                snapshot = self.engine.k8s_snapshots.get((row or {}).get("id")) or await client.snapshot()
+                snapshot = (self.engine.k8s_snapshots.get(row["id"]) if row else None) or await client.snapshot()
                 return {"nodes": snapshot.get("nodes", []), "note": "Node access is forbidden for this token." if "nodes" in snapshot.get("forbidden", []) else ""}
             raise ValueError("resource must be problems, events, pods, deployments, services, or nodes")
         finally:

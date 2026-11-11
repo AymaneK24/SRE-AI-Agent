@@ -130,7 +130,7 @@ class SsoBody(BaseModel):
 async def get_org(user: User, ctx: Ctx) -> dict[str, Any]:
     if not user.can("admin"):
         return {"name": user.org_name}
-    org = await ctx.db.one("SELECT id, name, slug, status, contact_email, created_at FROM organizations WHERE id = ?", (user.org_id,))
+    org = await ctx.db.get("SELECT id, name, slug, status, contact_email, created_at FROM organizations WHERE id = ?", (user.org_id,))
     return {**org, "policies": await org_policies(ctx.db, user.org_id)}
 
 
@@ -164,7 +164,7 @@ async def invite(body: InviteBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
                           f"{ctx.config.public_url}/#/accept?token={token}", "Accept invitation",
                           security_notice=True, subtitle=f"An invitation from {user.name}", title=f"Join {user.org_name}")
     await ctx.db.audit(user.org_id, "member_invited", f"user:{user_id}", {"email": email, "role": body.role}, actor=user.actor)
-    result = {"id": user_id, "email_sent": ctx.mailer.configured}
+    result: dict[str, Any] = {"id": user_id, "email_sent": ctx.mailer.configured}
     if not ctx.mailer.configured:
         # With no email server on this network, the admin passes the link on directly.
         result["invite_link"] = f"{ctx.config.public_url}/#/accept?token={token}"
@@ -172,7 +172,7 @@ async def invite(body: InviteBody, user: Admin, ctx: Ctx) -> dict[str, Any]:
 
 
 async def _other_owners(ctx: AppContext, org_id: int, user_id: int) -> int:
-    row = await ctx.db.one("SELECT count(*) AS n FROM users WHERE org_id = ? AND role = 'owner' AND is_active = 1 AND id <> ?", (org_id, user_id))
+    row = await ctx.db.get("SELECT count(*) AS n FROM users WHERE org_id = ? AND role = 'owner' AND is_active = 1 AND id <> ?", (org_id, user_id))
     return row["n"]
 
 
@@ -263,7 +263,7 @@ async def put_retention(body: RetentionBody, user: Owner, ctx: Ctx) -> dict[str,
 @router.delete("/org", status_code=204)
 async def delete_org(request: Request, user: Owner, ctx: Ctx) -> Response:
     body = await request.json()
-    org = await ctx.db.one("SELECT name FROM organizations WHERE id = ?", (user.org_id,))
+    org = await ctx.db.get("SELECT name FROM organizations WHERE id = ?", (user.org_id,))
     if ctx.config.single_company:
         raise HTTPException(409, "This installation has one organization, so it can't be deleted here. Remove the installation instead.")
     if user.is_platform_admin:
@@ -303,7 +303,7 @@ async def create_channel(body: ChannelBody, user: Admin, ctx: Ctx) -> dict[str, 
         (user.org_id, body.kind, body.name, body.min_severity, ctx.box.encrypt_json(settings), now, now),
     )
     await ctx.db.audit(user.org_id, "alert_channel_created", f"channel:{channel_id}", {"kind": body.kind, "name": body.name}, actor=user.actor)
-    return public_channel(ctx, await ctx.db.one("SELECT * FROM channels WHERE id = ?", (channel_id,)))
+    return public_channel(ctx, await ctx.db.get("SELECT * FROM channels WHERE id = ?", (channel_id,)))
 
 
 @router.delete("/org/channels/{channel_id}", status_code=204)
@@ -347,7 +347,7 @@ async def get_noise(user: Admin, ctx: Ctx) -> dict[str, Any]:
     from ..db import utc_after
 
     since = utc_after(days=-7)
-    started = await ctx.db.one("SELECT count(*) AS n FROM events WHERE org_id = ? AND kind LIKE '%_started' AND ts >= ? AND title NOT LIKE 'Already active%'",
+    started = await ctx.db.get("SELECT count(*) AS n FROM events WHERE org_id = ? AND kind LIKE '%_started' AND ts >= ? AND title NOT LIKE 'Already active%'",
                                (user.org_id, since))
     rows = await ctx.db.all("SELECT status, count(*) AS n FROM deliveries WHERE org_id = ? AND created_at >= ? GROUP BY status", (user.org_id, since))
     counts = {row["status"]: int(row["n"]) for row in rows}

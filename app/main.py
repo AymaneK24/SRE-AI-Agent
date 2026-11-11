@@ -25,7 +25,7 @@ from .auth import RateLimiter, ensure_default_admin, load_principal
 from .config import Config
 from .context.manager import EngineManager
 from .costs import budget_problem
-from .db import Database, utcnow
+from .db import Database, RowMissing, utcnow
 from .investigation.runner import InvestigationManager, Run
 from .llm.base import ProviderError
 from .mailer import Mailer
@@ -159,6 +159,11 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, error: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": friendly_validation_error(list(error.errors()))}, status_code=422)
+
+    @app.exception_handler(RowMissing)
+    async def row_missing(_: Request, error: RowMissing) -> JSONResponse:
+        # For example an account or a panel deleted while another request for it was running.
+        return JSONResponse({"detail": "This no longer exists. Reload the page."}, status_code=404)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

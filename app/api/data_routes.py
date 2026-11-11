@@ -363,7 +363,7 @@ async def create_integration(body: IntegrationBody, user: Admin, ctx: Ctx) -> di
         )
     await ctx.db.audit(user.org_id, "integration_saved", f"integration:{new_id}", {"kind": body.kind, "name": body.name}, actor=user.actor)
     await (await ctx.engines.get(user.org_id)).integrations_changed()
-    return public_integration(await ctx.db.one("SELECT * FROM integrations WHERE id = ?", (new_id,)))
+    return public_integration(await ctx.db.get("SELECT * FROM integrations WHERE id = ?", (new_id,)))
 
 
 @router.put("/connections/main")
@@ -468,13 +468,13 @@ async def create_panel(body: PanelBody, user: Engineer, ctx: Ctx) -> dict[str, A
         raise HTTPException(409, "Connect a metric source first.")
     source_id = body.source_id or next(iter(engine.states))
     await _own_source(ctx, user.org_id, source_id)
-    last = await ctx.db.one("SELECT COALESCE(MAX(position), -1) AS p FROM panels WHERE org_id = ? AND source_id = ?", (user.org_id, source_id))
+    last = await ctx.db.get("SELECT COALESCE(MAX(position), -1) AS p FROM panels WHERE org_id = ? AND source_id = ?", (user.org_id, source_id))
     panel_id = await ctx.db.insert(
         "INSERT INTO panels(org_id, source_id, title, query, unit, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (user.org_id, source_id, body.title, body.query, body.unit, last["p"] + 1, utcnow()),
     )
     await ctx.db.set_setting(user.org_id, f"panels_seeded:{source_id}", True)
-    return await ctx.db.one("SELECT * FROM panels WHERE id = ?", (panel_id,))
+    return await ctx.db.get("SELECT * FROM panels WHERE id = ?", (panel_id,))
 
 
 @router.put("/panels/{panel_id}")
@@ -484,7 +484,7 @@ async def update_panel(panel_id: int, body: PanelBody, user: Engineer, ctx: Ctx)
         raise HTTPException(404, "This panel no longer exists.")
     await ctx.db.execute("UPDATE panels SET title = ?, query = ?, unit = ? WHERE id = ? AND org_id = ?", (body.title, body.query, body.unit, panel_id, user.org_id))
     await ctx.db.set_setting(user.org_id, f"panels_seeded:{row['source_id']}", True)
-    return await ctx.db.one("SELECT * FROM panels WHERE id = ?", (panel_id,))
+    return await ctx.db.get("SELECT * FROM panels WHERE id = ?", (panel_id,))
 
 
 @router.delete("/panels/{panel_id}", status_code=204)

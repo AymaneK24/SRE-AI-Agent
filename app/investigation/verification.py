@@ -174,17 +174,19 @@ async def verify_answer(prompt: str, answer: str, evidence_texts: list[str], run
     root = _section(sections, "Likely root cause") or ""
     numbers = check_numbers(f"{root}\n{evidence}", corpus_numbers(evidence_texts))
 
-    queries = {"checked": 0, "valid": 0, "empty": 0, "invalid": []}
+    checked = valid = empty = 0
+    invalid: list[dict[str, str]] = []
     if run_query:
         for query in cited_queries(evidence):
-            queries["checked"] += 1
+            checked += 1
             try:
                 result = await run_query(query)
-                queries["valid"] += 1
+                valid += 1
                 if not result.get("result"):
-                    queries["empty"] += 1
+                    empty += 1
             except Exception as error:  # Any failure means the cited query doesn't support the claim.
-                queries["invalid"].append({"query": query[:200], "error": str(getattr(error, "message", error))[:160]})
+                invalid.append({"query": query[:200], "error": str(getattr(error, "message", error))[:160]})
+    queries: dict[str, Any] = {"checked": checked, "valid": valid, "empty": empty, "invalid": invalid}
 
     has_competing = _section(sections, "Competing explanation") is not None
     reasons = []
