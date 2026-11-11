@@ -16,8 +16,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..auth import (
-    client_ip, consume_email_token, create_email_token, create_organization, create_session, end_session, hash_password,
-    normalize_email, org_policies, password_problem, verify_password,
+    client_ip, consume_email_token, create_email_token, create_organization, create_session, end_session, hash_password_async,
+    normalize_email, org_policies, password_problem, verify_password_async,
 )
 from ..db import PLATFORM_ORG, sha256_text, utc_after, utcnow
 from ..mailer import MailError
@@ -121,7 +121,7 @@ async def login(body: LoginBody, request: Request, response: Response, ctx: Ctx)
         await asyncio.sleep(min(2 ** (failures - LOGIN_FAIL_LIMIT), LOGIN_MAX_DELAY_S))
     user = await ctx.db.one(
         "SELECT u.*, o.status AS org_status FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.email = ? LIMIT 1", (identifier,))
-    valid = verify_password(user["password_hash"] if user else "", body.password)
+    valid = await verify_password_async(user["password_hash"] if user else "", body.password)
     if not user or not valid or not user["is_active"]:
         ctx.limiter.record(key)
         ctx.limiter.record(ip_key)
@@ -185,7 +185,7 @@ async def _change_email(body: ProfileBody, request: Request, response: Response,
         raise HTTPException(409, "Your email comes from single sign-on, so change it there.")
     if not ctx.limiter.allow(f"email-change:{user.user_id}", LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW_S):
         raise HTTPException(429, "Too many attempts. Wait 15 minutes and try again.")
-    if not body.current_password or not verify_password(row["password_hash"], body.current_password):
+    if not body.current_password or not await verify_password_async(row["password_hash"], body.current_password):
         raise HTTPException(401, "Your current password isn't correct.")
     if email == row["email"]:
         return {"updated": True, "pending_email": None}
@@ -224,7 +224,7 @@ async def _change_email(body: ProfileBody, request: Request, response: Response,
 @router.post("/auth/change-password")
 async def change_password(body: ChangePasswordBody, request: Request, response: Response, user: User, ctx: Ctx) -> dict[str, bool]:
     row = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,))
-    if not verify_password(row["password_hash"], body.current_password):
+    if not await verify_password_async(row["password_hash"], body.current_password):
         raise HTTPException(401, "Your current password isn't correct.")
     if body.current_password == body.new_password:
         raise HTTPException(422, "Choose a password different from your current one.")
@@ -232,7 +232,7 @@ async def change_password(body: ChangePasswordBody, request: Request, response: 
     problem = password_problem(body.new_password, policies, row["email"], row["name"])
     if problem:
         raise HTTPException(422, problem)
-    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", (hash_password(body.new_password), user.user_id))
+    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", (await hash_password_async(body.new_password), user.user_id))
     await ctx.db.execute("DELETE FROM sessions WHERE user_id = ?", (user.user_id,))
     fresh = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user.user_id,))
     await create_session(ctx.db, ctx.config, response, request, fresh)
@@ -262,7 +262,7 @@ async def signup(body: SignupBody, request: Request, ctx: Ctx) -> dict[str, Any]
     org_id = await create_organization(ctx.db, body.company.strip(), email)
     user_id = await ctx.db.insert(
         "INSERT INTO users(org_id, username, email, name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, 'owner', ?)",
-        (org_id, email, email, body.name, hash_password(body.password), utcnow()),
+        (org_id, email, email, body.name, await hash_password_async(body.password), utcnow()),
     )
     await ctx.db.audit(org_id, "organization_created", f"org:{org_id}", {"name": body.company.strip()}, actor=email)
     await _send_verification(ctx, user_id, email)
@@ -327,7 +327,7 @@ async def reset(body: ResetBody, ctx: Ctx) -> dict[str, bool]:
     user = await consume_email_token(ctx.db, "reset", body.token)
     if not user:
         raise HTTPException(400, "This link is invalid or has expired. Request a new one.")
-    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?", (hash_password(body.password), utcnow(), user["id"]))
+    await ctx.db.execute("UPDATE users SET password_hash = ?, must_change_password = 0, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?", (await hash_password_async(body.password), utcnow(), user["id"]))
     await ctx.db.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
     await ctx.db.audit(user["org_id"], "password_reset", f"user:{user['id']}", {}, actor=user["email"])
     return {"reset": True}
@@ -346,7 +346,7 @@ async def accept_invite(body: AcceptBody, request: Request, response: Response, 
     if not user:
         raise HTTPException(400, "This invitation is invalid or has expired. Ask your admin for a new one.")
     await ctx.db.execute("UPDATE users SET name = ?, password_hash = ?, is_active = 1, email_verified_at = ? WHERE id = ?",
-                         (body.name, hash_password(body.password), utcnow(), user["id"]))
+                         (body.name, await hash_password_async(body.password), utcnow(), user["id"]))
     fresh = await ctx.db.one("SELECT * FROM users WHERE id = ?", (user["id"],))
     await create_session(ctx.db, ctx.config, response, request, fresh)
     await ctx.db.audit(user["org_id"], "invitation_accepted", f"user:{user['id']}", {}, actor=user["email"])

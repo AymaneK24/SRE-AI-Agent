@@ -1,6 +1,7 @@
 """Model settings, investigations, and prompt logs."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Annotated, Any, AsyncIterator, Literal
@@ -334,7 +335,9 @@ async def conversation_pdf(conversation_id: int, user: Engineer, ctx: Ctx) -> Re
              "confidence": str(verification.get("confidence_final") or "Not stated").capitalize(),
              "status": {"open": "Open", "resolved": "Resolved", "false_alarm": "False alarm"}.get(row["status"], row["status"]),
              "subtitle": f"Investigation report. Started {row['created_at'][:16].replace('T', ' ')} UTC.", "status_note": ""}
-    pdf = build_pdf(facts, split_sections(answer["content"]), evidence, await reviewed_workflows(ctx.db, user.org_id, event, {}))
+    workflows = await reviewed_workflows(ctx.db, user.org_id, event, {})
+    # Drawing charts and laying out pages takes a while, so it runs off the main loop.
+    pdf = await asyncio.to_thread(build_pdf, facts, split_sections(answer["content"]), evidence, workflows)
     await ctx.db.audit(user.org_id, "investigation_pdf_downloaded", f"conversation:{conversation_id}", {}, actor=user.actor)
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", row["title"])[:60].strip("-") or "investigation"
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"'})

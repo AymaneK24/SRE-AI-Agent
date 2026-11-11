@@ -13,6 +13,7 @@ The changes in this version, with links to the full description.
 - **A source that stops answering is announced.** With a grace period set, "stopped answering" was wrongly held back as a blip. It is now sent while the source is still down.
 - **Alertmanager webhooks without a metric source work with a grace period.** Their alerts are sent at once, because Alertmanager already waited before calling, and a critical one starts a single automatic investigation.
 - **Monitoring continues after a failed check.** One failed poll, such as during a database restart, no longer stops the console watching that company. The page shows that the last check failed until the next one succeeds.
+- **Several clusters are read at the same time**, so one slow cluster no longer delays the others' alerts. Signing in and building PDF reports no longer pause live updates.
 - **False alarms stay quiet.** An issue marked *false alarm* or *expected* in a project is no longer messaged. [False alarms](/docs/projects-and-reports#false-alarms)
 
 ## Several connections of each kind

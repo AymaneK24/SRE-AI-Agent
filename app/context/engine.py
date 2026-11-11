@@ -38,6 +38,7 @@ BASELINE_EVERY_S = 300
 METRICS_EVERY_S = 300
 SNAPSHOT_EVERY_S = 600
 INTEGRATION_EVERY_S = 30
+INTEGRATIONS_AT_ONCE = 4
 CRASH_LOG_PROBLEMS = 3
 CRASH_LOG_LINES = 30
 CRASH_LOG_CHARS = 1000
@@ -475,43 +476,55 @@ class ContextEngine:
         self.main_connections = await main_connections(self.db, self.org_id)
         clusters = [row for row in rows if row["kind"] == "kubernetes"]
         main_cluster = pick_main(clusters, self.main_connections.get("kubernetes"))
-        items: list[dict[str, Any]] = []
         snapshots: dict[int, dict[str, Any]] = {}
         problems: list[dict[str, Any]] = []
         wanted_logs: dict[str, dict[str, Any]] = {}
-        for row in rows:
+        # Connections are read at the same time, a few at once, so one slow cluster doesn't delay the others' alerts.
+        limiter = asyncio.Semaphore(INTEGRATIONS_AT_ONCE)
+
+        async def read(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
             client = None
             base = {"id": row["id"], "kind": row["kind"], "name": row["name"]}
-            try:
-                client = build_integration(row, self.box, self.config)
-                if row["kind"] == "kubernetes":
-                    snapshot = await client.snapshot()
-                    found = find_problems(snapshot)
-                    # A second cluster can hold a namespace with the same name, so its problems need their own fingerprints.
-                    if len(clusters) > 1:
-                        for problem in found:
-                            problem["cluster"], problem["integration_id"] = row["name"], row["id"]
-                            problem["title"] = f"{problem['title']} ({row['name']})"
-                            problem["clear"] = f"{problem['clear']} ({row['name']})"
-                            if row["id"] != main_cluster:
-                                problem["fingerprint"] = problem["fingerprint"].replace("k8s:", f"k8s:#{row['id']}/", 1)
-                    await self._enrich_k8s_problems(client, found, snapshot.get("events", []), wanted_logs)
-                    snapshots[row["id"]] = snapshot
-                    problems.extend(found)
-                    item = {**base, "status": "ok", **summary_from_snapshot(snapshot), "problems": found}
-                    for namespace in item["namespaces"]:
-                        namespace["problems"] = sum(1 for problem in found if problem["namespace"] == namespace["name"])
-                else:
-                    item = {**base, "status": "ok", **(await client.summary())}
-            except (SourceError, BlockedTarget, ValueError) as error:
-                item = {**base, "status": "error", "error": scrub(getattr(error, "message", str(error)))}
-            except Exception as error:  # A bad answer from one connection must not stop the others.
-                log.exception("integration refresh failed for %s", row["kind"])
-                item = {**base, "status": "error", "error": scrub(f"Refresh failed: {error}")}
-            finally:
-                if client:
-                    await client.close()
+            snapshot, found = None, []
+            async with limiter:
+                try:
+                    client = build_integration(row, self.box, self.config)
+                    if row["kind"] == "kubernetes":
+                        snapshot = await client.snapshot()
+                        found = find_problems(snapshot)
+                        # A second cluster can hold a namespace with the same name, so its problems need their own fingerprints.
+                        if len(clusters) > 1:
+                            for problem in found:
+                                problem["cluster"], problem["integration_id"] = row["name"], row["id"]
+                                problem["title"] = f"{problem['title']} ({row['name']})"
+                                problem["clear"] = f"{problem['clear']} ({row['name']})"
+                                if row["id"] != main_cluster:
+                                    problem["fingerprint"] = problem["fingerprint"].replace("k8s:", f"k8s:#{row['id']}/", 1)
+                        await self._enrich_k8s_problems(client, found, snapshot.get("events", []), wanted_logs)
+                        item = {**base, "status": "ok", **summary_from_snapshot(snapshot), "problems": found}
+                        for namespace in item["namespaces"]:
+                            namespace["problems"] = sum(1 for problem in found if problem["namespace"] == namespace["name"])
+                    else:
+                        item = {**base, "status": "ok", **(await client.summary())}
+                except (SourceError, BlockedTarget, ValueError) as error:
+                    snapshot, found = None, []
+                    item = {**base, "status": "error", "error": scrub(getattr(error, "message", str(error)))}
+                except Exception as error:  # A bad answer from one connection must not stop the others.
+                    log.exception("integration refresh failed for %s", row["kind"])
+                    snapshot, found = None, []
+                    item = {**base, "status": "error", "error": scrub(f"Refresh failed: {error}")}
+                finally:
+                    if client:
+                        await client.close()
+            return item, snapshot, found
+
+        results = await asyncio.gather(*(read(row) for row in rows))
+        items: list[dict[str, Any]] = []
+        for row, (item, snapshot, found) in zip(rows, results, strict=True):
             items.append(item)
+            if snapshot is not None:
+                snapshots[row["id"]] = snapshot
+                problems.extend(found)
         self._crash_logs = wanted_logs
         self.k8s_snapshots = snapshots
         self.k8s_snapshot = snapshots.get(main_cluster) if main_cluster else None
@@ -790,8 +803,9 @@ class ContextEngine:
         # console only sees it at startup, or when its cluster was just connected.
         open_before: set[str] = set()
         if first_poll:
-            open_before = await self._open_problems()
-            await self._close_problems_that_ended_offline(current)
+            latest = await self._latest_events()
+            open_before = {row["fingerprint"] for row in latest if row["kind"].endswith("_started") and row["handled"]}
+            await self._close_problems_that_ended_offline(current, latest)
         # One problem, one notification: a problem already announced under another name isn't announced again.
         announced_alerts = {key for key, value in current.items() if value.get("merged_into") and key in self._active and not self._active[key].get("silent")}
         covered = {current[key]["merged_into"] for key in announced_alerts}
@@ -845,15 +859,13 @@ class ContextEngine:
                 index.setdefault((problem["namespace"], problem["workload"]), fingerprint)
         return index
 
-    async def _open_problems(self) -> set[str]:
-        rows = await self.db.all(
-            "SELECT fingerprint, kind, handled FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
-        return {row["fingerprint"] for row in rows if row["kind"].endswith("_started") and row["handled"]}
+    async def _latest_events(self) -> list[dict[str, Any]]:
+        """The last event of every problem this organization has had."""
+        return await self.db.all(
+            "SELECT fingerprint, kind, title, source_id, handled FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
 
-    async def _close_problems_that_ended_offline(self, current: dict[str, Any]) -> None:
+    async def _close_problems_that_ended_offline(self, current: dict[str, Any], rows: list[dict[str, Any]]) -> None:
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
-        rows = await self.db.all(
-            "SELECT fingerprint, kind, title, source_id FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
         for row in rows:
             if not row["kind"].endswith("_started") or row["fingerprint"] in current:
                 continue

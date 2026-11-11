@@ -81,6 +81,8 @@ class AutoInvestigator:
             log.warning("automatic investigation skipped: %s", getattr(error, "message", error))
             return None
         self._recent[key] = time.monotonic()
+        for old in [item for item, at in self._recent.items() if time.monotonic() - at >= 3600]:
+            del self._recent[old]
         title = str(event.get("title", "Critical alert"))[:90]
         now = utcnow()
         conversation_id = await ctx.db.insert(
