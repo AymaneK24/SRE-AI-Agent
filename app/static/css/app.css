@@ -212,6 +212,8 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .savings-list .segments { justify-self: start; }
 .noise-title { margin-top: 30px; font-size: 18px; }
 .noise-steps { list-style: none; counter-reset: none; }
+.heartbeat-state { margin: 10px 0 12px; }
+.heartbeat-form { display: grid; gap: 12px; max-width: 900px; }
 
 /* Source picker: a pill like the segmented controls, naming which connection a part of the page shows.
    It only appears when there is more than one to choose from. */

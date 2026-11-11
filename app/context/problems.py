@@ -6,7 +6,7 @@ from typing import Any
 
 from ..db import utcnow
 from ..secrets_store import scrub
-from .state import ANOMALY_SUSTAIN_POLLS, K8S_CLEAR_AFTER_S, TARGET_LIST_LIMIT, EngineState
+from .state import ANOMALY_SUSTAIN_POLLS, BLIND_AFTER_POLLS, CONSOLE_FINGERPRINT, K8S_CLEAR_AFTER_S, TARGET_LIST_LIMIT, EngineState
 from .summary import alert_workload, alert_severity, label_text, series_key
 
 
@@ -15,6 +15,8 @@ class ProblemTracking(EngineState):
         """Whether a problem announced a moment ago is still there, for the grace period."""
         if fingerprint in self._active:
             return True
+        if fingerprint == CONSOLE_FINGERPRINT:
+            return self.failed_polls_in_a_row >= BLIND_AFTER_POLLS
         if fingerprint.startswith("source:"):
             return any(state.failures > 0 for state in self.states.values() if f"source:{state.source.id}" == fingerprint)
         return False
@@ -210,6 +212,11 @@ class ProblemTracking(EngineState):
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
         for row in rows:
             if not row["kind"].endswith("_started") or row["fingerprint"] in current:
+                continue
+            if row["fingerprint"] == CONSOLE_FINGERPRINT:
+                # This poll succeeded, so the console is checking again. The channels that heard it couldn't are told.
+                if not self._blind_announced:
+                    await self.record_event("polling_cleared", "info", CONSOLE_FINGERPRINT, "The console completes its checks again", {})
                 continue
             if row["fingerprint"].startswith("k8s:"):
                 if not self._integration_ok("kubernetes"):

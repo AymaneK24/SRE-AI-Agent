@@ -11,6 +11,7 @@ from ..config import Config
 from ..context.engine import ContextEngine
 from ..context.manager import EngineManager
 from ..db import Database
+from ..heartbeat import Heartbeat
 from ..investigation.runner import InvestigationManager
 from ..mailer import Mailer
 from ..notifications import Notifier
@@ -29,6 +30,7 @@ class AppContext:
     mailer: Mailer
     notifier: Notifier
     limiter: RateLimiter
+    heartbeat: Heartbeat
 
 
 def get_ctx(request: Request) -> AppContext:

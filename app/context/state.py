@@ -39,6 +39,9 @@ ANOMALY_SUSTAIN_POLLS = 2
 EVENT_MEMORY = 50
 # A polling loop that hasn't come round for this long after it was due is stuck, not slow.
 STALLED_AFTER_S = 300
+# The console says on the alert channels that it can't complete its checks after this many failed polls in a row.
+BLIND_AFTER_POLLS = 3
+CONSOLE_FINGERPRINT = "console:polling"
 WATCHDOG_EVERY_S = 30
 POLL_FAILURES = Counter("rcc_poll_failures_total", "Polls that ended with an unexpected error")
 LOOP_RESTARTS = Counter("rcc_polling_restarts_total", "Polling loops restarted after ending unexpectedly")
@@ -107,6 +110,8 @@ class EngineState:
         self._k8s_missing_since: dict[str, float] = {}
         self._event_tasks: set[asyncio.Task[None]] = set()
         self.poll_failures = 0
+        self.failed_polls_in_a_row = 0
+        self._blind_announced = False
         self._loop_beat = time.monotonic()
         self._loop_delay = float(NO_SOURCE_POLL_S)
 

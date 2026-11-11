@@ -60,6 +60,8 @@ The image has no shell, so `docker exec ... sh` doesn't work by design. Use the 
 
 ## Monitor the console itself
 
+The simplest check needs no Prometheus: a [heartbeat](/docs/alerts-and-webhooks#heartbeat-know-when-the-console-itself-stops) to an outside service that alerts you when the console stops calling.
+
 The console exposes Prometheus metrics at `/metrics`. Caddy blocks that path on the public address, so scrape the console directly on its internal port, with a token:
 
 ```bash
