@@ -14,6 +14,7 @@ from ..broker import Broker
 from ..config import Config
 from ..db import Database, utcnow
 from ..secrets_store import SecretBox, scrub
+from ..topology import Topology
 from .summary import headline_for
 
 log = logging.getLogger("rcc.context")
@@ -39,6 +40,7 @@ ANOMALY_SUSTAIN_POLLS = 2
 EVENT_MEMORY = 50
 # A polling loop that hasn't come round for this long after it was due is stuck, not slow.
 STALLED_AFTER_S = 300
+OBSERVED_EVERY_S = 300
 # The console says on the alert channels that it can't complete its checks after this many failed polls in a row.
 BLIND_AFTER_POLLS = 3
 CONSOLE_FINGERPRINT = "console:polling"
@@ -91,6 +93,13 @@ class EngineState:
         self.k8s_snapshot: dict[str, Any] | None = None
         self.k8s_snapshots: dict[int, dict[str, Any]] = {}
         self.k8s_problems: list[dict[str, Any]] = []
+        # The service dependency map, rebuilt on every poll, and the calls seen in traces or a mesh, read less often.
+        self.topology = Topology()
+        self.topology_links: dict[str, dict[str, Any]] = {}
+        self.topology_current: dict[str, dict[str, Any]] = {}
+        self.topology_built_at: str | None = None
+        self._observed: dict[str, list[dict[str, Any]]] = {}
+        self._observed_at = 0.0
         self._crash_logs: dict[str, dict[str, Any]] = {}
         self._integrations_at = 0.0
         self._task: asyncio.Task | None = None

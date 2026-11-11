@@ -346,6 +346,7 @@ export function mount(container) {
     const perHour = number(settings.max_per_hour, 1, 500);
     const flapping = h('input', { type: 'checkbox', checked: settings.flapping });
     const verdicts = h('input', { type: 'checkbox', checked: settings.respect_verdicts });
+    const symptoms = h('input', { type: 'checkbox', checked: settings.hold_symptoms });
     const result = h('div');
     const stat = (value, label, hint) => h('div', { class: 'stat', title: hint || '' }, h('b', {}, String(value ?? 0)), h('span', {}, label));
     clear(noiseHost,
@@ -357,12 +358,12 @@ export function mount(container) {
         stat(week.held_back_total, 'Held back'),
         stat(held.blip || 0, 'Cleared within the grace period', 'Short blips that fixed themselves.'),
         stat(held.grouped || 0, 'Sent together with another problem'),
-        stat((held.flapping || 0) + (held.muted || 0) + (held.rate_limit || 0), 'Flapping, marked false alarm, or over the limit')),
+        stat((held.flapping || 0) + (held.muted || 0) + (held.rate_limit || 0) + (held.symptom || 0), 'Flapping, marked false alarm, a symptom, or over the limit')),
       h('form', { class: 'savings-form', 'aria-label': 'Noise control', onSubmit: async (event) => {
         event.preventDefault();
         try {
           await api('/api/org/noise', { method: 'PUT', body: { grace_critical_s: Number(graceCritical.value), grace_warning_s: Number(graceWarning.value),
-            group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked } });
+            group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked, hold_symptoms: symptoms.checked } });
           toast('Noise control saved');
           renderNoise();
         } catch (error) { showResult(result, false, error.message); }
@@ -378,6 +379,9 @@ export function mount(container) {
             h('p', {}, 'Something that starts 3 times or more in an hour gets one message saying so. Further starts stay quiet until it has been stable for 30 minutes.')),
           h('li', {}, h('label', { class: 'check' }, verdicts, h('b', {}, 'Respect false-alarm verdicts')),
             h('p', {}, 'Problems your team marked as a false alarm or expected, in a project report, are no longer messaged. They still show in the console.')),
+          h('li', {}, h('label', { class: 'check' }, symptoms, h('b', {}, 'Hold alerts explained by a broken dependency')),
+            h('p', {}, 'When the dependency map shows a problem is likely caused by another one that is still going on, only the cause is messaged, with what fails because of it. Off: both are sent, and the symptom names its likely cause. ',
+              h('a', { href: '/docs/dependency-map#alerts' }, 'Dependency map'))),
           h('li', {}, h('b', {}, 'Most messages per channel, per hour'),
             h('p', {}, 'Beyond this, a channel gets one summary of what was held back when the hour is up.'),
             h('div', { class: 'form-grid' }, field('Messages per hour', perHour, null, 'span-2'))),

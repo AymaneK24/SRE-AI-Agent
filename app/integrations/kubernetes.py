@@ -1,7 +1,7 @@
 """Read-only Kubernetes API access.
 
 Everything here uses GET on the kinds listed in docs/DEPLOY.md (pods, pod logs, events, deployments, replica sets,
-stateful sets, daemon sets, nodes). Secrets and ConfigMap contents are never requested. A kind the token may not
+stateful sets, daemon sets, nodes, services). Secrets and ConfigMap contents are never requested. A kind the token may not
 list is reported in `forbidden` and the rest still works.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from ..topology import env_hosts, summarize_service
 from ..net_guard import TargetPolicy, check_url, guarded_transport
 from ..sources.base import SourceError
 
@@ -98,6 +99,8 @@ def summarize_pod(pod: dict[str, Any]) -> dict[str, Any]:
         "ready": ready.get("status") == "True", "ready_since": ready.get("lastTransitionTime", ""),
         "restarts": sum(item["restarts"] for item in containers),
         "labels": dict(meta.get("labels") or {}),
+        # Host names the containers are configured to reach, for the dependency map. Values are never kept.
+        "env_hosts": env_hosts(spec.get("containers", []) or []),
     }
 
 
@@ -289,7 +292,8 @@ class KubernetesClient:
         nodes = [summarize_node(item) for item in await optional("nodes", cluster_wide=True)] if not self.namespace else []
         events = [summarize_event(item) for item in await optional("events", params={"fieldSelector": "type=Warning"})]
         events.sort(key=lambda row: str(row["last_seen"]), reverse=True)
-        return {"pods": pods, "deployments": deployments, "nodes": nodes, "events": events[:100], "forbidden": forbidden,
+        services = [summarize_service(item) for item in await optional("services")]
+        return {"pods": pods, "deployments": deployments, "nodes": nodes, "events": events[:100], "services": services, "forbidden": forbidden,
                 "taken_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
 
     async def summary(self) -> dict[str, Any]:
