@@ -133,6 +133,9 @@ def create_app(config: Config | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await ensure_default_admin(db, config)
+        # A restart ends every running investigation. Without this they would show as running forever.
+        await db.execute("UPDATE messages SET status = 'failed', error = ? WHERE status = 'running'",
+                         ("The console restarted before this investigation finished. Ask again to run it.",))
         await notifier.release_after_restart()
         await db.audit(0, "console_started", "", {"mode": config.mode, "database": "postgresql" if db.is_postgres else "sqlite"})
         await engines.start_active()

@@ -141,6 +141,8 @@ class ContextEngine:
         self._last_ok_mono: float | None = None
         self._stopping = False
         self._k8s_missing_since: dict[str, float] = {}
+        self._event_tasks: set[asyncio.Task[None]] = set()
+        self.poll_failures = 0
 
     # Lifecycle --------------------------------------------------------------
     async def start(self) -> None:
@@ -226,7 +228,13 @@ class ContextEngine:
         while not self._stopping:
             delay = float(NO_SOURCE_POLL_S)
             if self.has_connections:
-                await self.poll()
+                try:
+                    await self.poll()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # One failed poll, such as a database restart, must not end monitoring.
+                    log.exception("context poll failed for organization %s", self.org_id)
+                    self._poll_failed(error)
                 if self.states:
                     delay = float(min(min(state.poll_seconds for state in self.states.values()), NO_SOURCE_POLL_S if self.integration_kinds else 3600))
             else:
@@ -242,6 +250,21 @@ class ContextEngine:
                 if task and task.cancelling():
                     raise asyncio.CancelledError from None
             self._wake.clear()
+
+    def _poll_failed(self, error: Exception) -> None:
+        """Keeps the last picture, marked as out of date, and tells open pages. The next poll tries again."""
+        self.poll_failures += 1
+        health = {**self.context.get("health", {}), "error": scrub(f"The console couldn't finish its last check ({type(error).__name__}). It will try again.")}
+        self.context = {**self.context, "health": health, "stale": True}
+        self.broker.publish({"type": "context", "data": self.public_context()})
+
+    def still_active(self, fingerprint: str) -> bool:
+        """Whether a problem announced a moment ago is still there, for the grace period."""
+        if fingerprint in self._active:
+            return True
+        if fingerprint.startswith("source:"):
+            return any(state.failures > 0 for state in self.states.values() if f"source:{state.source.id}" == fingerprint)
+        return False
 
     def _empty_context(self, status: str) -> dict[str, Any]:
         return {
@@ -721,8 +744,9 @@ class ContextEngine:
     async def _diff_and_record(self, current: dict[str, dict[str, Any]]) -> None:
         k8s_unknown = "kubernetes" in self.integration_kinds and not self._integration_ok("kubernetes")
         # Problems seen on the first poll started at an unknown earlier time, so don't date them as new.
+        # The first pass only counts as done once every problem is recorded, so a failure part-way is finished
+        # by the next poll under the same rules instead of announcing the rest as new.
         first_poll = not self._state_known
-        self._state_known = True
         # Problems still open from before a restart were announced when they started, so they aren't sent again.
         # Everything else found on the first poll is sent: a broken deployment is just as urgent when the
         # console only sees it at startup, or when its cluster was just connected.
@@ -743,6 +767,7 @@ class ContextEngine:
                 detail = {key: value for key, value in item["detail"].items() if key != "logs"}
                 await self._record_event(f"{item['kind']}_started", item["severity"], fingerprint, title, detail, item["detail"].get("source_id"),
                                          notify=not silent and not (first_poll and fingerprint in open_before))
+        self._state_known = True
         for fingerprint in [key for key in self._active if key not in current]:
             # Prometheus reports targets as unknown until it scrapes them, such as after a restart.
             # That isn't evidence of recovery, so the target stays marked as a known problem.
@@ -784,8 +809,8 @@ class ContextEngine:
 
     async def _open_problems(self) -> set[str]:
         rows = await self.db.all(
-            "SELECT fingerprint, kind FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
-        return {row["fingerprint"] for row in rows if row["kind"].endswith("_started")}
+            "SELECT fingerprint, kind, handled FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE org_id = ? GROUP BY fingerprint)", (self.org_id,))
+        return {row["fingerprint"] for row in rows if row["kind"].endswith("_started") and row["handled"]}
 
     async def _close_problems_that_ended_offline(self, current: dict[str, Any]) -> None:
         """A problem left open at the last shutdown has ended if it isn't active now, so reports don't count it as running."""
@@ -807,15 +832,21 @@ class ContextEngine:
     async def _record_event(self, kind: str, severity: str, fingerprint: str, title: str, detail: dict[str, Any],
                             source_id: int | None = None, notify: bool = True) -> None:
         ts = utcnow()
+        # A start that still has a message to send stays unhandled until the notifier is done with it.
+        will_notify = bool(notify and self.on_event)
+        waiting = will_notify and not kind.endswith(("_cleared", "_recovered"))
         event_id = await self.db.insert(
-            "INSERT INTO events(org_id, source_id, ts, kind, severity, fingerprint, title, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (self.org_id, source_id, ts, kind, severity, fingerprint, title, scrub(json.dumps(detail, default=str))),
+            "INSERT INTO events(org_id, source_id, ts, kind, severity, fingerprint, title, detail, handled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.org_id, source_id, ts, kind, severity, fingerprint, title, scrub(json.dumps(detail, default=str)), 0 if waiting else 1),
         )
         event = {"id": event_id, "ts": ts, "kind": kind, "severity": severity, "title": title, "fingerprint": fingerprint}
         self.recent_events.appendleft(event)
         self.broker.publish({"type": "event", "data": event})
-        if notify and self.on_event:
-            asyncio.create_task(self.on_event(self.org_id, event, detail))
+        if will_notify and self.on_event:
+            # The loop keeps only a weak reference to a task, so hold one until it ends.
+            task = asyncio.create_task(self.on_event(self.org_id, event, detail))
+            self._event_tasks.add(task)
+            task.add_done_callback(self._event_tasks.discard)
 
     async def _seed_panels(self, signals: list[dict[str, Any]]) -> None:
         """Build a starting dashboard for each new source, then leave it to the user.
