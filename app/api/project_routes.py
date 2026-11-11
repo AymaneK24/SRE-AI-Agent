@@ -504,5 +504,5 @@ async def report_pdf(project_id: int, report_id: int, user: User, ctx: Ctx) -> R
     report = {**row, "data": json.loads(row["data"]), "ai_check": json.loads(row["ai_check"] or "{}")}
     safe = re.sub(r"[^A-Za-z0-9_-]+", "-", report["data"]["project"]["name"]).strip("-") or "project"
     day = parse_ts(row["created_at"]).strftime("%Y-%m-%d")
-    return Response(build_pdf(report), media_type="application/pdf",
+    return Response(await asyncio.to_thread(build_pdf, report), media_type="application/pdf",
                     headers={"Content-Disposition": f'attachment; filename="{safe}-report-{day}.pdf"', "Cache-Control": "no-store"})

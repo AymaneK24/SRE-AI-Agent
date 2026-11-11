@@ -347,3 +347,76 @@ async def test_health_says_when_polling_is_stuck_and_a_loop_that_ended_is_starte
     assert not engine._task.done() and not engine.loop_ended
     assert console.ctx.engines.revive() == 0
     assert (await anon.get("/healthz")).status_code == 200
+
+
+# Staying responsive ---------------------------------------------------------
+async def test_checking_a_password_does_not_pause_everything_else():
+    from app.auth import hash_password_async, verify_password_async
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    task = asyncio.create_task(ticker())
+    stored = await hash_password_async("a-Strong-Passphrase-2026")
+    before = ticks
+    assert await verify_password_async(stored, "a-Strong-Passphrase-2026") is True
+    assert await verify_password_async(stored, "wrong") is False and await verify_password_async("", "anything") is False
+    task.cancel()
+    assert ticks - before >= 3, "other work kept running while the password was checked"
+
+
+def test_the_rate_limiter_forgets_keys_with_no_recent_attempts(monkeypatch):
+    from app import auth
+    now = [1000.0]
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now[0])
+    limiter = auth.RateLimiter()
+    assert limiter.count("never-seen", 60) == 0 and not limiter._hits, "asking about a key doesn't store it"
+    assert limiter.allow("a", 2, 60) and limiter.allow("a", 2, 60) and not limiter.allow("a", 2, 60)
+    now[0] += 61
+    assert limiter.count("a", 60) == 0 and "a" not in limiter._hits
+    assert limiter.allow("a", 2, 60)
+    # Addresses that tried once and never came back are dropped after a day.
+    for index in range(limiter.SWEEP_EVERY):
+        limiter.record(f"stranger-{index}")
+    now[0] += limiter.KEEP_S + 1
+    for _ in range(limiter.SWEEP_EVERY):
+        limiter.allow("busy", 10**6, 60)
+    assert set(limiter._hits) == {"busy"}
+
+
+async def test_clusters_are_read_at_the_same_time_and_one_failing_does_not_hide_the_others(console, monkeypatch):
+    from app.context import engine as engine_module
+    from app.sources.base import SourceError
+    client = await console.company("ManyCo", "m@test.example")
+    org_id = (await client.get("/api/auth/me")).json()["org_id"]
+    for index in range(3):
+        await console.ctx.db.insert("INSERT INTO integrations(org_id, kind, name, config, secret_enc, enabled, created_at, updated_at) VALUES (?, 'kubernetes', ?, '{}', '', 1, ?, ?)",
+                                    (org_id, f"cluster-{index}", utcnow(), utcnow()))
+
+    class Slow:
+        def __init__(self, name):
+            self.name = name
+
+        async def snapshot(self):
+            await asyncio.sleep(0.4)
+            if self.name == "cluster-1":
+                raise SourceError("This cluster didn't answer.", "timeout")
+            return {"pods": [], "deployments": [], "nodes": [], "events": [], "forbidden": []}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(engine_module, "build_integration", lambda row, box, config: Slow(row["name"]))
+    engine = await console.ctx.engines.get(org_id)
+    await engine.integrations_changed()
+    started = asyncio.get_running_loop().time()
+    await engine.refresh_now()
+    took = asyncio.get_running_loop().time() - started
+    assert took < 1.0, f"three clusters of 0.4 s each were read one after another ({took:.1f} s)"
+    states = {item["name"]: item["status"] for item in engine.context["connections"]}
+    assert states == {"cluster-0": "ok", "cluster-1": "error", "cluster-2": "ok"}
+    assert sorted(engine.k8s_snapshots) == sorted(row["id"] for row in await console.ctx.db.all("SELECT id FROM integrations WHERE org_id = ? AND name <> 'cluster-1'", (org_id,)))

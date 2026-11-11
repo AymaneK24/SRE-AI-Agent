@@ -1,10 +1,12 @@
 """Accounts: passwords, sessions, roles, policies, sign-in limits, and first-run setup."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import secrets
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -63,27 +65,46 @@ class Principal:
 class RateLimiter:
     """Limits attempts per key within a sliding window. It lives in memory on this one instance."""
 
+    SWEEP_EVERY = 2000
+    KEEP_S = 86400
+
     def __init__(self) -> None:
         self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._calls = 0
 
-    def allow(self, key: str, limit: int, window_s: int) -> bool:
+    def _recent(self, key: str, window_s: int) -> deque[float]:
+        """This key's attempts inside the window. A key with none left is forgotten, so keys can't pile up."""
         now = time.monotonic()
-        hits = self._hits[key]
+        hits = self._hits.get(key)
+        if hits is None:
+            return deque()
         while hits and hits[0] <= now - window_s:
             hits.popleft()
-        if len(hits) >= limit:
+        if not hits:
+            del self._hits[key]
+        return hits
+
+    def _sweep(self) -> None:
+        """Keys that are never asked about again, such as an address that tried once, are dropped after a day."""
+        self._calls += 1
+        if self._calls % self.SWEEP_EVERY:
+            return
+        cutoff = time.monotonic() - self.KEEP_S
+        for key in [key for key, hits in self._hits.items() if not hits or hits[-1] <= cutoff]:
+            del self._hits[key]
+
+    def allow(self, key: str, limit: int, window_s: int) -> bool:
+        self._sweep()
+        if len(self._recent(key, window_s)) >= limit:
             return False
-        hits.append(now)
+        self._hits[key].append(time.monotonic())
         return True
 
     def count(self, key: str, window_s: int) -> int:
-        now = time.monotonic()
-        hits = self._hits[key]
-        while hits and hits[0] <= now - window_s:
-            hits.popleft()
-        return len(hits)
+        return len(self._recent(key, window_s))
 
     def record(self, key: str) -> None:
+        self._sweep()
         self._hits[key].append(time.monotonic())
 
     def clear(self, key: str) -> None:
@@ -99,6 +120,24 @@ def verify_password(stored: str, password: str) -> bool:
         return hasher.verify(stored or DUMMY_HASH, password) and bool(stored)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+# Argon2 is slow and memory-hungry on purpose: about 100 ms and 64 MiB each time. Requests run it on a worker
+# thread, a few at once, so a sign-in never pauses polling and live updates, and a burst can't exhaust memory.
+_HASHING = threading.BoundedSemaphore(4)
+
+
+def _limited(function: Any, *args: Any) -> Any:
+    with _HASHING:
+        return function(*args)
+
+
+async def hash_password_async(password: str) -> str:
+    return await asyncio.to_thread(_limited, hash_password, password)
+
+
+async def verify_password_async(stored: str, password: str) -> bool:
+    return await asyncio.to_thread(_limited, verify_password, stored, password)
 
 
 def password_problem(password: str, policies: dict[str, Any], *context: str) -> str | None:

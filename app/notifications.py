@@ -572,9 +572,10 @@ class Notifier:
             engine = await self.engines.get(org_id)
             evidence = await collect_evidence(self.db, engine, conversation_id, event, detail)
             workflows = await reviewed_workflows(self.db, org_id, event, detail)
-            message.update(build_email(facts, sections, evidence, workflows))
+            # Charts and the PDF are drawn off the main loop, so polling and live pages don't pause meanwhile.
+            message.update(await asyncio.to_thread(build_email, facts, sections, evidence, workflows))
             message["email_text"] = message["text"]
-            pdf = build_pdf(facts, sections, evidence, workflows)
+            pdf = await asyncio.to_thread(build_pdf, facts, sections, evidence, workflows)
             message["attachments"] = [{"filename": f"incident-report-{conversation_id}.pdf", "data": pdf, "mime": "application/pdf"}]
         except Exception:
             # The findings still go out as text if charts or the PDF can't be made.
