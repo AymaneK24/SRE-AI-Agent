@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -135,6 +135,16 @@ CREATE TABLE delivery_queue (
 );
 CREATE INDEX idx_delivery_queue_due ON delivery_queue(next_try_at);
 CREATE INDEX idx_events_org_fingerprint ON events(org_id, fingerprint, id);
+"""
+
+# Version 11: labels that expire. A "false alarm" or "expected" label ends after a set time, a change to the
+# same service, worse behaviour than when it was set, or a changed rule. peak holds what the issue looked like
+# when it was labelled; an ended label keeps its reason so the team sees why the alert came back.
+V11_COLUMNS = """ALTER TABLE issue_verdicts ADD COLUMN renewed_at TEXT;
+ALTER TABLE issue_verdicts ADD COLUMN ended_at TEXT;
+ALTER TABLE issue_verdicts ADD COLUMN ended_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE issue_verdicts ADD COLUMN ended_note TEXT NOT NULL DEFAULT '';
+ALTER TABLE issue_verdicts ADD COLUMN peak TEXT NOT NULL DEFAULT '{}';
 """
 
 COMMON = """
@@ -477,15 +487,17 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         statements += _split(V9_COLUMNS)
     if version < 10:
         statements += _split(V10_TABLES.format(**types))
+    if version < 11:
+        statements += _split(V11_COLUMNS)
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + V10_TABLES.format(**SQLITE_TYPES) + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + V10_TABLES.format(**SQLITE_TYPES) + V11_COLUMNS + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS) + _split(V10_TABLES.format(**POSTGRES_TYPES))
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS) + _split(V10_TABLES.format(**POSTGRES_TYPES)) + _split(V11_COLUMNS)
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

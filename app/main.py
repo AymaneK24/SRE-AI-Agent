@@ -144,6 +144,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         await engines.start_active()
         background = [asyncio.create_task(maintenance_loop(db), name="maintenance"),
                       asyncio.create_task(notifier.retry_loop(), name="delivery-retries"),
+                      asyncio.create_task(notifier.label_loop(), name="label-watch"),
                       asyncio.create_task(engines.watchdog(), name="polling-watchdog"),
                       asyncio.create_task(ctx.heartbeat.loop(), name="heartbeat")]
         yield

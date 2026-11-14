@@ -197,7 +197,7 @@ def test_upgrading_from_version_8_keeps_old_events_as_handled(tmp_path):
     from app import schema
     path = tmp_path / "console.db"
     conn = sqlite3.connect(path)
-    conn.executescript(schema.sqlite_statements().replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), ""))
+    conn.executescript(schema.sqlite_statements().replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V11_COLUMNS, ""))
     conn.execute("INSERT INTO events(org_id, ts, kind, severity, fingerprint, title) VALUES (1, 'now', 'alert_started', 'critical', 'alert:x', 'Old alert')")
     conn.execute("PRAGMA user_version=8")
     conn.commit()

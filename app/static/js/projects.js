@@ -177,12 +177,29 @@ export function mount(container, params) {
       } catch (error) { toast(error.message); }
     }
 
+    async function renewVerdict(issue) {
+      try {
+        await api('/api/issues/verdict/renew', { method: 'POST', body: { title: issue.title } });
+        toast('Label renewed');
+        showProject(projectId);
+      } catch (error) { toast(error.message); }
+    }
+
+    // When a false alarm or expected label ends, or why it already ended.
+    function labelState(issue) {
+      if (issue.verdict_ended) return h('div', { class: 'verdict-ended', title: issue.verdict_ended }, 'Label ended: ', issue.verdict_ended.replace(/^.*that label ended: /, ''));
+      if (!issue.verdict_expires_at || !['false_positive', 'expected'].includes(issue.verdict)) return null;
+      const days = Math.max(0, Math.ceil((new Date(issue.verdict_expires_at) - Date.now()) / 86400000));
+      return h('div', { class: 'verdict-expiry' }, days <= 1 ? 'Expires within a day' : `Expires in ${days} days`,
+        can('engineer') ? h('button', { class: 'linkish', type: 'button', onClick: () => renewVerdict(issue) }, 'Renew') : null);
+    }
+
     function verdictCell(issue) {
-      if (!can('engineer')) return issue.verdict ? VERDICTS[issue.verdict] : h('span', { class: 'muted' }, 'Not reviewed');
+      if (!can('engineer')) return h('div', {}, issue.verdict ? VERDICTS[issue.verdict] : h('span', { class: 'muted' }, 'Not reviewed'), labelState(issue));
       const select = h('select', { class: 'input verdict-select', 'aria-label': `Verdict for ${issue.title}`, onChange: () => setVerdict(issue, select.value) },
         h('option', { value: '', selected: !issue.verdict }, 'Not reviewed'),
         Object.entries(VERDICTS).map(([value, label]) => h('option', { value, selected: issue.verdict === value }, label)));
-      return select;
+      return h('div', {}, select, labelState(issue));
     }
 
     async function shareReport(report, shared) {

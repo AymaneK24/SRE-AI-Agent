@@ -518,6 +518,9 @@ button.collector b, button.collector span { display: block; }
 .invite-name { flex: 1 1 180px; max-width: 260px; }
 .invite-email { flex: 1 1 220px; max-width: 320px; }
 .select-button.verdict-select { min-width: 132px; padding: 5px 32px 5px 12px; font-size: 13.5px; }
+.verdict-expiry, .verdict-ended { font-size: 12.5px; color: var(--muted); margin-top: 6px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 260px; line-height: 1.4; }
+.verdict-ended { color: var(--warning, #b7791f); display: block; }
+.verdict-expiry .linkish { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .noise-hint { margin-top: 3px; color: var(--warning); }
 
 /* Projects */

@@ -3,6 +3,8 @@
 Every problem the console finds goes through these steps before anyone is messaged:
 
 1. Muted: the team marked this problem a false alarm or expected. It still shows in the console, silently.
+   The label ends after a set time, a change to the same service, worse behaviour or a changed rule
+   (app/verdicts.py), and the alert then goes out saying why.
 2. Flapping: it started 3 times or more in an hour. One message says so; further starts stay quiet
    until it has been stable for 30 minutes.
 3. Grace period: it must still be there after a short wait (critical: 1 minute, warning: 5 minutes by
@@ -39,6 +41,7 @@ def defaults(config: Any) -> dict[str, Any]:
         "max_per_hour": 12,
         "flapping": True,
         "respect_verdicts": True,
+        "label_days": 30,
     }
 
 

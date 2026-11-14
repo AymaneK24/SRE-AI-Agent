@@ -346,6 +346,8 @@ export function mount(container) {
     const perHour = number(settings.max_per_hour, 1, 500);
     const flapping = h('input', { type: 'checkbox', checked: settings.flapping });
     const verdicts = h('input', { type: 'checkbox', checked: settings.respect_verdicts });
+    const labelDays = h('select', { class: 'input', 'aria-label': 'How long a false alarm label lasts' },
+      [[7, '7 days'], [30, '30 days'], [90, '90 days'], [0, 'Until something changes']].map(([value, text]) => h('option', { value, selected: Number(settings.label_days ?? 30) === value }, text)));
     const result = h('div');
     const stat = (value, label, hint) => h('div', { class: 'stat', title: hint || '' }, h('b', {}, String(value ?? 0)), h('span', {}, label));
     clear(noiseHost,
@@ -362,7 +364,7 @@ export function mount(container) {
         event.preventDefault();
         try {
           await api('/api/org/noise', { method: 'PUT', body: { grace_critical_s: Number(graceCritical.value), grace_warning_s: Number(graceWarning.value),
-            group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked } });
+            group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked, label_days: Number(labelDays.value) } });
           toast('Noise control saved');
           renderNoise();
         } catch (error) { showResult(result, false, error.message); }
@@ -377,7 +379,9 @@ export function mount(container) {
           h('li', {}, h('label', { class: 'check' }, flapping, h('b', {}, 'Calm flapping problems')),
             h('p', {}, 'Something that starts 3 times or more in an hour gets one message saying so. Further starts stay quiet until it has been stable for 30 minutes.')),
           h('li', {}, h('label', { class: 'check' }, verdicts, h('b', {}, 'Respect false-alarm verdicts')),
-            h('p', {}, 'Problems your team marked as a false alarm or expected, in a project report, are no longer messaged. They still show in the console.')),
+            h('p', {}, 'Problems your team marked as a false alarm or expected, in a project report, are no longer messaged. They still show in the console. '
+              + 'A label ends on its own when its time is up, when a deploy or change touches the same service, when the problem gets worse than when it was labelled, or when its alert rule changes. The alert then goes out and says why.'),
+            h('div', { class: 'form-grid' }, field('A label lasts', labelDays, null, 'span-2'))),
           h('li', {}, h('b', {}, 'Most messages per channel, per hour'),
             h('p', {}, 'Beyond this, a channel gets one summary of what was held back when the hour is up.'),
             h('div', { class: 'form-grid' }, field('Messages per hour', perHour, null, 'span-2'))),

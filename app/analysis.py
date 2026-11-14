@@ -279,10 +279,15 @@ def apply_verdicts(analysis: dict[str, Any], verdicts: dict[str, dict[str, Any]]
     active_real = 0
     real = 0
     for issue in analysis["issues"]:
-        verdict = verdicts.get(issue["title"])
+        found = verdicts.get(issue["title"])
+        # A label that ended (app/verdicts.py) no longer counts: the issue is back to "not reviewed", with the reason shown.
+        ended = bool(found and found.get("ended_at"))
+        verdict = None if ended else found
         issue["verdict"] = verdict["verdict"] if verdict else None
         issue["verdict_note"] = verdict["note"] if verdict else ""
         issue["verdict_by"] = verdict["decided_by"] if verdict else ""
+        issue["verdict_expires_at"] = verdict.get("expires_at") if verdict else None
+        issue["verdict_ended"] = (found.get("ended_text") or "Its earlier label ended.") if ended and found else ""
         issue["noise_hint"] = likely_noise(issue, flapping) if not verdict else None
         if issue["verdict"] in {"false_positive", "expected"}:
             dismissed += issue["occurrences"]
