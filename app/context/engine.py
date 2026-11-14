@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .. import rootcause
 from ..db import utcnow
 from ..secrets_store import scrub
 from ..sources.base import SourceError
@@ -278,6 +279,14 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
             (self.org_id, (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat().replace("+00:00", "Z")),
         )
         previous_as_of = self.context.get("as_of")
+        problems = ranked_problems(current)
+        for problem in problems:
+            problem["since"] = self._active.get(problem["fingerprint"], {}).get("since")
+        try:
+            groups = rootcause.analyze(problems, list(self.k8s_snapshots.values()), changes)
+        except Exception:  # A hypothesis must never stop monitoring.
+            log.exception("root cause ranking failed")
+            groups = []
         context = {
             "version": self.version,
             "as_of": now_iso if any_ok else previous_as_of,
@@ -301,7 +310,9 @@ class ContextEngine(SourcePolling, IntegrationWatch, ProblemTracking):
             "integrations": self.integration_summary,
             "connections": self.integration_list,
             "main": self.main_connections,
-            "problems": ranked_problems(current),
+            "problems": problems,
+            # Problems that look connected, with the likely root of each group and why. A hypothesis to test.
+            "groups": groups,
             "coverage": {
                 "has_metrics": bool(self.states),
                 "metric_count": sum(len(state.metric_names) for state in self.states.values()),

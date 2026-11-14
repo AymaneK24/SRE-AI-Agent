@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import rootcause
 from .summary import age_seconds, label_text
 
 
@@ -127,6 +128,17 @@ def focus_context(context: dict[str, Any], fingerprints: list[str]) -> dict[str,
         connections.append(item)
     focused["connections"] = connections
     focused["events"] = [event for event in context.get("events", []) if event.get("fingerprint") in wanted][:10]
+    # Groups that involve a chosen problem, narrowed to the chosen problems, so the model starts from the likely root.
+    groups = []
+    for group in context.get("groups") or []:
+        if not any(member["fingerprint"] in wanted for member in group["members"]):
+            continue
+        # The likely root stays even when it wasn't chosen: the cause of a chosen symptom may be elsewhere.
+        members = [member if member["fingerprint"] in wanted else {**member, "not_chosen": True}
+                   for member in group["members"] if member["fingerprint"] in wanted or member["role"] == "root"]
+        if len(members) >= 2:
+            groups.append({**group, "members": members})
+    focused["groups"] = groups
     return focused
 
 
@@ -180,6 +192,12 @@ def render_context(context: dict[str, Any], max_chars: int = 16000) -> str:
     if not problems:
         problem_lines.append("- none detected by the console. That doesn't prove the system is healthy: check what the user describes.")
     sections.append(problem_lines)
+
+    groups = context.get("groups") or []
+    if groups:
+        sections.append(["PROBLEMS THAT LOOK CONNECTED (computed by the console from cluster configuration, logs and timing, not by a model). "
+                         "Treat each as a hypothesis: confirm or reject it with queries before you state a cause, and say so if the evidence points elsewhere:"]
+                        + rootcause.describe(groups))
 
     changes = context.get("changes", [])
     if changes:
