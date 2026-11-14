@@ -388,18 +388,58 @@ export function mount(container) {
       can('engineer') ? h('a', { class: 'button compact', href: `#/investigate?${query}` }, 'Investigate') : null);
   }
 
+  // Symptoms sit right under their likely cause, with the reason (app/rootcause.py). A hypothesis groups rows; it never hides one.
+  function arrangeByCause(rows, fingerprints, groups) {
+    const index = new Map(fingerprints.map((fingerprint, i) => [fingerprint, i]));
+    const followersOf = new Map();
+    const placedLater = new Set();
+    for (const group of groups) {
+      const root = group.members.find((member) => member.role === 'root');
+      const followers = group.members.filter((member) => member.role !== 'root' && index.has(member.fingerprint) && !placedLater.has(member.fingerprint));
+      if (!root || !followers.length) continue;
+      const word = group.verdict === 'likely' ? 'Likely caused by' : group.verdict === 'same' ? 'Same problem as' : 'Possibly caused by';
+      for (const member of followers) {
+        const row = rows[index.get(member.fingerprint)];
+        row.classList.add('is-related');
+        row.append(h('span', { class: 'row-detail row-cause', title: member.reasons.join('\n') }, `${word} ${group.root_label}`, member.reasons[0] ? `: ${member.reasons[0]}` : ''));
+      }
+      if (!index.has(root.fingerprint)) continue;
+      if (group.verdict !== 'same') {
+        rows[index.get(root.fingerprint)].append(h('span', { class: 'row-detail row-cause is-root' },
+          `Likely cause of the ${followers.length === 1 ? 'problem' : `${followers.length} problems`} below`, group.change ? `. Changed shortly before: ${group.change.title}` : ''));
+      }
+      followersOf.set(root.fingerprint, followers.map((member) => member.fingerprint));
+      followers.forEach((member) => placedLater.add(member.fingerprint));
+    }
+    if (!followersOf.size) return;
+    // Each likely cause keeps its place, followed by what it explains.
+    const result = [];
+    const shown = new Set();
+    const add = (i) => { if (!shown.has(i)) { shown.add(i); result.push(rows[i]); } };
+    fingerprints.forEach((fingerprint, i) => {
+      if (placedLater.has(fingerprint)) return;
+      add(i);
+      for (const follower of followersOf.get(fingerprint) || []) add(index.get(follower));
+    });
+    // Anything still unplaced (a chain whose root isn't listed) keeps its own place at the end.
+    rows.forEach((row, i) => add(i));
+    rows.splice(0, rows.length, ...result);
+  }
+
   function renderAttention(context) {
     const rows = [];
+    const fingerprints = [];
+    const push = (fingerprint, element) => { rows.push(element); fingerprints.push(fingerprint || ''); };
     // An alert about a workload the console already reports is shown on that row, not as a second problem.
     for (const alert of (context.alerts?.firing || []).filter((item) => !item.merged_into)) {
       const severe = ['critical', 'page', 'error'].includes(String(alert.severity).toLowerCase());
-      rows.push(h('li', { class: 'row' }, icon(severe ? 'critical' : 'warning'),
+      push(alert.fingerprint, h('li', { class: 'row' }, icon(severe ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, alert.name, ' ', h('span', { class: 'muted small' }, `${alert.severity} alert`)),
         h('span', { class: 'row-side' }, investigateLink(`Why is the ${alert.name} alert firing (${labelText(alert.labels)})? Find the root cause.`, `alert=${encodeURIComponent(alert.name)}`, alert.fingerprint)),
         h('span', { class: 'row-detail' }, `${alert.summary || (can('engineer') ? labelText(alert.labels) : 'Alert firing')}. Firing since ${timeAgo(alert.active_at)}.`)));
     }
     for (const target of context.targets?.down_list || []) {
-      rows.push(h('li', { class: 'row' }, icon('critical'),
+      push(target.fingerprint, h('li', { class: 'row' }, icon('critical'),
         h('span', { class: 'row-title' }, `${target.instance} is down`),
         h('span', { class: 'row-side' }, investigateLink(`Why is target ${target.instance} in job ${target.job} down?`, 'alert=targetdown', target.fingerprint)),
         h('span', { class: 'row-detail' }, `Job ${target.job}. `, target.error || 'No error was reported.')));
@@ -407,25 +447,26 @@ export function mount(container) {
     for (const item of (context.problems || []).filter((problem) => problem.kind === 'k8s')) {
       const detail = item.detail || {};
       const why = detail.diagnosis?.cause || (detail.pods?.length ? `Pods: ${detail.pods.slice(0, 3).join(', ')}` : '');
-      rows.push(h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
+      push(item.fingerprint, h('li', { class: 'row' }, icon(item.severity === 'critical' ? 'critical' : 'warning'),
         h('span', { class: 'row-title' }, item.title),
         h('span', { class: 'row-side' }, investigateLink(`${item.title}. Find the root cause.`, runbookQuery(detail), item.fingerprint)),
         h('span', { class: 'row-detail' }, can('engineer') ? why : 'Kubernetes workload problem',
           detail.also_firing?.length ? h('span', { class: 'also-firing' }, `Also firing in Prometheus: ${detail.also_firing.join(', ')}`) : null)));
     }
     for (const rule of context.rules?.failing || []) {
-      rows.push(h('li', { class: 'row' }, icon('warning'),
+      push(`rule:${rule.group}:${rule.name}`, h('li', { class: 'row' }, icon('warning'),
         h('span', { class: 'row-title' }, `Rule failing: ${rule.name}`), h('span', {}),
         h('span', { class: 'row-detail' }, rule.error)));
     }
     for (const item of context.anomalies || []) {
       const usual = item.baseline !== null && item.baseline !== undefined ? `, usually ${formatValue(item.baseline, item.unit)}` : '';
       const limit = item.kind === 'over_limit' && item.limit !== null ? `, limit ${formatValue(item.limit, item.unit)}` : '';
-      rows.push(h('li', { class: 'row' }, icon('warning'),
+      push(item.fingerprint, h('li', { class: 'row' }, icon('warning'),
         h('span', { class: 'row-title' }, `${item.title}: ${formatValue(item.value, item.unit)}`),
         h('span', { class: 'row-side' }, investigateLink(`${item.title} is ${formatValue(item.value, item.unit)} on ${labelText(item.labels)}${usual}. What is causing this?`, `signal=${encodeURIComponent(item.signal_id)}`, item.fingerprint)),
         h('span', { class: 'row-detail' }, can('engineer') ? labelText(item.labels) : 'Out of range', usual, limit)));
     }
+    arrangeByCause(rows, fingerprints, context.groups || []);
     if (rows.length) clear(attention, h('ul', { class: 'rows scroll-rows' }, rows));
     else clear(attention, h('p', { class: 'empty' }, context.as_of ? 'No alerts, down targets, failing workloads, failing rules, or unusual signals.' : 'Nothing to show until something is connected.'));
   }

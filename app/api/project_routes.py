@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import AfterValidator, BaseModel, Field
 
-from .. import ai_settings
+from .. import ai_settings, noise, verdicts as labels
 from ..access import mask_addresses
 from ..analysis import analyze, apply_verdicts, parse_ts, statements
 from ..costs import budget_problem, compute_cost, spend_settings
@@ -83,6 +83,12 @@ class VerdictBody(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     verdict: Literal["real", "false_positive", "expected"] | None = None
     note: str = Field(default="", max_length=1000)
+    # How long a false alarm or expected label lasts, in hours (up to a year). 0: until something changes. Left out: the organization's default.
+    expires_hours: int | None = Field(default=None, ge=0, le=24 * 365)
+
+
+class RenewBody(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
 
 
 async def _own(ctx: AppContext, org_id: int, project_id: int) -> dict[str, Any]:
@@ -180,8 +186,19 @@ def _health(sources: list[dict[str, Any]], summary: dict[str, Any], kubernetes: 
 
 
 async def _verdicts(ctx: AppContext, org_id: int) -> dict[str, dict[str, Any]]:
-    rows = await ctx.db.all("SELECT issue_key, verdict, note, decided_by FROM issue_verdicts WHERE org_id = ?", (org_id,))
-    return {row["issue_key"]: row for row in rows}
+    """Each label with when it expires, or why it ended. A label past its time is ended here, so the page and the alerts agree."""
+    days = int((await noise.load(ctx.db, org_id, ctx.config)).get("label_days", labels.DEFAULT_DAYS))
+    checker = labels.Verdicts(ctx.db)
+    rows = await ctx.db.all("SELECT issue_key FROM issue_verdicts WHERE org_id = ?", (org_id,))
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        label = await checker.check(org_id, row["issue_key"], None, days)
+        if not label:
+            continue
+        until = labels.expires_at(label, days) if label["verdict"] in labels.MUTING and not label.get("ended_at") else None
+        found[label["issue_key"]] = {**label, "expires_at": until.isoformat().replace("+00:00", "Z") if until else None,
+                                     "ended_text": labels.ended_text(label)}
+    return found
 
 
 def _scope_filter(source_ids: list[int], namespaces: list[str]) -> tuple[str, list[Any]]:
@@ -259,7 +276,7 @@ async def _view(ctx: AppContext, org_id: int, project: dict[str, Any], days: int
 def _for_viewer(view: dict[str, Any]) -> dict[str, Any]:
     """Status and results, without how anything is connected or what to do about it."""
     keep = ("name", "status", "alerts", "targets_down", "signals_out_of_range")
-    issue_keys = ("title", "severity", "occurrences", "recurring", "active", "first_seen", "last_seen", "total_minutes", "average_minutes", "verdict")
+    issue_keys = ("title", "severity", "occurrences", "recurring", "active", "first_seen", "last_seen", "total_minutes", "average_minutes", "verdict", "verdict_expires_at", "verdict_ended")
     incident_keys = ("start", "end", "active", "minutes", "severity", "problems", "issues")
     return {
         "project": {key: view["project"][key] for key in ("id", "name", "description")}, "health": view["health"], "period": view["period"],
@@ -332,12 +349,29 @@ async def set_verdict(body: VerdictBody, user: Engineer, ctx: Ctx) -> dict[str, 
     if body.verdict is None:
         await ctx.db.execute("DELETE FROM issue_verdicts WHERE org_id = ? AND issue_key = ?", (user.org_id, body.title))
     else:
+        # What the issue looks like now, so the label can end if it later behaves worse or its rule changes.
+        peak = await labels.peak(ctx.db, user.org_id, body.title, datetime.now(timezone.utc))
         await ctx.db.execute(
-            "INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at) VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(org_id, issue_key) DO UPDATE SET verdict = excluded.verdict, note = excluded.note, decided_by = excluded.decided_by, decided_at = excluded.decided_at",
-            (user.org_id, body.title, body.verdict, body.note.strip(), user.actor, utcnow()))
-    await ctx.db.audit(user.org_id, "issue_verdict_changed", "issue", {"title": body.title, "verdict": body.verdict}, actor=user.actor)
-    return {"title": body.title, "verdict": body.verdict}
+            "INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at, peak, duration_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(org_id, issue_key) DO UPDATE SET verdict = excluded.verdict, note = excluded.note, decided_by = excluded.decided_by, "
+            "decided_at = excluded.decided_at, peak = excluded.peak, duration_hours = excluded.duration_hours, renewed_at = NULL, ended_at = NULL, ended_reason = '', ended_note = ''",
+            (user.org_id, body.title, body.verdict, body.note.strip(), user.actor, utcnow(), json.dumps(peak),
+             body.expires_hours if body.verdict in labels.MUTING else None))
+    await ctx.db.audit(user.org_id, "issue_verdict_changed", "issue", {"title": body.title, "verdict": body.verdict, "expires_hours": body.expires_hours}, actor=user.actor)
+    return {"title": body.title, "verdict": body.verdict, "expires_hours": body.expires_hours}
+
+
+# "Still a false alarm": a new label period from now, with what the issue looks like today.
+@router.post("/issues/verdict/renew")
+async def renew_verdict(body: RenewBody, user: Engineer, ctx: Ctx) -> dict[str, Any]:
+    row = await ctx.db.one("SELECT verdict FROM issue_verdicts WHERE org_id = ? AND issue_key = ?", (user.org_id, body.title))
+    if not row or row["verdict"] not in labels.MUTING:
+        raise HTTPException(404, "This issue has no false alarm or expected label to renew.")
+    peak = await labels.peak(ctx.db, user.org_id, body.title, datetime.now(timezone.utc))
+    await ctx.db.execute("UPDATE issue_verdicts SET renewed_at = ?, peak = ?, ended_at = NULL, ended_reason = '', ended_note = '' WHERE org_id = ? AND issue_key = ?",
+                         (utcnow(), json.dumps(peak), user.org_id, body.title))
+    await ctx.db.audit(user.org_id, "issue_verdict_renewed", "issue", {"title": body.title, "verdict": row["verdict"]}, actor=user.actor)
+    return {"title": body.title, "verdict": row["verdict"], "renewed": True}
 
 
 # Reports --------------------------------------------------------------------

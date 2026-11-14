@@ -240,6 +240,9 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .row-icon { margin-top: 3px; width: 16px; height: 16px; }
 .row-title { font-weight: 500; overflow-wrap: anywhere; }
 .row-detail { grid-column: 2 / 4; color: var(--body); font-size: 13.5px; overflow-wrap: anywhere; }
+.row-cause { color: var(--muted); font-size: 12.5px; }
+.row-cause.is-root { color: var(--warning); font-weight: 500; }
+.row.is-related { padding-left: 18px; border-left: 2px solid var(--line); }
 .row-side { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .empty { padding: 22px 0; color: var(--body); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .icon-critical { color: var(--critical); } .icon-warning { color: var(--warning); } .icon-ok { color: var(--ok); } .icon-info { color: var(--muted); }
@@ -518,6 +521,9 @@ button.collector b, button.collector span { display: block; }
 .invite-name { flex: 1 1 180px; max-width: 260px; }
 .invite-email { flex: 1 1 220px; max-width: 320px; }
 .select-button.verdict-select { min-width: 132px; padding: 5px 32px 5px 12px; font-size: 13.5px; }
+.verdict-expiry, .verdict-ended { font-size: 12.5px; color: var(--muted); margin-top: 6px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; max-width: 260px; line-height: 1.4; }
+.verdict-ended { color: var(--warning, #b7791f); display: block; }
+.verdict-expiry .linkish { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .noise-hint { margin-top: 3px; color: var(--warning); }
 
 /* Projects */
@@ -608,3 +614,13 @@ select.select-native, .select-native { position: absolute !important; left: 0 !i
 
 /* On small screens a wide table scrolls by itself instead of widening the page. */
 @media (max-width: 860px) { table.data-table { display: block; max-width: 100%; overflow-x: auto; } }
+
+/* How long a false alarm or expected label lasts (projects.js) */
+.label-dialog .field-label { font-weight: 600; margin: 16px 0 8px; }
+.label-lengths { display: flex; flex-wrap: wrap; gap: 8px; }
+.label-length { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 14px; }
+.label-length:has(input:checked) { border-color: var(--ink, currentColor); background: var(--wash, rgba(0, 0, 0, .04)); font-weight: 500; }
+.label-length input { margin: 0; accent-color: currentColor; }
+.label-custom { display: flex; gap: 8px; margin-top: 10px; max-width: 260px; }
+.label-custom .input { flex: 1; }
+.label-dialog textarea { width: 100%; resize: vertical; }

@@ -278,7 +278,7 @@ def _old_sqlite_schema(version):
     """The tables as version 2 or 3 of the app created them."""
     from app import schema
     old = (schema.sqlite_statements().replace(schema.V4_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V5_TABLES.format(**schema.SQLITE_TYPES), "")
-           .replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, "").replace(schema.V8_COLUMNS, "").replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), ""))
+           .replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, "").replace(schema.V8_COLUMNS, "").replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V11_COLUMNS, "").replace(schema.V12_COLUMNS, ""))
     for new, previous in (("  username TEXT NOT NULL UNIQUE,\n  email TEXT NOT NULL UNIQUE,\n  name TEXT NOT NULL,\n  pending_email TEXT,\n", "  username TEXT UNIQUE,\n  email TEXT UNIQUE,\n  name TEXT NOT NULL DEFAULT '',\n"),
                           ("  owner_id BIGINT,\n  visibility TEXT NOT NULL DEFAULT 'private',\n  shared_by TEXT NOT NULL DEFAULT '',\n  shared_at TEXT,\n", "")):
         assert new in old
@@ -331,7 +331,7 @@ def test_upgrading_from_version_5_adds_project_namespaces(tmp_path):
     from app import schema
     path = tmp_path / "console.db"
     conn = sqlite3.connect(path)
-    conn.executescript(schema.sqlite_statements().replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, "").replace(schema.V8_COLUMNS, "").replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), ""))
+    conn.executescript(schema.sqlite_statements().replace(schema.V6_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V7_COLUMNS, "").replace(schema.V8_COLUMNS, "").replace(schema.V9_COLUMNS, "").replace(schema.V10_TABLES.format(**schema.SQLITE_TYPES), "").replace(schema.V11_COLUMNS, "").replace(schema.V12_COLUMNS, ""))
     conn.execute("INSERT INTO organizations(name, slug, contact_email, policies, created_at) VALUES ('Kept', 'kept', '', '{}', 'now')")
     conn.execute("INSERT INTO projects(org_id, name, created_at, updated_at) VALUES (1, 'Payments', 'now', 'now')")
     conn.execute("PRAGMA user_version=5")

@@ -69,6 +69,7 @@ class NoiseBody(BaseModel):
     max_per_hour: int | None = Field(default=None, ge=1, le=500)
     flapping: bool | None = None
     respect_verdicts: bool | None = None
+    label_days: int | None = Field(default=None, ge=0, le=365)
 
 
 class HeartbeatBody(BaseModel):

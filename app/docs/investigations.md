@@ -14,7 +14,7 @@ In the **Live context** panel, tick the problems you want explained. A bar above
 
 ## What happens when you ask
 
-1. **Your question goes with the live context.** The model first receives the problems right now, with the console's diagnosis of each, then firing alerts, down targets, golden signals, recent changes, and log error counts. Log lines are marked as untrusted data.
+1. **Your question goes with the live context.** The model first receives the problems right now, with the console's diagnosis of each, then the problems that look connected with their [likely cause](/docs/alerts-and-webhooks#likely-cause-one-root-many-symptoms) as hypotheses to test, firing alerts, down targets, golden signals, recent changes, and log error counts. Log lines are marked as untrusted data. When you investigate a symptom only, its likely cause still goes along, marked as outside your selection.
 2. **The console gathers the first evidence itself.** For each problem in view, it runs the obvious read-only queries before the model starts: the error lines of a crashing workload, its Kubernetes description, the chart of a signal that went out of range, or whether a down target answered over the last hour. These show as *Console* in the evidence list. A model of any size starts with evidence, and API models need fewer rounds.
 3. **The model investigates.** It chooses read-only tools, reads the results, and decides what to check next. It can run up to 4 tools per round and 10 in total, and the same call is never run twice.
 4. **It answers.** In its last round, the model can't call tools, so it has to write an answer. If it still doesn't, the console writes a short answer from what was found, so an investigation never ends in an error page.

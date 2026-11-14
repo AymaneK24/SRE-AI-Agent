@@ -15,7 +15,7 @@ from .config import Config
 from prometheus_client import Counter
 
 from .db import Database, utc_after, utcnow
-from . import noise
+from . import noise, rootcause, verdicts
 from .mailer import MailError, Mailer, paragraph
 from .net_guard import check_url, guarded_transport
 from .investigation_report import build_email, build_pdf, collect_evidence, reviewed_workflows, split_sections
@@ -33,6 +33,7 @@ COOLDOWN_S = 900
 # A message a channel didn't accept is tried again after each of these waits: about a day in all, then it is given up.
 RETRY_AFTER_S = (30, 120, 600, 1800, 3600, 7200, 14400, 28800, 28800)
 RETRY_POLL_S = 15
+LABEL_CHECK_S = 60
 MAX_QUEUED_BYTES = 4_000_000
 DELIVERIES = Counter("rcc_deliveries_total", "Alert messages by outcome", ["status"])
 
@@ -181,6 +182,7 @@ class Notifier:
         self.engines: Any = None
         self._waiting: set[asyncio.Task[None]] = set()
         self.noise = noise.NoiseControl()
+        self.verdicts = verdicts.Verdicts(db)
 
     def close(self) -> None:
         for task in self._waiting:
@@ -211,7 +213,7 @@ class Notifier:
                 await self._dispatch(org_id, event, detail)
                 return
             settings = await noise.load(self.db, org_id, self.config)
-            reason = await self._gate(org_id, event, settings)
+            reason = await self._gate(org_id, event, settings, detail)
             if reason:
                 await self._suppressed(org_id, event, reason)
                 await self._handled([event])
@@ -239,14 +241,17 @@ class Notifier:
         except Exception:  # Worst case, the message is sent once more after a restart.
             log.exception("couldn't mark an alert as handled")
 
-    async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any]) -> str | None:
+    async def _gate(self, org_id: int, event: dict[str, Any], settings: dict[str, Any], detail: dict[str, Any] | None = None) -> str | None:
         """Why this start shouldn't be sent, or None. Waits out the grace period."""
         if settings["respect_verdicts"]:
             title = event["title"].removeprefix("Already active when the console connected. ")
-            verdict = await self.db.one("SELECT verdict FROM issue_verdicts WHERE org_id = ? AND issue_key = ? AND verdict IN ('false_positive', 'expected')",
-                                        (org_id, title))
-            if verdict:
-                return "muted"
+            label = await self.verdicts.check(org_id, title, detail, int(settings.get("label_days", verdicts.DEFAULT_DAYS)))
+            if label and label["verdict"] in verdicts.MUTING:
+                if not label.get("ended_at"):
+                    return "muted"
+                if detail is not None:
+                    # The team muted this once; say why it speaks again.
+                    detail["summary"] = (verdicts.ended_text(label) + "\n" + str(detail.get("summary") or "")).strip()
         if settings["flapping"]:
             state = self.noise.flapping(org_id, event["fingerprint"])
             if state == "quiet":
@@ -273,7 +278,19 @@ class Notifier:
             "INSERT INTO deliveries(org_id, channel_id, fingerprint, title, status, error, created_at) VALUES (?, NULL, ?, ?, ?, '', ?)",
             (org_id, event["fingerprint"], event["title"][:300], f"suppressed:{reason}", utcnow()))
 
+    async def _groups(self, org_id: int) -> list[dict[str, Any]]:
+        """The latest root cause groups from the live context, or none if the engine isn't running."""
+        try:
+            engine = await self.engines.get(org_id) if self.engines else None
+            return list((getattr(engine, "context", None) or {}).get("groups") or [])
+        except Exception:  # A missing hypothesis never stops a message.
+            log.exception("couldn't read root cause groups")
+            return []
+
     async def _send_one(self, org_id: int, event: dict[str, Any], detail: dict[str, Any], settings: dict[str, Any]) -> None:
+        line = rootcause.cause_line(event["fingerprint"], await self._groups(org_id))
+        if line:
+            detail = {**detail, "summary": (line + "\n" + str(detail.get("summary") or "")).strip()}
         prepared = None
         try:
             if self.on_critical and event["severity"] == "critical":
@@ -296,12 +313,15 @@ class Notifier:
         hints = noise.common_causes(items, changes)
         prefix = "Already active when the console connected. "
         at_connect = all(item["title"].startswith(prefix) for item, _ in items)
-        lines = [f"- {item['title'].removeprefix(prefix)}" for item, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        # Organized by likely cause when the console links them (app/rootcause.py). Every problem is still listed.
+        lines, covering = rootcause.message_lines([item for item, _ in items], await self._groups(org_id), prefix)
         if at_connect:
             hints = ["They were already running when the console connected, so their start time is unknown.", *hints]
         summary = "\n".join(lines + ([""] + hints if hints else []))
         together = "problems found when the console connected" if at_connect else "problems started together"
-        event = {**worst, "title": f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""),
+        headline = (f"{covering['root_label']} is the likely cause of {len(items) - 1} other {'problem' if len(items) == 2 else 'problems'}" if covering
+                    else f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""))
+        event = {**worst, "title": headline,
                  "fingerprint": f"group:{worst['fingerprint']}", "group": [item["fingerprint"] for item, _ in items]}
         detail = {"summary": summary, "group": [{"title": item["title"], "fingerprint": item["fingerprint"]} for item, _ in items], "hints": hints}
         prepared = None
@@ -493,6 +513,50 @@ class Notifier:
             except Exception:  # The queue is tried again on the next round.
                 log.exception("retrying queued messages failed")
             await asyncio.sleep(RETRY_POLL_S)
+
+    async def watch_labels(self, now: datetime | None = None) -> int:
+        """Muted problems that are still active: when their label ends (time, a change, worse behaviour or a longer
+        run than ever), the alert goes out now instead of waiting for the next start. Returns how many were sent."""
+        now = now or datetime.now(timezone.utc)
+        rows = await self.db.all("SELECT * FROM issue_verdicts WHERE ended_at IS NULL AND verdict IN ('false_positive', 'expected')")
+        sent = 0
+        for row in rows:
+            org_id, title = int(row["org_id"]), row["issue_key"]
+            start = await self.db.one(
+                "SELECT * FROM events WHERE org_id = ? AND (title = ? OR title = ?) AND (kind LIKE '%_started' OR kind LIKE '%_unreachable') ORDER BY id DESC LIMIT 1",
+                (org_id, title, "Already active when the console connected. " + title))
+            if not start:
+                continue
+            ended = await self.db.one(
+                "SELECT id FROM events WHERE org_id = ? AND fingerprint = ? AND id > ? AND (kind LIKE '%_cleared' OR kind LIKE '%_recovered') LIMIT 1",
+                (org_id, start["fingerprint"], start["id"]))
+            if ended:
+                continue
+            settings = await noise.load(self.db, org_id, self.config)
+            try:
+                detail = json.loads(start.get("detail") or "{}")
+            except ValueError:
+                detail = {}
+            label = await self.verdicts.check(org_id, title, detail, int(settings.get("label_days", verdicts.DEFAULT_DAYS)), now)
+            if label and not label.get("ended_at"):
+                minutes = (now - datetime.fromisoformat(start["ts"].replace("Z", "+00:00"))).total_seconds() / 60
+                label = await self.verdicts.check_duration(org_id, label, minutes, now) or label
+            if not label or not label.get("ended_at") or not settings["respect_verdicts"]:
+                continue
+            event: dict[str, Any] = {key: start[key] for key in ("id", "org_id", "source_id", "ts", "kind", "severity", "fingerprint", "title") if key in start}
+            task = asyncio.create_task(self.handle_event(org_id, event, detail))
+            self._waiting.add(task)
+            task.add_done_callback(self._waiting.discard)
+            sent += 1
+        return sent
+
+    async def label_loop(self) -> None:
+        while True:
+            await asyncio.sleep(LABEL_CHECK_S)
+            try:
+                await self.watch_labels()
+            except Exception:  # Checked again on the next round.
+                log.exception("checking muted problems failed")
 
     async def _send(self, channel: dict[str, Any], message: dict[str, Any]) -> None:
         try:

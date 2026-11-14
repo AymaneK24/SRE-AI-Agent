@@ -45,16 +45,40 @@ With both a Kubernetes connection and a Prometheus that has Kubernetes alert rul
 - Only the first one to start is announced. The other starts and ends without a notification, and without a second automatic investigation.
 - Alerts about anything else, such as your own application rules, are announced as usual.
 
+## Likely cause: one root, many symptoms
+
+When a database fails, the API that uses it crash-loops and the website in front of it starts returning errors: three problems, one cause. The console looks for the links between the problems happening now and names the likely root of each group, with its reasons.
+
+**Time alone never links two problems.** On a busy system unrelated things break in the same minutes all the time, so a link needs evidence:
+
+| Evidence | Example |
+| --- | --- |
+| The same thing | A Prometheus alert and a Kubernetes problem about the same workload |
+| Runs on | A workload whose pods run on a node that is NotReady |
+| Configured to call | `payments-api` has `DATABASE_URL=postgres://postgres-primary:5432`, and the Service `postgres-primary` sends traffic to `postgres-primary` |
+| Mentions | The crashed container's last log lines say `connection refused postgres-primary:5432` |
+
+Which one started first then decides the direction. The console uses when the condition began, such as when a Prometheus alert became pending, not when it fired. Something that was already failing well before its supposed cause is never called its symptom. The root of a group is the one nothing else explains and that explains the most, and a deploy or change to it just before it started is named.
+
+What you see:
+
+- **Messages** lead with *Likely cause: …*, list each symptom with its reason, and put problems that aren't linked under *Also started, not linked to the above*. Every problem is listed: a group organizes the message, it never hides anything, and a critical problem is never cut from a long list. When one cause explains everything, the subject says so: *payments/postgres-primary is the likely cause of 2 other problems*.
+- **A single alert** whose cause is already known says *Likely cause: …* in its first line.
+- **Needs attention** on the Overview puts symptoms right under their likely cause, with the reason.
+- **Investigations** receive the groups as hypotheses. The model has to confirm or reject them with queries before stating a cause, and the answer is checked as usual.
+
+The configuration evidence comes from Kubernetes: Services, their selectors, and the host names in each pod's environment. Only host names are read; variables whose name looks like a secret (`PASSWORD`, `TOKEN`, `KEY` and the like) are never read, and no value is stored.
+
 ## Noise control: fewer, better messages
 
 Every problem passes these checks before anyone is messaged. Nothing is hidden in the console; only the message is held back, and each held-back message is counted with its reason. Change them in **Connections → Alerts → Noise control** (administrators).
 
 | Step | What it does | Default |
 | --- | --- | --- |
-| False-alarm verdicts | A problem your team marked *false alarm* or *expected* in a project report is no longer messaged. | On |
+| False-alarm verdicts | A problem your team marked *false alarm* or *expected* in a project report is no longer messaged, until the label ends: after its time, a change to the same service, worse behaviour, or a changed rule. [When a label ends](/docs/projects-and-reports#when-a-label-ends) | On, labels last 30 days |
 | Flapping | A problem that starts 3 times or more in an hour gets one message saying it keeps starting and stopping. Further starts stay quiet until it has been stable for 30 minutes. | On |
 | Grace period | The problem must still be there after a short wait. A blip that clears by itself is never sent and never starts an automatic investigation. | Critical 60 s, warning 5 min |
-| Grouping | Problems that start within the same window become one message, listing what they share: a node in trouble, the same namespace or cluster, a dependency they all mention (such as `postgres:5432`), or a change recorded in the 20 minutes before. One automatic investigation then looks at all of them. | 90 s |
+| Grouping | Problems that start within the same window become one message, organized by [likely cause](#likely-cause-one-root-many-symptoms) when the console links them, with what they share: a node in trouble, the same namespace or cluster, a dependency they all mention (such as `postgres:5432`), or a change recorded in the 20 minutes before. One automatic investigation then looks at all of them. | 90 s |
 | Hourly limit | Each channel gets at most this many messages an hour. The rest arrive as one summary when the hour is up. | 12 |
 
 Problems already running when the console starts, or when a connection is added, are sent like any other: a deployment that can't pull its image is an outage whether it broke a minute ago or before the console looked. Their title starts with *Already active when the console connected*, because the start time isn't known. After a restart, problems that were already announced aren't sent again.

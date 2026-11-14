@@ -4,6 +4,9 @@ The changes in this version, with links to the full description.
 
 ## Alerts you can trust
 
+- **Likely cause.** Problems happening now are linked when there is evidence: the same workload, a failing node, a workload configured to call another, or a log line that names it. Messages lead with the likely cause and list each symptom with its reason; the Overview nests symptoms under their cause; investigations test it as a hypothesis. Time alone never links two problems, and nothing is ever hidden. [Likely cause](/docs/alerts-and-webhooks#likely-cause-one-root-many-symptoms)
+- **False-alarm labels expire.** A *false alarm* or *expected* label ends after the length you choose when you set it, from 1 hour to a year (or *until something changes*), after a deploy to the same service, when the problem gets worse than when it was labelled, or when its rule changes. The alert then comes back and says why, and **Renew** keeps a label that still holds. [When a label ends](/docs/projects-and-reports#when-a-label-ends)
+
 - **Noise control.** Every problem passes five checks before anyone is messaged: false-alarm verdicts, flapping, a grace period, grouping, and an hourly limit per channel. Blips that fix themselves are never sent, and problems that start together arrive as one message, with what they share: a node, a namespace, a cluster, a dependency they all mention, or a change just before. Held-back messages are counted per reason. [Noise control](/docs/alerts-and-webhooks#noise-control-fewer-better-messages)
 - **One problem, one alert.** A Prometheus alert about a workload the console already reports joins that problem instead of sending a second message. [One problem, one alert](/docs/alerts-and-webhooks#one-problem-one-alert)
 - **Problems found at startup are sent.** A deployment that is already broken when the console starts, or when its cluster is connected, now sends its alert. Problems already announced before a restart aren't sent again.
