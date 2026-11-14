@@ -268,7 +268,8 @@ async def test_viewer_context_holds_no_infrastructure_details(console, team, pro
     context = await team["viewer"].get("/api/context")
     text = context.text
     assert context.status_code == 200
-    assert "127.0.0.1" not in text and "http://" not in text and '"query"' not in text and "2.53" not in text and '"labels"' not in text
+    # The metric value 2.53 on its own, not inside a timestamp such as 14:30:22.533Z.
+    assert "127.0.0.1" not in text and "http://" not in text and '"query"' not in text and not re.search(r"(?<![\d.])2\.53(?!\d)", text) and '"labels"' not in text
     assert context.json()["sources"][0].keys() == {"id", "name", "status"}
     full = await admin.get("/api/context")
     assert "url" in json.dumps(full.json()["sources"]) or full.status_code == 200
