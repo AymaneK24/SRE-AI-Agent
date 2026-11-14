@@ -41,14 +41,14 @@ A label is a judgement about the system as it was when someone made it, so it do
 
 | What happened | Example |
 | --- | --- |
-| **Its time is up** | 30 days by default. Admins choose 7, 30, 90 days or *until something changes* in Noise control. |
+| **Its time is up** | You choose how long when you set the label: 1 hour, 6 hours, 1 day, 3 days, 7 days, 30 days, *until something changes*, or any number of hours or days up to a year. Labels set without a length use the default in Noise control (30 days unless an admin changed it). |
 | **A change touched the same service** | A deploy, Helm upgrade or other recorded change to the same workload, service or namespace, after the label was set. |
 | **It got worse** | Its value goes 20% above the highest seen when it was labelled, or it lasts much longer than any earlier occurrence (1.5 times the longest, and at least 10 minutes more). |
 | **Its rule changed** | The query or the limit behind the alert is different. |
 
 The issue then shows **Label ended** with the reason, counts as *not reviewed* again, and its alert goes out with one line saying why it's back, such as *Marked a false alarm by Pat on 2 Nov; that label ended: Helm upgrade payments-db 3.8.0 came after it*. A problem that is still active when its label ends gets its alert straight away.
 
-While a label applies, the issue shows **Expires in N days**. **Renew** starts a new period from today, and remembers what the issue looks like now. Setting, renewing and ending a label are all in the audit log.
+While a label applies, the issue shows when it expires (*Expires in 12 hours*, *Expires in 6 days*). **Renew** starts a new period of the same length from now, and remembers what the issue looks like now. Setting, renewing and ending a label are all in the audit log.
 
 ## Reports
 

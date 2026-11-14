@@ -2,7 +2,8 @@
 
 A label is a judgement about the system as it was when someone made it, so it doesn't last for ever:
 
-- Time: it ends after the organization's label period (30 days by default; 0 keeps it until something changes).
+- Time: it ends after the length chosen when it was set, from one hour to a year, or "until something changes".
+  A label set without one uses the organization's default (30 days unless changed).
 - Change: a recorded deploy or change to the same service or namespace, made after the label, ends it.
 - Behaviour: the problem gets worse than anything seen when it was labelled: a value 20% above the highest
   one, or lasting much longer than the longest occurrence.
@@ -117,10 +118,24 @@ async def peak(db: Any, org_id: int, title: str, now: datetime) -> dict[str, Any
     return {"value": value, "minutes": round(longest, 1), "targets": sorted(names)[:20], "rule": rule}
 
 
+def hours_of(row: dict[str, Any], days: int) -> int:
+    """How long a label lasts, in hours: its own length if one was chosen, else the organization's default. 0: no time limit."""
+    own = row.get("duration_hours")
+    return int(own) if own is not None else int(days) * 24
+
+
+def duration_text(hours: int) -> str:
+    if hours % 24 == 0:
+        days = hours // 24
+        return f"{days} day" if days == 1 else f"{days} days"
+    return f"{hours} hour" if hours == 1 else f"{hours} hours"
+
+
 def expires_at(row: dict[str, Any], days: int) -> datetime | None:
-    if not days:
+    hours = hours_of(row, days)
+    if not hours:
         return None
-    return parse_ts(row.get("renewed_at") or row["decided_at"]) + timedelta(days=days)
+    return parse_ts(row.get("renewed_at") or row["decided_at"]) + timedelta(hours=hours)
 
 
 def ended_text(row: dict[str, Any]) -> str:
@@ -155,7 +170,7 @@ class Verdicts:
         now = now or datetime.now(timezone.utc)
         until = expires_at(row, days)
         if until is not None and now >= until:
-            return await self._end(org_id, row, "expired", f"it was set for {days} days and wasn't renewed", now)
+            return await self._end(org_id, row, "expired", f"it was set for {duration_text(hours_of(row, days))} and wasn't renewed", now)
         try:
             known = json.loads(row.get("peak") or "{}")
         except ValueError:

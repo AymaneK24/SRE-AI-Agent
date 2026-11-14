@@ -1,7 +1,7 @@
 """Database schema, written once and adapted to SQLite or PostgreSQL."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 PROJECT_TABLES = """CREATE TABLE projects (
   id {PK},
@@ -145,6 +145,11 @@ ALTER TABLE issue_verdicts ADD COLUMN ended_at TEXT;
 ALTER TABLE issue_verdicts ADD COLUMN ended_reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE issue_verdicts ADD COLUMN ended_note TEXT NOT NULL DEFAULT '';
 ALTER TABLE issue_verdicts ADD COLUMN peak TEXT NOT NULL DEFAULT '{}';
+"""
+
+# Version 12: each label can have its own length, chosen when it is set: duration_hours, with 0 for "until
+# something changes". Labels without one use the organization's default.
+V12_COLUMNS = """ALTER TABLE issue_verdicts ADD COLUMN duration_hours INTEGER;
 """
 
 COMMON = """
@@ -489,15 +494,17 @@ def upgrade_statements(version: int, types: dict[str, str]) -> list[str]:
         statements += _split(V10_TABLES.format(**types))
     if version < 11:
         statements += _split(V11_COLUMNS)
+    if version < 12:
+        statements += _split(V12_COLUMNS)
     return statements
 
 
 def sqlite_statements() -> str:
-    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + V10_TABLES.format(**SQLITE_TYPES) + V11_COLUMNS + SQLITE_EXTRA
+    return COMMON.format(**SQLITE_TYPES) + PROJECT_TABLES.format(**SQLITE_TYPES) + V4_TABLES.format(**SQLITE_TYPES) + V5_TABLES.format(**SQLITE_TYPES) + V6_TABLES.format(**SQLITE_TYPES) + V7_COLUMNS + V8_COLUMNS + V9_COLUMNS + V10_TABLES.format(**SQLITE_TYPES) + V11_COLUMNS + V12_COLUMNS + SQLITE_EXTRA
 
 
 def postgres_statements() -> list[str]:
-    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS) + _split(V10_TABLES.format(**POSTGRES_TYPES)) + _split(V11_COLUMNS)
+    statements = _split(COMMON.format(**POSTGRES_TYPES)) + _split(PROJECT_TABLES.format(**POSTGRES_TYPES)) + _split(V4_TABLES.format(**POSTGRES_TYPES)) + _split(V5_TABLES.format(**POSTGRES_TYPES)) + _split(V6_TABLES.format(**POSTGRES_TYPES)) + _split(V7_COLUMNS) + _split(V8_COLUMNS) + _split(V9_COLUMNS) + _split(V10_TABLES.format(**POSTGRES_TYPES)) + _split(V11_COLUMNS) + _split(V12_COLUMNS)
     statements += [
         """CREATE FUNCTION audit_log_append_only() RETURNS trigger AS $fn$
 BEGIN RAISE EXCEPTION 'audit_log is append-only'; END;

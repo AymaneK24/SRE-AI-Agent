@@ -381,7 +381,7 @@ export function mount(container) {
           h('li', {}, h('label', { class: 'check' }, verdicts, h('b', {}, 'Respect false-alarm verdicts')),
             h('p', {}, 'Problems your team marked as a false alarm or expected, in a project report, are no longer messaged. They still show in the console. '
               + 'A label ends on its own when its time is up, when a deploy or change touches the same service, when the problem gets worse than when it was labelled, or when its alert rule changes. The alert then goes out and says why.'),
-            h('div', { class: 'form-grid' }, field('A label lasts', labelDays, null, 'span-2'))),
+            h('div', { class: 'form-grid' }, field('Default length, for labels set without one', labelDays, null, 'span-2'))),
           h('li', {}, h('b', {}, 'Most messages per channel, per hour'),
             h('p', {}, 'Beyond this, a channel gets one summary of what was held back when the hour is up.'),
             h('div', { class: 'form-grid' }, field('Messages per hour', perHour, null, 'span-2'))),

@@ -204,7 +204,7 @@ def test_upgrading_from_version_10_keeps_labels(tmp_path):
     from app import schema
     path = tmp_path / "console.db"
     conn = sqlite3.connect(path)
-    conn.executescript(schema.sqlite_statements().replace(schema.V11_COLUMNS, ""))
+    conn.executescript(schema.sqlite_statements().replace(schema.V11_COLUMNS, "").replace(schema.V12_COLUMNS, ""))
     conn.execute("INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at) VALUES (1, 'Old', 'false_positive', '', 'pat', '2026-01-01T00:00:00Z')")
     conn.execute("PRAGMA user_version=10")
     conn.commit()
@@ -212,4 +212,69 @@ def test_upgrading_from_version_10_keeps_labels(tmp_path):
     db = Database(path, "")
     assert db._all("SELECT issue_key, ended_at, ended_reason, peak FROM issue_verdicts") == [{"issue_key": "Old", "ended_at": None, "ended_reason": "", "peak": "{}"}]
     assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+    db.close()
+
+
+# A length chosen per label ----------------------------------------------------
+async def _label_for(client, hours, verdict="false_positive"):
+    response = await client.put("/api/issues/verdict", json={"title": EVENT["title"], "verdict": verdict, "expires_hours": hours})
+    assert response.status_code == 200, response.text
+
+
+async def test_a_label_can_last_a_few_hours(console):
+    client, org_id, notifier = await _setup(console)
+    await _label_for(client, 6)
+    await console.ctx.db.execute("UPDATE issue_verdicts SET decided_at = ? WHERE org_id = ?", (_iso(_now() - timedelta(hours=5)), org_id))
+    await notifier.handle_event(org_id, _event(), dict(DETAIL))
+    assert not _mails(console)
+    await console.ctx.db.execute("UPDATE issue_verdicts SET decided_at = ? WHERE org_id = ?", (_iso(_now() - timedelta(hours=7)), org_id))
+    await notifier.handle_event(org_id, _event(), dict(DETAIL))
+    mails = _mails(console)
+    assert len(mails) == 1 and "it was set for 6 hours and wasn't renewed" in _body(mails[0])
+
+
+async def test_its_own_length_wins_over_the_organization_default(console):
+    client, org_id, notifier = await _setup(console, label_days=7)
+    await _label_for(client, 0)  # Until something changes.
+    await console.ctx.db.execute("UPDATE issue_verdicts SET decided_at = ? WHERE org_id = ?", (_iso(_now() - timedelta(days=60)), org_id))
+    await notifier.handle_event(org_id, _event(), dict(DETAIL))
+    assert not _mails(console)
+    await _label_for(client, 24 * 90)
+    await console.ctx.db.execute("UPDATE issue_verdicts SET decided_at = ? WHERE org_id = ?", (_iso(_now() - timedelta(days=60)), org_id))
+    await notifier.handle_event(org_id, _event(), dict(DETAIL))
+    assert not _mails(console)
+
+
+async def test_renewing_keeps_the_chosen_length(console):
+    client, org_id, notifier = await _setup(console)
+    await _label_for(client, 2)
+    assert (await client.post("/api/issues/verdict/renew", json={"title": EVENT["title"]})).status_code == 200
+    row = await _row(console.ctx.db, org_id)
+    assert row["duration_hours"] == 2
+    await console.ctx.db.execute("UPDATE issue_verdicts SET renewed_at = ? WHERE org_id = ?", (_iso(_now() - timedelta(hours=3)), org_id))
+    await notifier.handle_event(org_id, _event(), dict(DETAIL))
+    assert "it was set for 2 hours" in _body(_mails(console)[0])
+
+
+async def test_a_length_must_be_between_an_hour_and_a_year(console):
+    client, org_id, notifier = await _setup(console)
+    for bad in (-1, 24 * 366):
+        response = await client.put("/api/issues/verdict", json={"title": EVENT["title"], "verdict": "false_positive", "expires_hours": bad})
+        assert response.status_code == 422
+    # A real problem has no length.
+    assert (await client.put("/api/issues/verdict", json={"title": EVENT["title"], "verdict": "real", "expires_hours": 5})).status_code == 200
+    assert (await _row(console.ctx.db, org_id))["duration_hours"] is None
+
+
+def test_upgrading_from_version_11_keeps_labels(tmp_path):
+    from app import schema
+    path = tmp_path / "console.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(schema.sqlite_statements().replace(schema.V12_COLUMNS, ""))
+    conn.execute("INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at) VALUES (1, 'Old', 'expected', '', 'pat', '2026-01-01T00:00:00Z')")
+    conn.execute("PRAGMA user_version=11")
+    conn.commit()
+    conn.close()
+    db = Database(path, "")
+    assert db._all("SELECT issue_key, duration_hours FROM issue_verdicts") == [{"issue_key": "Old", "duration_hours": None}]
     db.close()

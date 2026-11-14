@@ -614,3 +614,13 @@ select.select-native, .select-native { position: absolute !important; left: 0 !i
 
 /* On small screens a wide table scrolls by itself instead of widening the page. */
 @media (max-width: 860px) { table.data-table { display: block; max-width: 100%; overflow-x: auto; } }
+
+/* How long a false alarm or expected label lasts (projects.js) */
+.label-dialog .field-label { font-weight: 600; margin: 16px 0 8px; }
+.label-lengths { display: flex; flex-wrap: wrap; gap: 8px; }
+.label-length { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 14px; }
+.label-length:has(input:checked) { border-color: var(--ink, currentColor); background: var(--wash, rgba(0, 0, 0, .04)); font-weight: 500; }
+.label-length input { margin: 0; accent-color: currentColor; }
+.label-custom { display: flex; gap: 8px; margin-top: 10px; max-width: 260px; }
+.label-custom .input { flex: 1; }
+.label-dialog textarea { width: 100%; resize: vertical; }

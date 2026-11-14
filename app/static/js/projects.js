@@ -169,12 +169,51 @@ export function mount(container, params) {
     const previous = view.trend?.previous;
     const trendLine = previous === null || previous === undefined ? '' : `The previous ${period.days} days had ${previous} ${previous === 1 ? 'occurrence' : 'occurrences'}.`;
 
-    async function setVerdict(issue, verdict) {
+    async function setVerdict(issue, verdict, extra = {}) {
       try {
-        await api('/api/issues/verdict', { method: 'PUT', body: { title: issue.title, verdict: verdict || null } });
+        await api('/api/issues/verdict', { method: 'PUT', body: { title: issue.title, verdict: verdict || null, ...extra } });
         toast(verdict ? 'Verdict saved' : 'Verdict cleared');
         showProject(projectId);
       } catch (error) { toast(error.message); }
+    }
+
+    // A false alarm or expected label mutes the alert, so the person chooses for how long, in hours or days.
+    const LENGTHS = [[1, '1 hour'], [6, '6 hours'], [24, '1 day'], [72, '3 days'], [168, '7 days'], [720, '30 days'], [0, 'Until something changes'], ['custom', 'Custom']];
+    function labelDialog(issue, verdict) {
+      let saved = false;
+      let chosen = 720;
+      const amount = h('input', { class: 'input', type: 'number', min: 1, max: 365, value: 12, 'aria-label': 'Length' });
+      const unit = h('select', { class: 'input', 'aria-label': 'Unit' }, h('option', { value: 'hours' }, 'hours'), h('option', { value: 'days', selected: true }, 'days'));
+      const custom = h('div', { class: 'label-custom', hidden: true }, amount, unit);
+      const note = h('textarea', { class: 'input', rows: 2, maxlength: 1000, placeholder: 'Why? For example: fires during the nightly backup.' });
+      const error = h('p', { class: 'error-note', hidden: true });
+      const choices = h('div', { class: 'label-lengths', role: 'radiogroup', 'aria-label': 'How long this label lasts' },
+        LENGTHS.map(([value, text]) => h('label', { class: 'label-length' },
+          h('input', { type: 'radio', name: 'label-length', value: String(value), checked: value === chosen, onChange: () => { chosen = value; custom.hidden = value !== 'custom'; } }),
+          h('span', {}, text))));
+      const hours = () => {
+        if (chosen !== 'custom') return chosen;
+        const number = Math.round(Number(amount.value));
+        const total = unit.value === 'days' ? number * 24 : number;
+        return number >= 1 && total <= 8760 ? total : null;
+      };
+      openDialog(h('form', { class: 'label-dialog', onSubmit: (event) => {
+        event.preventDefault();
+        const value = hours();
+        if (value === null) { error.textContent = 'Choose between 1 hour and 365 days.'; error.hidden = false; return; }
+        saved = true;
+        closeDialog();
+        setVerdict(issue, verdict, { expires_hours: value, note: note.value.trim() });
+      } },
+        dialogHead(`Mark as ${VERDICTS[verdict].toLowerCase()}`),
+        h('p', { class: 'body-text' }, h('b', {}, issue.title)),
+        h('p', { class: 'small muted' }, 'Its alerts stay quiet while the label lasts. It also ends early after a change to the same service, if the problem gets worse, or if its rule changes, and the alert then comes back saying why.'),
+        h('p', { class: 'field-label' }, 'Keep this label for'), choices, custom,
+        h('p', { class: 'field-label' }, 'Note (optional)'), note, error,
+        h('div', { class: 'form-actions' },
+          h('button', { class: 'button primary', type: 'submit' }, 'Save'),
+          h('button', { class: 'button', type: 'button', onClick: closeDialog }, 'Cancel'))),
+      { onClose: () => { if (!saved) showProject(projectId); } });
     }
 
     async function renewVerdict(issue) {
@@ -189,14 +228,16 @@ export function mount(container, params) {
     function labelState(issue) {
       if (issue.verdict_ended) return h('div', { class: 'verdict-ended', title: issue.verdict_ended }, 'Label ended: ', issue.verdict_ended.replace(/^.*that label ended: /, ''));
       if (!issue.verdict_expires_at || !['false_positive', 'expected'].includes(issue.verdict)) return null;
-      const days = Math.max(0, Math.ceil((new Date(issue.verdict_expires_at) - Date.now()) / 86400000));
-      return h('div', { class: 'verdict-expiry' }, days <= 1 ? 'Expires within a day' : `Expires in ${days} days`,
+      const hoursLeft = Math.max(0, (new Date(issue.verdict_expires_at) - Date.now()) / 3600000);
+      const left = hoursLeft < 1 ? 'Expires within the hour' : hoursLeft < 48 ? `Expires in ${Math.ceil(hoursLeft)} ${Math.ceil(hoursLeft) === 1 ? 'hour' : 'hours'}` : `Expires in ${Math.ceil(hoursLeft / 24)} days`;
+      return h('div', { class: 'verdict-expiry' }, left,
         can('engineer') ? h('button', { class: 'linkish', type: 'button', onClick: () => renewVerdict(issue) }, 'Renew') : null);
     }
 
     function verdictCell(issue) {
       if (!can('engineer')) return h('div', {}, issue.verdict ? VERDICTS[issue.verdict] : h('span', { class: 'muted' }, 'Not reviewed'), labelState(issue));
-      const select = h('select', { class: 'input verdict-select', 'aria-label': `Verdict for ${issue.title}`, onChange: () => setVerdict(issue, select.value) },
+      const select = h('select', { class: 'input verdict-select', 'aria-label': `Verdict for ${issue.title}`,
+        onChange: () => (['false_positive', 'expected'].includes(select.value) ? labelDialog(issue, select.value) : setVerdict(issue, select.value)) },
         h('option', { value: '', selected: !issue.verdict }, 'Not reviewed'),
         Object.entries(VERDICTS).map(([value, label]) => h('option', { value, selected: issue.verdict === value }, label)));
       return h('div', {}, select, labelState(issue));

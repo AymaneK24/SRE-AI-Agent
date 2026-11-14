@@ -83,6 +83,8 @@ class VerdictBody(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     verdict: Literal["real", "false_positive", "expected"] | None = None
     note: str = Field(default="", max_length=1000)
+    # How long a false alarm or expected label lasts, in hours (up to a year). 0: until something changes. Left out: the organization's default.
+    expires_hours: int | None = Field(default=None, ge=0, le=24 * 365)
 
 
 class RenewBody(BaseModel):
@@ -350,12 +352,13 @@ async def set_verdict(body: VerdictBody, user: Engineer, ctx: Ctx) -> dict[str, 
         # What the issue looks like now, so the label can end if it later behaves worse or its rule changes.
         peak = await labels.peak(ctx.db, user.org_id, body.title, datetime.now(timezone.utc))
         await ctx.db.execute(
-            "INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at, peak) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO issue_verdicts(org_id, issue_key, verdict, note, decided_by, decided_at, peak, duration_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(org_id, issue_key) DO UPDATE SET verdict = excluded.verdict, note = excluded.note, decided_by = excluded.decided_by, "
-            "decided_at = excluded.decided_at, peak = excluded.peak, renewed_at = NULL, ended_at = NULL, ended_reason = '', ended_note = ''",
-            (user.org_id, body.title, body.verdict, body.note.strip(), user.actor, utcnow(), json.dumps(peak)))
-    await ctx.db.audit(user.org_id, "issue_verdict_changed", "issue", {"title": body.title, "verdict": body.verdict}, actor=user.actor)
-    return {"title": body.title, "verdict": body.verdict}
+            "decided_at = excluded.decided_at, peak = excluded.peak, duration_hours = excluded.duration_hours, renewed_at = NULL, ended_at = NULL, ended_reason = '', ended_note = ''",
+            (user.org_id, body.title, body.verdict, body.note.strip(), user.actor, utcnow(), json.dumps(peak),
+             body.expires_hours if body.verdict in labels.MUTING else None))
+    await ctx.db.audit(user.org_id, "issue_verdict_changed", "issue", {"title": body.title, "verdict": body.verdict, "expires_hours": body.expires_hours}, actor=user.actor)
+    return {"title": body.title, "verdict": body.verdict, "expires_hours": body.expires_hours}
 
 
 # "Still a false alarm": a new label period from now, with what the issue looks like today.
