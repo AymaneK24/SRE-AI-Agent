@@ -270,7 +270,6 @@ def _group(items: list[Item], edges: dict[tuple[str, str], Link], changes: list[
                     seen.add(nxt)
                     todo.append(nxt)
         return seen - {start}
-    by_id = {item.fingerprint: item for item in items}
     change_of = {item.fingerprint: _change_before(item, changes) for item in items}
 
     def rank(item: Item) -> tuple[Any, ...]:
