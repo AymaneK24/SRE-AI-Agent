@@ -240,6 +240,9 @@ h3 { font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
 .row-icon { margin-top: 3px; width: 16px; height: 16px; }
 .row-title { font-weight: 500; overflow-wrap: anywhere; }
 .row-detail { grid-column: 2 / 4; color: var(--body); font-size: 13.5px; overflow-wrap: anywhere; }
+.row-cause { color: var(--muted); font-size: 12.5px; }
+.row-cause.is-root { color: var(--warning); font-weight: 500; }
+.row.is-related { padding-left: 18px; border-left: 2px solid var(--line); }
 .row-side { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .empty { padding: 22px 0; color: var(--body); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .icon-critical { color: var(--critical); } .icon-warning { color: var(--warning); } .icon-ok { color: var(--ok); } .icon-info { color: var(--muted); }

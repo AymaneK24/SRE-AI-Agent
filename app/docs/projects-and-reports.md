@@ -35,6 +35,21 @@ An issue that keeps clearing within minutes gets a suggestion that it may be a f
 
 Both stop that issue counting towards project health and the real totals, and stop its alert messages: it still shows in the console, but nobody is messaged about it. Reports say how many occurrences were set aside. An admin can turn the second part off in [Noise control](/docs/alerts-and-webhooks#noise-control-fewer-better-messages).
 
+### When a label ends
+
+A label is a judgement about the system as it was when someone made it, so it doesn't mute an alert for ever. It ends on its own when:
+
+| What happened | Example |
+| --- | --- |
+| **Its time is up** | 30 days by default. Admins choose 7, 30, 90 days or *until something changes* in Noise control. |
+| **A change touched the same service** | A deploy, Helm upgrade or other recorded change to the same workload, service or namespace, after the label was set. |
+| **It got worse** | Its value goes 20% above the highest seen when it was labelled, or it lasts much longer than any earlier occurrence (1.5 times the longest, and at least 10 minutes more). |
+| **Its rule changed** | The query or the limit behind the alert is different. |
+
+The issue then shows **Label ended** with the reason, counts as *not reviewed* again, and its alert goes out with one line saying why it's back, such as *Marked a false alarm by Pat on 2 Nov; that label ended: Helm upgrade payments-db 3.8.0 came after it*. A problem that is still active when its label ends gets its alert straight away.
+
+While a label applies, the issue shows **Expires in N days**. **Renew** starts a new period from today, and remembers what the issue looks like now. Setting, renewing and ending a label are all in the audit log.
+
 ## Reports
 
 **Generate report** saves the project's numbers for a period of 1 to 365 days (30 by default) and creates a PDF.

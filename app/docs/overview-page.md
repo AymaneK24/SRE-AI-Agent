@@ -11,6 +11,8 @@ The list at the top shows active problems from every connection, worst first:
 - **Kubernetes workload problems:** crash loops, out-of-memory kills, image pull failures, missing Secrets, unschedulable pods, stuck rollouts, and node trouble. Each shows the console's diagnosis.
 - **Failing rules** and **unusual signals**, such as an error rate out of its normal range.
 
+When problems are linked, each symptom sits right under its **likely cause**, indented, with the reason (such as *Likely caused by payments/postgres-primary: payments-api is configured to call it*), and the cause says how many problems below it explains. Engineers see this; viewers see the plain list. [Likely cause](/docs/alerts-and-webhooks#likely-cause-one-root-many-symptoms)
+
 Engineers see the full detail, with queries, labels, and log lines. Viewers see which workloads are failing, without addresses, queries, or logs.
 
 Each problem has two shortcuts:

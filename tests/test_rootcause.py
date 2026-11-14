@@ -122,3 +122,71 @@ def test_the_model_reads_groups_as_hypotheses_and_a_focused_symptom_keeps_its_ro
     focused = focus_context(context, [API["fingerprint"]])
     assert [member["fingerprint"] for member in focused["groups"][0]["members"]] == [DB["fingerprint"], API["fingerprint"]]
     assert "[not in the person's selection]" in render_context(focused)
+
+
+# Messages ---------------------------------------------------------------------
+def _items(*problems):
+    return [{"fingerprint": p["fingerprint"], "title": p["title"], "severity": p["severity"]} for p in problems]
+
+
+def test_a_message_leads_with_the_likely_cause_and_lists_every_problem():
+    groups = rootcause.analyze([WEB, API, DB], [_cluster()])
+    other = {"fingerprint": "alert:DiskFull", "title": "Alert firing: DiskFull", "severity": "warning"}
+    lines, covering = rootcause.message_lines(_items(DB, API, WEB) + [other], groups)
+    text = "\n".join(lines)
+    assert lines[0] == f"Likely cause: {DB['title']}"
+    assert API["title"] in text and WEB["title"] in text and "configured to call" in text
+    assert "Also started, not linked to the above:\n- Alert firing: DiskFull" in text
+    assert covering is None  # DiskFull isn't explained, so the headline doesn't claim one cause for all.
+    lines, covering = rootcause.message_lines(_items(DB, API, WEB), groups)
+    assert covering["root"] == DB["fingerprint"]
+
+
+def test_a_grouped_message_never_cuts_a_critical_problem():
+    items = [{"fingerprint": f"w{i}", "title": f"Warning {i}", "severity": "warning"} for i in range(20)]
+    items += [{"fingerprint": f"c{i}", "title": f"Critical {i}", "severity": "critical"} for i in range(3)]
+    lines, _ = rootcause.message_lines(items, [])
+    text = "\n".join(lines)
+    assert all(f"Critical {i}" in text for i in range(3))
+    assert "- and 11 more" in text
+
+
+def test_a_single_alert_names_its_likely_cause():
+    groups = rootcause.analyze([WEB, API, DB], [_cluster()])
+    assert rootcause.cause_line(API["fingerprint"], groups).startswith(f"Likely cause: {DB['title']} (")
+    assert rootcause.cause_line(DB["fingerprint"], groups) == ""
+
+
+async def test_the_alert_email_is_organized_by_cause(console):
+    from app import noise
+
+    class _Engine:
+        def __init__(self, groups):
+            self._active, self.context = {}, {"groups": groups}
+
+        def still_active(self, fingerprint):
+            return True
+
+    class _Engines:
+        def __init__(self, engine):
+            self.engine = engine
+
+        async def get(self, org_id):
+            return self.engine
+
+    client = await console.company("CauseCo", "c@test.example")
+    org_id = (await client.get("/api/auth/me")).json()["org_id"]
+    assert (await client.post("/api/org/channels", json={"kind": "email", "name": "mail", "recipients": ["c@test.example"], "min_severity": "warning"})).status_code == 201
+    assert (await client.put("/api/org/noise", json={"grace_critical_s": 0, "grace_warning_s": 0, "group_window_s": 1, "flapping": False})).status_code == 200
+    notifier = console.ctx.notifier
+    notifier.noise = noise.NoiseControl()
+    notifier.engines = _Engines(_Engine(rootcause.analyze([WEB, API, DB], [_cluster()])))
+    import asyncio
+    from app.db import utcnow
+    events = [{"kind": f"{p['kind']}_started", "severity": p["severity"], "title": p["title"], "fingerprint": p["fingerprint"], "ts": utcnow()} for p in (DB, API, WEB)]
+    await asyncio.gather(*(notifier.handle_event(org_id, event, {}) for event in events))
+    mails = [m for m in console.outbox if m["To"] == "c@test.example" and "CRITICAL" in m["Subject"]]
+    assert len(mails) == 1
+    assert "payments/postgres-primary is the likely cause of 2 other problems" in mails[0]["Subject"]
+    body = "\n".join(part.get_content() for part in mails[0].walk() if part.get_content_type() == "text/plain")
+    assert f"Likely cause: {DB['title']}" in body and API["title"] in body and WEB["title"] in body

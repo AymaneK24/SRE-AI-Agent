@@ -331,3 +331,57 @@ def describe(groups: list[dict[str, Any]], limit: int = 6) -> list[str]:
             outside = " [not in the person's selection]" if member.get("not_chosen") else ""
             lines.append(f"    {member['role']}: {member['title']}{outside}{why}")
     return lines
+
+
+def message_lines(items: list[dict[str, Any]], groups: list[dict[str, Any]], prefix: str = "") -> tuple[list[str], dict[str, Any] | None]:
+    """The body of a message about problems that started together, organized by likely cause.
+
+    Every problem is listed, whatever its group: a hypothesis may group, never hide. Critical ones are never cut.
+    Returns the lines and, when one likely cause explains all of them, that group."""
+    titles = {item["fingerprint"]: item["title"].removeprefix(prefix) for item in items}
+    severity = {item["fingerprint"]: item.get("severity", "warning") for item in items}
+    placed: set[str] = set()
+    lines: list[str] = []
+    covering = None
+    for group in groups:
+        mine = [member for member in group["members"] if member["fingerprint"] in titles]
+        root = next(member for member in group["members"] if member["role"] == "root")
+        others = [member for member in mine if member["fingerprint"] != root["fingerprint"]]
+        if group["verdict"] == "same" or not others:
+            continue
+        word = "Likely cause" if group["verdict"] == "likely" else "Possible cause"
+        known = "" if root["fingerprint"] in titles else " (already reported)"
+        lines.append(f"{word}: {titles.get(root['fingerprint'], root['title'])}{known}")
+        if group.get("change"):
+            lines.append(f"  Changed shortly before: {group['change']['title']}")
+        for member in others:
+            why = f" ({member['reasons'][0]})" if member["reasons"] else ""
+            lines.append(f"  - {titles[member['fingerprint']]}{why}")
+            placed.add(member["fingerprint"])
+        placed.add(root["fingerprint"])
+        if {member["fingerprint"] for member in mine} == set(titles) and group["verdict"] == "likely":
+            covering = group
+    rest = [fingerprint for fingerprint in titles if fingerprint not in placed]
+    if rest:
+        if lines:
+            lines.append("")
+            lines.append("Also started, not linked to the above:")
+        rest.sort(key=lambda fp: -SEVERITY.get(severity[fp], 0))
+        critical = [fp for fp in rest if severity[fp] == "critical"]
+        others_left = [fp for fp in rest if severity[fp] != "critical"]
+        room = max(0, 12 - len(critical))
+        lines += [f"- {titles[fp]}" for fp in critical + others_left[:room]]
+        if len(others_left) > room:
+            lines.append(f"- and {len(others_left) - room} more")
+    return lines, covering
+
+
+def cause_line(fingerprint: str, groups: list[dict[str, Any]]) -> str:
+    """For a single problem: its likely cause, when another problem explains it."""
+    found = by_member(groups).get(fingerprint)
+    if not found or found["member"]["role"] != "symptom":
+        return ""
+    group, member = found["group"], found["member"]
+    word = "Likely cause" if group["verdict"] == "likely" else "Possible cause"
+    why = f" ({member['reasons'][0]})" if member["reasons"] else ""
+    return f"{word}: {group['root_title']}{why}."

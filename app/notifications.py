@@ -15,7 +15,7 @@ from .config import Config
 from prometheus_client import Counter
 
 from .db import Database, utc_after, utcnow
-from . import noise, verdicts
+from . import noise, rootcause, verdicts
 from .mailer import MailError, Mailer, paragraph
 from .net_guard import check_url, guarded_transport
 from .investigation_report import build_email, build_pdf, collect_evidence, reviewed_workflows, split_sections
@@ -278,7 +278,19 @@ class Notifier:
             "INSERT INTO deliveries(org_id, channel_id, fingerprint, title, status, error, created_at) VALUES (?, NULL, ?, ?, ?, '', ?)",
             (org_id, event["fingerprint"], event["title"][:300], f"suppressed:{reason}", utcnow()))
 
+    async def _groups(self, org_id: int) -> list[dict[str, Any]]:
+        """The latest root cause groups from the live context, or none if the engine isn't running."""
+        try:
+            engine = await self.engines.get(org_id) if self.engines else None
+            return list((getattr(engine, "context", None) or {}).get("groups") or [])
+        except Exception:  # A missing hypothesis never stops a message.
+            log.exception("couldn't read root cause groups")
+            return []
+
     async def _send_one(self, org_id: int, event: dict[str, Any], detail: dict[str, Any], settings: dict[str, Any]) -> None:
+        line = rootcause.cause_line(event["fingerprint"], await self._groups(org_id))
+        if line:
+            detail = {**detail, "summary": (line + "\n" + str(detail.get("summary") or "")).strip()}
         prepared = None
         try:
             if self.on_critical and event["severity"] == "critical":
@@ -301,12 +313,15 @@ class Notifier:
         hints = noise.common_causes(items, changes)
         prefix = "Already active when the console connected. "
         at_connect = all(item["title"].startswith(prefix) for item, _ in items)
-        lines = [f"- {item['title'].removeprefix(prefix)}" for item, _ in items[:12]] + ([f"- and {len(items) - 12} more"] if len(items) > 12 else [])
+        # Organized by likely cause when the console links them (app/rootcause.py). Every problem is still listed.
+        lines, covering = rootcause.message_lines([item for item, _ in items], await self._groups(org_id), prefix)
         if at_connect:
             hints = ["They were already running when the console connected, so their start time is unknown.", *hints]
         summary = "\n".join(lines + ([""] + hints if hints else []))
         together = "problems found when the console connected" if at_connect else "problems started together"
-        event = {**worst, "title": f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""),
+        headline = (f"{covering['root_label']} is the likely cause of {len(items) - 1} other {'problem' if len(items) == 2 else 'problems'}" if covering
+                    else f"{len(items)} {together}: {worst['title'].removeprefix(prefix)}" + (" and others" if len(items) > 1 else ""))
+        event = {**worst, "title": headline,
                  "fingerprint": f"group:{worst['fingerprint']}", "group": [item["fingerprint"] for item, _ in items]}
         detail = {"summary": summary, "group": [{"title": item["title"], "fingerprint": item["fingerprint"]} for item, _ in items], "hints": hints}
         prepared = None

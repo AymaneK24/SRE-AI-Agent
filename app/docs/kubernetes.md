@@ -12,7 +12,7 @@ The console only reads. It never reads Secrets or ConfigMap contents, and it has
 | `pods/log` | The last lines of a crashed container, once per restart |
 | `events` | Warning events, such as failed probes and scheduling failures |
 | `deployments` | Rollouts and available replicas |
-| `services` | Whether a Service reaches any ready pod, which explains most *connection refused* errors |
+| `services` | Whether a Service reaches any ready pod, which explains most *connection refused* errors, and which workload calls which, for the [likely cause](/docs/alerts-and-webhooks#likely-cause-one-root-many-symptoms) of a group of problems. Only host names are read from pod environments; secret-looking variables are skipped and no value is kept |
 | `nodes` | Node readiness and pressure |
 
 StatefulSets, DaemonSets, and Jobs are found through their pods' owners, so they need no extra permission.
