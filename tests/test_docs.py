@@ -158,7 +158,8 @@ def test_the_software_is_licensed_and_credits_its_creator():
 
     root = pathlib.Path(__file__).resolve().parent.parent
     license_text = (root / "LICENSE").read_text()
-    assert "All rights reserved" in license_text and "Aymane KENBOUCH" in license_text
+    assert "Apache License" in license_text and "Version 2.0" in license_text
+    assert "Aymane KENBOUCH" in (root / "NOTICE").read_text()
     about = _pages()["about"]["markdown"]
     assert "aymanekenbouch@gmail.com" in about and "github.com/AymaneK24" in about
 

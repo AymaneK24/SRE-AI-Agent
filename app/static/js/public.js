@@ -349,8 +349,8 @@ function legalDocs(info) {
         [operator, ' (“the operator”) runs this installation and gives you access to it. Root Cause Console is software made by ', CREATOR.name, ' (“the creator”). If your organization has its own agreement with the operator, that agreement takes priority over these terms.'],
       ]],
       ['The software', [
-        [`Root Cause Console is proprietary software. Copyright 2026 ${CREATOR.name}. All rights reserved.`],
-        'It is used under a license from the creator. You may use it as part of your work for your organization. Don’t copy, resell, sublicense, or reverse engineer it, except as the law allows or a written license from the creator permits.',
+        [`Root Cause Console is open source software. Copyright 2026 ${CREATOR.name}.`],
+        ['It is licensed under the Apache License, Version 2.0, which lets anyone use, modify, and distribute it under that license’s terms. ', link('https://www.apache.org/licenses/LICENSE-2.0', 'Read the license'), '.'],
       ]],
       ['Who may use it', [
         'People of 18 or older, invited by an organization, for their work. Each account belongs to one person: don’t share it.',
@@ -415,7 +415,7 @@ function legalDocs(info) {
         'Hosted on infrastructure chosen by the operator.',
       ].filter(Boolean)],
       ['The software', [
-        [`Root Cause Console, copyright 2026 ${CREATOR.name}. All rights reserved. Proprietary software, used under a license from its creator.`],
+        [`Root Cause Console, copyright 2026 ${CREATOR.name}. Open source under the Apache License, Version 2.0.`],
         ['Questions about the software, licenses, or bugs: ', mail(CREATOR.email), ', or ', link(CREATOR.github, 'GitHub'), '. For anything about your account or your data on this installation, contact the operator instead.'],
       ]],
       ['Third-party components', [

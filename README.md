@@ -1,6 +1,8 @@
 # Root Cause Console
 
-Created by Aymane KENBOUCH. Proprietary software, all rights reserved: see [LICENSE](LICENSE).
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
+Created by Aymane KENBOUCH. Open source under the [Apache License 2.0](LICENSE).
 
 Connect your metrics, keep a live picture of your systems, and ask an AI model why something broke.
 Each installation serves one company, with its own server and database. Each answer is checked against your data. Remediation workflows are instructions for people, and alerts are read-only, so this software never changes your systems.
@@ -80,3 +82,11 @@ The app uses FastAPI on the server and plain JavaScript modules in the browser, 
 - **Older data:** a version 1 database is copied to a backup file and replaced on first start, so older logs stay in that file.
 
 See also [SECURITY.md](SECURITY.md), [docs/PENTEST-RESPONSE.md](docs/PENTEST-RESPONSE.md), and [docs/COMPLIANCE.md](docs/COMPLIANCE.md).
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a pull request, run `ruff check .` and `pytest`. Report security problems privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
+
+## License
+
+Root Cause Console is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.

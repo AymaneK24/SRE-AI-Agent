@@ -86,4 +86,4 @@ The console is a work tool, used by invitation. The terms limit it to people of 
 
 ## Licenses
 
-Root Cause Console is proprietary: your company uses it under a license from its creator. Fonts and libraries served to browsers are under open licenses that allow commercial use, listed in the legal notice and in `/vendor/THIRD-PARTY-LICENSES.txt`.
+Root Cause Console is open source under the Apache License, Version 2.0. Fonts and libraries served to browsers are under open licenses that allow commercial use, listed in the legal notice and in `/vendor/THIRD-PARTY-LICENSES.txt`.
