@@ -2,6 +2,8 @@
 name = "root-cause-console"
 version = "3.0.0"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Aymane KENBOUCH" }]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

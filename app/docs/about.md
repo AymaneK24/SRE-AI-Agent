@@ -11,7 +11,7 @@ Root Cause Console is designed and built by **Aymane KENBOUCH**.
 
 Write to [aymanekenbouch@gmail.com](mailto:aymanekenbouch@gmail.com) for:
 
-- **Licensing:** using Root Cause Console in your company, or a license for more installations.
+- **Contributing:** issues and pull requests on GitHub are welcome.
 - **Bugs and ideas:** what you did, what you expected, what happened, and the console's version (`git log --oneline -1`). Remove host names, addresses, tokens, and personal data from logs and screenshots first.
 - **Security problems in the software:** steps to reproduce, and please allow time for a fix before sharing details. See [Security](/docs/security#report-a-vulnerability).
 - **Help with deploying it:** which setup you use (localhost, an Azure VM, or AKS), and the exact error.
@@ -20,7 +20,7 @@ Write to [aymanekenbouch@gmail.com](mailto:aymanekenbouch@gmail.com) for:
 
 ## License
 
-Root Cause Console is proprietary software. Copyright 2026 Aymane KENBOUCH, all rights reserved. It may be used only under a license from the creator. The `LICENSE` file in the project has the full text.
+Root Cause Console is open source under the Apache License, Version 2.0. Copyright 2026 Aymane KENBOUCH. You may use, modify, and distribute it, including commercially, under the terms of that license. The `LICENSE` and `NOTICE` files in the project have the full text.
 
 ## Built with
 
