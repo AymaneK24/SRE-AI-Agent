@@ -38,7 +38,7 @@ env:
   # The version published to Docker Hub, as rootcauseconsole/root-cause-console:VERSION and :latest.
   # Raise it for each release (6.0.0 -> 6.0.1 for fixes, 6.1.0 for features, 7.0.0 for breaking changes).
   # Publishing the same version again replaces that image, so change it before merging a release to main.
-  VERSION: "6.0.1"
+  VERSION: "6.0.2"
   # The personal Docker account that signs in and pushes into the rootcauseconsole organization.
   DOCKERHUB_USERNAME: aymanekh24
   IMAGE: rootcauseconsole/root-cause-console

@@ -19,9 +19,16 @@ RUN apk upgrade --no-cache
 #   libcrypto3, libssl3 >= 3.5.9-r1  OpenSSL: CVE-2026-88822, -88823, -95691, -95692, -107496
 #   musl >= 1.2.6-r6                 CVE-2026-107891 (Alpine 3.24 lists it fixed in 1.2.6-r3; edge's record says r6)
 #   sqlite-libs >= 3.54.1-r0         CVE-2026-119586; used by Python's sqlite3 when no PostgreSQL is configured
+# musl-utils (ldd, getent, iconv) is built from the same source as musl, so it needs the same fix.
+# The last check lists every installed package built from musl, OpenSSL, or SQLite and fails if one is still old.
 ARG ALPINE_EDGE=https://dl-cdn.alpinelinux.org/alpine/edge/main
 RUN apk add --no-cache --upgrade --repository="$ALPINE_EDGE" \
-      'libcrypto3>=3.5.9-r1' 'libssl3>=3.5.9-r1' 'musl>=1.2.6-r6' 'sqlite-libs>=3.54.1-r0' \
+      'libcrypto3>=3.5.9-r1' 'libssl3>=3.5.9-r1' 'musl>=1.2.6-r6' 'musl-utils>=1.2.6-r6' 'sqlite-libs>=3.54.1-r0' \
+ && apk list --installed | grep -E '\{(musl|openssl|sqlite)\}' \
+ && if apk list --installed | grep -E '\{(musl|openssl|sqlite)\}' \
+         | grep -E -- '-(1\.2\.6-r[0-5]|3\.5\.9-r0|3\.53\.[0-9]+-r[0-9]+) '; then \
+      echo "A package above still has a vulnerable version"; exit 1; \
+    fi \
  && python -c "import ssl, sqlite3; print(ssl.OPENSSL_VERSION, '| SQLite', sqlite3.sqlite_version)"
 # Remove what the running app has no use for. pip alone accounts for several findings in a scan.
 RUN python -m pip uninstall -y --quiet pip setuptools wheel || true
