@@ -33,6 +33,7 @@ The script writes `.env` with new random secrets and prints your first password.
 ## 2. Start it
 
 ```bash
+docker login dhi.io            # once: the image is built on Docker Hardened Images (free Docker account)
 docker compose up -d --build
 docker compose ps
 ```

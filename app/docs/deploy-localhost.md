@@ -20,6 +20,7 @@ docker compose version
 ```bash
 cd root-cause-console
 sh deploy/setup-env.sh          # address: localhost, certificate: 2, port: 443 or 8443
+docker login dhi.io             # once: free Docker account, for the hardened base image
 docker compose up -d --build
 docker compose ps
 docker compose logs -f console  # Ctrl+C to stop following

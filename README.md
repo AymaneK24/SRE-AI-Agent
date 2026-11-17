@@ -13,6 +13,7 @@ It runs inside your own infrastructure, so it can reach your systems directly. Y
 
 ```bash
 sh deploy/setup-env.sh
+docker login dhi.io            # once: the image is built on Docker Hardened Images (free Docker account)
 docker compose up -d --build
 ```
 

@@ -106,4 +106,6 @@ fi
 if [ "$choice" = "3" ]; then
   echo "Before starting:   docker build --pull -t rcc-caddy-dns:2 deploy/caddy-dns"
 fi
-echo "Next, run:         docker compose up -d --build"
+echo "Next, run:         docker login dhi.io   (once; a free Docker account)"
+echo "Then:              docker compose up -d --build"
+echo "No Docker account?  Add RCC_DOCKERFILE=Dockerfile.alpine to .env first."
