@@ -72,13 +72,16 @@ jobs:
         uses: SonarSource/sonarqube-auth-action@b372e2c2930aadfcc4f4399446da1e12772709ad # v1.2
         with:
           project-key: AymaneK24_SRE-AI-Agent
+      # The quality gate blocks main only. On the free plan for private projects, SonarQube Cloud doesn't return
+      # results for other branches, so dev and pull requests upload their analysis without waiting for the gate.
+      # Public projects on the Free OSS plan get branch results too.
       - name: SonarQube Cloud scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
         with:
           args: >
             -Dsonar.organization=${{ steps.sonar-auth.outputs.organization }}
             -Dsonar.projectKey=${{ steps.sonar-auth.outputs.project-key }}
-            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.wait=${{ github.ref == 'refs/heads/main' }}
             -Dsonar.qualitygate.timeout=300
 
   trivy-repo:
