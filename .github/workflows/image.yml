@@ -1,94 +1,215 @@
-# Builds the console image on Docker Hardened Images, checks that it starts, and publishes it to Docker Hub
-# with an SBOM and provenance attached.
+# Build, scan, and publish the console image.
 #
-# Setup, once, in the repository's Settings > Secrets and variables > Actions:
-#   Secret   DOCKERHUB_USERNAME   the Docker account that pushes, also used to pull from dhi.io
-#   Secret   DOCKERHUB_TOKEN      a personal access token of that account, with Read & Write access
-#   Variable DOCKERHUB_IMAGE      optional, defaults to rootcauseconsole/root-cause-console
+#   1. sonarqube   Tests with coverage, then SonarQube Cloud analysis. A failed quality gate stops the pipeline.
+#   2. trivy-repo  Trivy on the source: vulnerable dependencies, leaked secrets, Dockerfile and Kubernetes misconfigurations.
+#   3. image       Builds on Docker Hardened Images, scans the image with Trivy, checks it starts healthy,
+#                  then publishes linux/amd64 and linux/arm64 to Docker Hub with an SBOM and provenance.
 #
-# Publishes when a version tag like v1.2.0 is pushed, or when run by hand from the Actions tab.
+# Runs on every push to main, on version tags (v1.2.0 also publishes 1.2.0 and 1.2), and by hand.
+#
+# One-time setup in Settings > Secrets and variables > Actions:
+#   Secret    DOCKERHUB_USERNAME   Docker account that pushes; also signs in to dhi.io for the base image
+#   Secret    DOCKERHUB_TOKEN      Personal access token of that account, Read & Write
+#   Secret    SONAR_TOKEN          SonarQube Cloud token (My Account > Security)
+#   Variable  SONAR_ORGANIZATION   SonarQube Cloud organization key, e.g. aymanek24
+#   Variable  SONAR_PROJECT_KEY    SonarQube Cloud project key, e.g. AymaneK24_SRE-AI-Agent
+#   Variable  DOCKERHUB_IMAGE      Optional. Defaults to rootcauseconsole/root-cause-console
+#
+# In SonarQube Cloud, turn off "Automatic Analysis" for the project, since this workflow runs the analysis.
+#
+# Every action is pinned to a full commit SHA, with the version in a comment. After the March 2026 Trivy
+# compromise, where release tags were moved to malicious commits, tags alone aren't trusted here.
 name: Image
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      push:
-        description: Publish to Docker Hub
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'rootcauseconsole/root-cause-console' }}
+  TRIVY_VERSION: v0.70.0
 
 jobs:
-  image:
+  sonarqube:
+    name: SonarQube analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history, so SonarQube can attribute new code and blame
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Tests with coverage
+        run: pytest -q --cov=app --cov-report=xml:coverage.xml
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+  trivy-repo:
+    name: Trivy on the source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # uploads results to the Security tab when code scanning is available
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fail on fixable critical or high findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-dirs: app/static/vendor,tests,logs-tests-k8s
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+          format: table
+      - name: Full report for the Security tab
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: app/static/vendor,tests,logs-tests-k8s
+          trivyignores: .trivyignore.yaml
+          format: sarif
+          output: trivy-repo.sarif
+      # Code scanning is free for public repositories. Private ones need GitHub Advanced Security.
+      - name: Upload to the Security tab
+        if: always() && !github.event.repository.private
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-repo.sarif
+          category: trivy-repo
 
-      # The hardened base images are pulled from dhi.io with the same Docker account.
+  image:
+    name: Build, scan, and publish the image
+    needs: [sonarqube, trivy-repo]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Sign in to Docker Hardened Images
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: dhi.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Sign in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,format=short
 
-      # Build for this runner first and check that the app starts and answers its health check.
-      - name: Build for testing
-        uses: docker/build-push-action@v6
+      # Built once for this runner, then scanned and started before anything is published.
+      - name: Build for scanning
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           pull: true
           load: true
-          tags: rcc-test:latest
+          tags: rcc-scan:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy on the image (fails on fixable critical or high)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: rcc-scan:${{ github.sha }}
+          trivyignores: .trivyignore.yaml
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+      - name: Trivy image report for the Security tab
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          image-ref: rcc-scan:${{ github.sha }}
+          trivyignores: .trivyignore.yaml
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-image.sarif
+      - name: Upload to the Security tab
+        if: always() && !github.event.repository.private
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
 
       - name: Check that the image starts
         run: |
-          docker run -d --name rcc -e RCC_ALLOW_LOOPBACK_TARGETS=true rcc-test:latest
+          docker run -d --name rcc rcc-scan:${{ github.sha }}
           for i in $(seq 1 30); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' rcc)
-            [ "$status" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Health.Status}}' rcc)" = healthy ] && break
             sleep 2
           done
-          docker logs rcc | tail -20
+          docker logs rcc 2>&1 | tail -20
           [ "$(docker inspect -f '{{.State.Health.Status}}' rcc)" = healthy ]
           [ "$(docker inspect -f '{{.Config.User}}' rcc)" = "10001:10001" ]
-          # No shell in the image, by design.
-          ! docker exec rcc sh -c true 2>/dev/null
+          if docker exec rcc sh -c true 2>/dev/null; then echo "The image must not contain a shell"; exit 1; fi
 
-      - name: Build and publish
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.push
-        uses: docker/build-push-action@v6
+      - name: Publish to Docker Hub
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           sbom: true
           provenance: mode=max
+          cache-from: type=gha
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published ${IMAGE}"
+            echo
+            echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- `/; s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"

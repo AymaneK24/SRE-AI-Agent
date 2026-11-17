@@ -1,0 +1,36 @@
+# Accepted Trivy findings. Each one is limited to the files named, has a reason, and expires, so it's
+# looked at again instead of being forgotten. Used by .github/workflows/image.yml.
+misconfigurations:
+  - id: DS-0002
+    paths:
+      - deploy/caddy-dns/Dockerfile
+    statement: >
+      Caddy runs as root, as in the official caddy image, to bind ports 80 and 443. Moving it to a non-root user
+      changes the owner of the caddy-data volume on existing installs, so it needs its own migration.
+    expired_at: 2027-03-31
+
+  # The shop simulation is a deliberately broken demo workload for trying the console. It runs in a test cluster,
+  # never next to the console, and uses default security contexts so its failures look like real ones.
+  - id: KSV-0014
+    paths:
+      - deploy/examples/shop-simulation.yaml
+    statement: Demo workload for a test cluster, not production.
+  - id: KSV-0118
+    paths:
+      - deploy/examples/shop-simulation.yaml
+    statement: Demo workload for a test cluster, not production.
+
+  # To fix: the in-cluster PostgreSQL and Caddy set no security context yet (the console's own manifest does).
+  # Hardening them changes who owns their disks on existing clusters, so it needs a tested migration.
+  - id: KSV-0014
+    paths:
+      - deploy/k8s/postgres.yaml
+      - deploy/k8s/caddy.yaml
+    statement: Known gap, to be fixed with a tested migration for existing disks.
+    expired_at: 2027-03-31
+  - id: KSV-0118
+    paths:
+      - deploy/k8s/postgres.yaml
+      - deploy/k8s/caddy.yaml
+    statement: Known gap, to be fixed with a tested migration for existing disks.
+    expired_at: 2027-03-31

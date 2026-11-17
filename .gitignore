@@ -14,3 +14,8 @@ secrets.env
 *.sql.gz
 # Local-only Compose changes, such as publishing port 8000
 docker-compose.override.yml
+
+# Test coverage
+coverage.xml
+.coverage
+htmlcov/
