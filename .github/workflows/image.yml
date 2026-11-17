@@ -7,7 +7,7 @@
 #                  then publishes linux/amd64 and linux/arm64 to Docker Hub with an SBOM and provenance.
 #
 # Pushes to dev and pull requests run the analysis and scans; dev also builds and checks the image.
-# Only main, version tags (v1.2.0 also publishes 1.2.0 and 1.2), and manual runs publish.
+# Only pushes to main and manual runs (Actions > Image > Run workflow) publish, as VERSION below.
 #
 # One-time setup in Settings > Secrets and variables > Actions:
 #   Secret    DOCKERHUB_USERNAME   Docker account that pushes; also signs in to dhi.io for the base image
@@ -24,7 +24,6 @@ name: Image
 on:
   push:
     branches: [main, dev]
-    tags: ["v*"]
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -37,6 +36,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The version published to Docker Hub, as rootcauseconsole/root-cause-console:VERSION and :latest.
+  # Raise it for each release (6.0.0 -> 6.0.1 for fixes, 6.1.0 for features, 7.0.0 for breaking changes).
+  # Publishing the same version again replaces that image, so change it before merging a release to main.
+  VERSION: "6.0.0"
   IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'rootcauseconsole/root-cause-console' }}
   TRIVY_VERSION: v0.70.0
 
@@ -131,6 +134,9 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check VERSION
+        run: |
+          echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "VERSION must look like 6.0.0, not '$VERSION'"; exit 1; }
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -151,10 +157,8 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ env.VERSION }},priority=1000
+            type=raw,value=latest
             type=sha,format=short
 
       # Built once for this runner, then scanned and started before anything is published.
@@ -210,7 +214,7 @@ jobs:
           if docker exec rcc sh -c true 2>/dev/null; then echo "The image must not contain a shell"; exit 1; fi
 
       - name: Publish to Docker Hub
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -224,7 +228,7 @@ jobs:
           cache-from: type=gha
 
       - name: Summary
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         run: |
           {
             echo "### Published ${IMAGE}"
