@@ -59,7 +59,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements-dev.txt
+      # Locked versions with hashes, prebuilt wheels only: no setup script from a package runs here.
+      # After changing requirements*.txt, regenerate with the command at the top of requirements-dev.lock.
+      - run: "pip install --only-binary=:all: --require-hashes -r requirements-dev.lock"
       - name: Tests with coverage
         run: pytest -q --cov=app --cov-report=xml:coverage.xml
       - name: Cache SonarQube packages

@@ -72,6 +72,14 @@ def main() -> None:
     except Exception as error:  # noqa: BLE001
         lines.append(f"Couldn't read the quality gate: {error}")
     try:
+        # Security issues on their own, so none is hidden past the first page of other issues.
+        security = get("issues/search", organization=ORGANIZATION, componentKeys=PROJECT, branch=BRANCH, resolved="false",
+                       impactSoftwareQualities="SECURITY", ps="100")["issues"]
+        lines += ["", f"**Open security issues: {len(security)}**", "", "| Impact | Rule | Where | Message |", "|---|---|---|---|"]
+        lines += [issue_row(issue) for issue in security]
+    except Exception as error:  # noqa: BLE001
+        lines.append(f"Couldn't read the security issues: {error}")
+    try:
         scope, issues = new_issues()
         security_first = sorted(issues, key=lambda i: (i.get("type") != "VULNERABILITY",
                                                        not any(x["softwareQuality"] == "SECURITY" for x in i.get("impacts", []))))
