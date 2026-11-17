@@ -89,6 +89,7 @@ jobs:
         if: always() && steps.sonar-auth.outcome == 'success' && github.ref == 'refs/heads/main'
         env:
           SONAR_PROJECT_KEY: ${{ steps.sonar-auth.outputs.project-key }}
+          SONAR_ORGANIZATION: ${{ steps.sonar-auth.outputs.organization }}
           SONAR_BRANCH: main
         run: python .github/scripts/sonar_report.py
 

@@ -10,6 +10,7 @@ import httpx
 
 API = "https://sonarcloud.io/api"
 PROJECT = os.environ["SONAR_PROJECT_KEY"]
+ORGANIZATION = os.environ["SONAR_ORGANIZATION"]
 BRANCH = os.environ.get("SONAR_BRANCH", "main")
 HEADERS = {"Authorization": f"Bearer {os.environ['SONAR_TOKEN']}"}
 
@@ -33,7 +34,7 @@ def gate_lines() -> list[str]:
 
 def new_issues() -> tuple[str, list[dict]]:
     """Open issues in new code. Parameter names differ between API versions, so a few forms are tried in turn."""
-    base = {"componentKeys": PROJECT, "branch": BRANCH, "resolved": "false", "ps": "100"}
+    base = {"organization": ORGANIZATION, "componentKeys": PROJECT, "branch": BRANCH, "resolved": "false", "ps": "100"}
     attempts = [("new code", {"inNewCodePeriod": "true"}), ("new code", {"sinceLeakPeriod": "true"}), ("all open", {})]
     errors = []
     for scope, extra in attempts:
@@ -42,6 +43,18 @@ def new_issues() -> tuple[str, list[dict]]:
         except RuntimeError as error:
             errors.append(str(error))
     raise RuntimeError(" | ".join(errors))
+
+
+def uncovered_lines() -> list[str]:
+    """Files with new lines that no test runs, which is what the new-code coverage condition measures."""
+    tree = get("measures/component_tree", organization=ORGANIZATION, component=PROJECT, branch=BRANCH,
+               metricKeys="new_lines_to_cover,new_uncovered_lines", qualifiers="FIL", ps="500")
+    rows = []
+    for component in tree.get("components", []):
+        values = {m["metric"]: m.get("period", {}).get("value", m.get("value", "0")) for m in component.get("measures", [])}
+        if int(float(values.get("new_uncovered_lines", 0))):
+            rows.append(f"| `{component['path']}` | {values['new_uncovered_lines']} of {values.get('new_lines_to_cover', '?')} |")
+    return ["", "**New lines without tests**", "", "| File | Uncovered |", "|---|---|", *rows] if rows else []
 
 
 def issue_row(issue: dict) -> str:
@@ -66,6 +79,10 @@ def main() -> None:
         lines += [issue_row(issue) for issue in security_first]
     except Exception as error:  # noqa: BLE001
         lines.append(f"Couldn't read the issues: {error}")
+    try:
+        lines += uncovered_lines()
+    except Exception as error:  # noqa: BLE001
+        lines.append(f"Couldn't read coverage by file: {error}")
     text = "\n".join(lines)
     print(text)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
