@@ -27,6 +27,8 @@ spec:
       labels:
         app: postgres
     spec:
+      # PostgreSQL never calls the Kubernetes API, so it gets no service account token.
+      automountServiceAccountToken: false
       containers:
         - name: postgres
           image: ACR_NAME.azurecr.io/postgres:16-alpine
@@ -54,8 +56,11 @@ spec:
             requests:
               cpu: 100m
               memory: 256Mi
+              ephemeral-storage: 128Mi
             limits:
               memory: 1Gi
+              # The data is on the persistent disk. This covers logs and files written outside it.
+              ephemeral-storage: 1Gi
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data

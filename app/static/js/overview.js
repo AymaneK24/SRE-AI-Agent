@@ -1,6 +1,6 @@
 // Overview: current status, what changed, and Grafana-style metric panels.
 import { TimeSeriesChart, stepFor } from './charts.js';
-import { api, can, clear, closeDialog, confirmDialog, dialogHead, formatValue, h, icon, labelText, live, openDialog, timeAgo, toast } from './core.js';
+import { api, background, can, clear, closeDialog, confirmDialog, dialogHead, formatValue, h, icon, labelText, live, openDialog, timeAgo, toast } from './core.js';
 
 const RANGES = [['5m', 300], ['15m', 900], ['1h', 3600], ['6h', 21600], ['24h', 86400], ['7d', 604800]];
 const REFRESH = [['Off', 0], ['5s', 5], ['15s', 15], ['30s', 30], ['1m', 60]];
@@ -145,7 +145,7 @@ export function mount(container) {
   function renderControls() {
     clear(rangeControl, RANGES.map(([label, value]) => h('button', {
       type: 'button', 'aria-pressed': String(value === range),
-      onClick: () => { range = value; savePref('rcc-range', value); renderControls(); fetchAll(); },
+      onClick: () => { range = value; savePref('rcc-range', value); renderControls(); background(fetchAll()); },
     }, label)));
     clear(refreshControl, REFRESH.map(([label, value]) => h('button', {
       type: 'button', 'aria-pressed': String(value === refresh),
@@ -155,7 +155,7 @@ export function mount(container) {
 
   function schedule() {
     clearInterval(timer);
-    if (refresh > 0) timer = setInterval(() => { if (!document.hidden) fetchAll(); }, refresh * 1000);
+    if (refresh > 0) timer = setInterval(() => { if (!document.hidden) background(fetchAll()); }, refresh * 1000);
   }
 
   function chooseHeroSignal(context) {
@@ -266,10 +266,10 @@ export function mount(container) {
         heroChart = new TimeSeriesChart(heroChartHost, { unit: signal.unit, height: 360, limit: signal.limit, title: signal.title, showTable: false, endValue: true, ariaLabel: `${signal.title} chart` });
         heroChart.signal = signal;
         heroChart.showMessage('Loading chart');
-        fetchHero(signal);
+        background(fetchHero(signal));
       }
     } else if (heroChart) {
-      fetchHero(heroChart.signal);
+      background(fetchHero(heroChart.signal));
     }
     // Nothing to chart: say so, rather than leaving the view empty.
     if (!signal && view === 'metrics' && can('engineer')) {
@@ -527,7 +527,7 @@ export function mount(container) {
   async function loadPanels() {
     try { panels = await api('/api/panels'); } catch (error) { panels = []; }
     renderPanels();
-    fetchAll();
+    background(fetchAll());
   }
 
   function limitFor(query, sourceId) {
@@ -546,7 +546,7 @@ export function mount(container) {
     const sources = metricSources(live.context);
     if (picks.panels && !sources.some((item) => item.id === Number(picks.panels))) picks.panels = '';
     clear(panelsPickHost, can('engineer') && sources.length > 1 ? sourcePicker('Source', [['', 'All sources'], ...sources.map((item) => [item.id, item.name])], picks.panels,
-      (value) => { setPick('panels', value); renderPanels(); fetchAll(); }) : null);
+      (value) => { setPick('panels', value); renderPanels(); background(fetchAll()); }) : null);
   }
 
   function renderPanels() {
@@ -615,7 +615,7 @@ export function mount(container) {
     if (!ok) return;
     await api(`/api/panels/${panel.id}`, { method: 'DELETE' });
     toast('Panel removed');
-    loadPanels();
+    background(loadPanels());
   }
 
   async function editPanel(panel) {
@@ -654,7 +654,7 @@ export function mount(container) {
         else await api('/api/panels', { method: 'POST', body });
         closeDialog();
         toast(panel ? 'Panel saved' : 'Panel added');
-        loadPanels();
+        background(loadPanels());
       } catch (error) {
         clear(result, h('p', { class: 'form-result bad' }, error.message));
       }
@@ -684,14 +684,14 @@ export function mount(container) {
 
   renderControls();
   renderContext(live.context);
-  loadPanels();
+  background(loadPanels());
   schedule();
   const unsubscribe = live.subscribe((type, data) => {
     if (type === 'context') renderContext(data);
-    if (type === 'panels_changed') loadPanels();
+    if (type === 'panels_changed') background(loadPanels());
     if (type === 'theme') {
       renderPanels();
-      fetchAll();
+      background(fetchAll());
       heroKey = '';
       renderContext(live.context);
     }
@@ -701,7 +701,7 @@ export function mount(container) {
   const unsubscribeServer = live.subscribe((type, data) => {
     if (type === 'context' && sourceIds(data) !== knownSources) {
       knownSources = sourceIds(data);
-      loadPanels();
+      background(loadPanels());
     }
   });
 

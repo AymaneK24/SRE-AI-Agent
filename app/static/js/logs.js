@@ -1,5 +1,5 @@
 // Logs: investigations, every prompt sent to a model, state changes, and the audit trail.
-import { api, can, clear, dateTime, dialogHead, h, openDialog, statusBadge, usd } from './core.js';
+import { api, background, can, clear, dateTime, dialogHead, h, openDialog, statusBadge, usd } from './core.js';
 
 const TABS = [['investigations', 'Investigations'], ['prompts', 'Prompts sent'], ['events', 'State changes'], ['alerts', 'Alerts sent'], ['audit', 'Audit trail']];
 
@@ -18,7 +18,7 @@ export function mount(container, params) {
   function renderTabs() {
     clear(tabs, visible.map(([id, label]) => h('button', {
       type: 'button', role: 'tab', 'aria-selected': String(id === tab),
-      onClick: () => { tab = id; renderTabs(); load(); },
+      onClick: () => { tab = id; renderTabs(); background(load()); },
     }, label)));
   }
 
@@ -197,6 +197,6 @@ export function mount(container, params) {
   }
 
   renderTabs();
-  load();
+  background(load());
   return () => {};
 }

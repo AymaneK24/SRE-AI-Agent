@@ -1,5 +1,5 @@
 // Organization administration: usage, members, security policies, and single sign-on.
-import { api, can, clear, confirmDialog, dialogHead, h, live, openDialog, timeAgo, toast, usd } from './core.js';
+import { api, background, can, clear, confirmDialog, dialogHead, h, live, openDialog, timeAgo, toast, usd } from './core.js';
 
 const TABS = [['overview', 'Usage'], ['members', 'Members'], ['security', 'Security policies'], ['sso', 'Single sign-on']];
 
@@ -12,7 +12,7 @@ export function mount(container, params) {
   clear(container, h('div', { class: 'page' }, title, tabs, body));
 
   function renderTabs() {
-    clear(tabs, allowed.map(([id, label]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(id === tab), onClick: () => { tab = id; renderTabs(); load(); } }, label)));
+    clear(tabs, allowed.map(([id, label]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(id === tab), onClick: () => { tab = id; renderTabs(); background(load()); } }, label)));
   }
 
   async function load() {
@@ -82,7 +82,7 @@ export function mount(container, params) {
           body.prepend(h('div', { style: 'margin-bottom:14px' }, h('p', { class: 'notice' }, 'No email server is set up, so send this person the link yourself. It works for 72 hours, and only once.'), h('p', { class: 'key-box', style: 'margin-top:8px' }, outcome.invite_link)));
         } else {
           toast('Invitation sent');
-          load();
+          background(load());
         }
       } catch (error) { clear(result, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     }
@@ -110,7 +110,7 @@ export function mount(container, params) {
       await api(`/api/org/members/${member.id}`, { method: 'PATCH', body: patch });
       toast('Access updated, and their sessions were ended');
     } catch (error) { toast(error.message); }
-    load();
+    background(load());
   }
 
   async function remove(member) {
@@ -125,7 +125,7 @@ export function mount(container, params) {
       await api(`/api/org/members/${member.id}${purge.checked ? '?delete_investigations=true' : ''}`, { method: 'DELETE' });
       toast('Person removed');
     } catch (error) { toast(error.message); }
-    load();
+    background(load());
   }
 
   async function security() {
@@ -187,6 +187,6 @@ export function mount(container, params) {
   }
 
   renderTabs();
-  load();
+  background(load());
   return () => {};
 }

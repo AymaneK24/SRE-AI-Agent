@@ -210,10 +210,21 @@ export async function refreshAi() {
 let toastTimer;
 export function toast(message) {
   const element = document.getElementById('toast');
+  if (!element) return;
   element.textContent = message;
   element.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => element.classList.remove('show'), 3200);
+}
+
+// Starts work that nothing waits for, such as loading a page's data, and shows its error instead of losing it.
+// Cancelled requests and an expired sign-in are left alone: the page already moved on or went to sign-in.
+export function background(promise) {
+  promise.catch((error) => {
+    if (error && (error.name === 'AbortError' || error.status === 401)) return;
+    console.error(error);
+    toast(error && error.message ? error.message : 'Something went wrong. Reload the page and try again.');
+  });
 }
 
 export function openDialog(content, { wide = false, onClose } = {}) {

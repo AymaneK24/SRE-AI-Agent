@@ -1,6 +1,6 @@
 // Investigate: send prompts with the live context, watch the model work, and record the outcome.
 import { TimeSeriesChart } from './charts.js';
-import { api, can, clear, confirmDialog, dialogHead, formatValue, h, labelText, live, openDialog, refreshAi, renderMarkdown, timeAgo, toast, usd } from './core.js';
+import { api, background, can, clear, confirmDialog, dialogHead, formatValue, h, labelText, live, openDialog, refreshAi, renderMarkdown, timeAgo, toast, usd } from './core.js';
 
 let remembered = null;
 
@@ -177,7 +177,7 @@ export function mount(container, params) {
       return;
     }
     renderConversation();
-    if (conversation.active_run_id) attachRun(conversation.active_run_id, true);
+    if (conversation.active_run_id) background(attachRun(conversation.active_run_id, true));
   }
 
   function renderHeader() {
@@ -425,7 +425,7 @@ export function mount(container, params) {
       if (!conversation.messages.length) clear(messagesHost);
       renderHeader();
       messagesHost.append(h('div', { class: 'message-user' }, prompt));
-      attachRun(runId, false);
+      background(attachRun(runId, false));
     } catch (error) {
       clear(composerError, h('p', { class: 'error-note' }, error.message));
     } finally {
@@ -636,14 +636,14 @@ export function mount(container, params) {
       renderRail(data);
       if (!conversation && !conversationId) renderStarter();
     }
-    if (type === 'ai') loadModels();
+    if (type === 'ai') background(loadModels());
   });
 
   if (params.prompt) textarea.value = params.prompt;
   renderRail(live.context);
   renderFocus();
-  loadModels();
-  loadConversation();
+  background(loadModels());
+  background(loadConversation());
 
   return () => {
     disposed = true;

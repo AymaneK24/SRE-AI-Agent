@@ -1,5 +1,5 @@
 // Results for people who read but don't investigate: each question and its answer, with nothing about how it ran.
-import { api, clear, dateTime, h, renderMarkdown, statusBadge, timeAgo } from './core.js';
+import { api, background, clear, dateTime, h, renderMarkdown, statusBadge, timeAgo } from './core.js';
 
 export function mount(container, params) {
   let selected = params.id ? Number(params.id) : null;
@@ -18,7 +18,7 @@ export function mount(container, params) {
   function renderList() {
     clear(listHost, items.length ? items.map((item) => h('a', {
       href: `#/investigate/${item.id}`, 'aria-current': item.id === selected ? 'true' : null,
-      onClick: (event) => { event.preventDefault(); select(item.id); },
+      onClick: (event) => { event.preventDefault(); background(select(item.id)); },
     }, item.title, h('small', {}, `${item.trigger === 'auto' ? 'Automatic, ' : ''}${timeAgo(item.updated_at)}`)))
       : h('p', { class: 'empty' }, search.value ? 'No results match this search.' : 'Nothing has been shared yet.'));
   }
@@ -55,8 +55,8 @@ export function mount(container, params) {
       if (disposed) return;
       items = data.items;
       renderList();
-      if (!selected && items.length) select(items[0].id);
-      else if (selected) select(selected);
+      if (!selected && items.length) background(select(items[0].id));
+      else if (selected) background(select(selected));
       else clear(detailHost);
     } catch (error) {
       clear(listHost, h('p', { class: 'error-note' }, error.message));
@@ -64,6 +64,6 @@ export function mount(container, params) {
   }
 
   search.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(load, 250); });
-  load();
+  background(load());
   return () => { disposed = true; clearTimeout(debounce); };
 }
