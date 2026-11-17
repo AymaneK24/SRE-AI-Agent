@@ -166,6 +166,7 @@ jobs:
 
       # Built once for this runner, then scanned and started before anything is published.
       - name: Build for scanning
+        id: build-scan
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -186,8 +187,9 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+      # Runs even when the scan above fails, so the findings reach the Security tab, but only if there's an image.
       - name: Trivy image report for the Security tab
-        if: always()
+        if: always() && steps.build-scan.outcome == 'success'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: ${{ env.TRIVY_VERSION }}
@@ -198,7 +200,7 @@ jobs:
           format: sarif
           output: trivy-image.sarif
       - name: Upload to the Security tab
-        if: always() && !github.event.repository.private
+        if: always() && steps.build-scan.outcome == 'success' && !github.event.repository.private
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: trivy-image.sarif
