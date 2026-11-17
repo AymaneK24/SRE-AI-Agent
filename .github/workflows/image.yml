@@ -84,6 +84,13 @@ jobs:
             -Dsonar.projectKey=${{ steps.sonar-auth.outputs.project-key }}
             -Dsonar.qualitygate.wait=${{ github.ref == 'refs/heads/main' }}
             -Dsonar.qualitygate.timeout=300
+      # Shows the quality gate and new issues in the job summary, even when the gate failed.
+      - name: SonarQube results
+        if: always() && steps.sonar-auth.outcome == 'success' && github.ref == 'refs/heads/main'
+        env:
+          SONAR_PROJECT_KEY: ${{ steps.sonar-auth.outputs.project-key }}
+          SONAR_BRANCH: main
+        run: python .github/scripts/sonar_report.py
 
   trivy-repo:
     name: Trivy on the source
