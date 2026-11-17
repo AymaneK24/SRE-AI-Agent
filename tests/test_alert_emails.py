@@ -184,25 +184,12 @@ async def test_attachments_keep_the_message_readable(make_config):
     assert ">Disk full<" in _body(message, "html"), "the header shows the title without the [CRITICAL] label"
 
 
-@pytest.mark.parametrize("name", ["Dockerfile", "Dockerfile.alpine"])
-def test_dockerfile_follows_the_hardening_rules(name):
-    text = Path(name).read_text()
-    assert text.count("\nFROM ") == 2 and "AS build" in text
+def test_dockerfile_follows_the_hardening_rules():
+    text = Path("Dockerfile").read_text()
+    assert text.count("FROM ") == 2 and "AS build" in text
     assert "USER 10001:10001" in text and 'ENTRYPOINT ["python", "-m", "app"]' in text and "\nCMD " not in text
     assert 'CMD ["python", "-c"' in text, "the health check works with no shell"
-    assert "--only-binary=:all:" in text
-
-
-def test_default_image_is_built_on_docker_hardened_images():
-    text = Path("Dockerfile").read_text()
-    build, runtime = [line.split()[1] for line in text.splitlines() if line.startswith("FROM ")]
-    assert build == "dhi.io/python:${PYTHON_TAG}-dev" and runtime == "dhi.io/python:${PYTHON_TAG}"
-    assert "--chown=10001:10001 /data" in text, "existing data volumes stay writable"
-
-
-def test_fallback_image_removes_the_shell_and_pip_itself():
-    text = Path("Dockerfile.alpine").read_text()
-    assert "pip uninstall" in text and "harden-image.py" in text
+    assert "--only-binary=:all:" in text and "pip uninstall" in text and "harden-image.py" in text
 
 
 @pytest.mark.parametrize("name", ["subprocess", "os.system"])

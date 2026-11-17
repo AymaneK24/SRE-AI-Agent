@@ -99,7 +99,7 @@ trivy image postgres:16-alpine
 trivy image caddy:2-alpine
 ```
 
-The console's image is built on Docker Hardened Images (`dhi.io/python`, Alpine) in two stages, runs as user 10001, and has no shell, package manager, or pip. Security fixes arrive when you rebuild, so rebuild at least monthly.
+The console's image is built on Alpine in two stages, runs as user 10001, and has no shell, package manager, or pip. Security fixes arrive when you rebuild, so rebuild at least monthly.
 
 ## Rotate secrets
 

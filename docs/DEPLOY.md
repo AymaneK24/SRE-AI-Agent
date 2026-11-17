@@ -8,7 +8,6 @@ You need a Linux server with Docker, 2 CPUs, and 4 GB of memory. It must be able
 
 ```bash
 sh deploy/setup-env.sh
-docker login dhi.io            # once: the image is built on Docker Hardened Images (free Docker account)
 docker compose up -d --build
 ```
 
@@ -91,9 +90,7 @@ To use a company sign-in such as Microsoft Entra ID or Okta, set it up in **Orga
 
 ## Keep the image secure
 
-The image is built on [Docker Hardened Images](https://docs.docker.com/dhi/) (`dhi.io/python`, Alpine), in two stages. It runs as a non-root user (ID 10001) and has one entrypoint: `python -m app`. It has no pip, package manager, or shell, so `docker exec ... sh` doesn't work by design. Use `docker compose logs console` to see what's happening.
-
-Pulling the hardened base image needs a free Docker account: run `docker login dhi.io` once on the machine that builds. Without an account, add `RCC_DOCKERFILE=Dockerfile.alpine` to `.env` to build the hand-hardened Alpine image instead, which has the same user, entrypoint, and restrictions.
+The image is built in two stages on Alpine, runs as a non-root user (ID 10001), and has one entrypoint: `python -m app`. It has no pip, package manager, or shell, so `docker exec ... sh` doesn't work by design. Use `docker compose logs console` to see what's happening.
 
 Security fixes only arrive when you rebuild, so do this regularly and scan the result:
 

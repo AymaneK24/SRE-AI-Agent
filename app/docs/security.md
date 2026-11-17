@@ -16,7 +16,7 @@ The console holds read access to your monitoring and, through it, a detailed map
 
 **Browser.** A strict Content Security Policy with no inline scripts or styles, HSTS over HTTPS, `Host` and `Origin` checks, JSON-only write requests that refuse repeated keys, a request size limit, and sanitised model output.
 
-**Container.** Built in two stages on [Docker Hardened Images](https://docs.docker.com/dhi/), Docker's minimal base images with few known vulnerabilities, a software bill of materials, and signed provenance. It runs as user 10001, with a read-only root filesystem, all Linux capabilities dropped, and `no-new-privileges`. The image has no shell, package manager, or pip.
+**Container.** Built in two stages on Alpine, running as user 10001, with a read-only root filesystem, all Linux capabilities dropped, and `no-new-privileges`. The image has no shell, package manager, or pip.
 
 **AI data.** Claude and Gemini stay off until an admin consents for each, and an owner can block them. Obvious secrets are removed by pattern before sending. Telemetry is marked as untrusted data, and the model is told never to follow instructions in it.
 

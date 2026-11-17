@@ -207,7 +207,6 @@ sh deploy/setup-env.sh
 
 ```bash
 chmod 600 .env
-docker login dhi.io             # once: free Docker account, for the hardened base image
 docker compose up -d --build
 docker compose ps
 docker compose logs caddy | grep -iE 'certificate|error'

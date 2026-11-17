@@ -1,17 +1,12 @@
 # Root Cause Console: the app, PostgreSQL, and Caddy for HTTPS.
 #
 #   sh deploy/setup-env.sh           Asks a few questions and writes .env with new secrets.
-#   docker login dhi.io              Once. The image is built on Docker Hardened Images (free Docker account).
 #   docker compose up -d --build     Starts everything.
-#
-# No Docker account? Set RCC_DOCKERFILE=Dockerfile.alpine in .env to build the hand-hardened Alpine image.
 #
 # See docs/DEPLOY.md.
 services:
   console:
-    build:
-      context: .
-      dockerfile: ${RCC_DOCKERFILE:-Dockerfile}
+    build: .
     image: ${RCC_IMAGE:-root-cause-console:latest}
     env_file: .env
     environment:
