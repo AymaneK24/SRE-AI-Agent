@@ -1,5 +1,5 @@
 // App entry: routing, header, theme, and account state.
-import { api, can, clear, closeDialog, connectLive, disconnectLive, h, live, modelName, refreshAi, setAuthHandler } from './core.js';
+import { api, background, can, clear, closeDialog, connectLive, disconnectLive, h, live, modelName, refreshAi, setAuthHandler } from './core.js';
 import { mount as mountAccount } from './account.js';
 import { mount as mountConnections } from './connections.js';
 import { mount as mountInvestigate } from './investigate.js';
@@ -28,13 +28,19 @@ const NAV = [['overview', 'Overview'], ['projects', 'Projects'], ['investigate',
 const PUBLIC_ROUTES = { '': landing, signin, signup, verify, forgot, reset, accept, legal };
 const view = document.getElementById('view');
 let unmount = null;
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const [path, queryString] = raw.split('?');
   const [name, id] = path.split('/');
-  const params = { id };
-  new URLSearchParams(queryString || '').forEach((value, key) => { params[key] = value; });
+  // The query string comes from the address bar, so it can't be allowed to change Object.prototype:
+  // params has no prototype, and keys that name one are dropped.
+  const params = Object.create(null);
+  params.id = id;
+  new URLSearchParams(queryString || '').forEach((value, key) => {
+    if (!UNSAFE_KEYS.has(key)) params[key] = value;
+  });
   return { name: name || '', params };
 }
 
@@ -164,4 +170,4 @@ async function start() {
 }
 
 enhanceSelects(document.body);
-start();
+background(start());

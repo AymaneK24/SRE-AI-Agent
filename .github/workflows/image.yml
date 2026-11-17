@@ -1,21 +1,21 @@
 # Build, scan, and publish the console image.
 #
 #   1. sonarqube   Tests with coverage, then SonarQube Cloud analysis. A failed quality gate stops the pipeline.
+#                  Signs in without a stored secret: GitHub's OIDC token is exchanged for a short-lived Sonar token.
 #   2. trivy-repo  Trivy on the source: vulnerable dependencies, leaked secrets, Dockerfile and Kubernetes misconfigurations.
 #   3. image       Builds on Docker Hardened Images, scans the image with Trivy, checks it starts healthy,
 #                  then publishes linux/amd64 and linux/arm64 to Docker Hub with an SBOM and provenance.
 #
-# Runs on every push to main, on version tags (v1.2.0 also publishes 1.2.0 and 1.2), and by hand.
+# Pushes to dev and pull requests run the analysis and scans; dev also builds and checks the image.
+# Only main, version tags (v1.2.0 also publishes 1.2.0 and 1.2), and manual runs publish.
 #
 # One-time setup in Settings > Secrets and variables > Actions:
 #   Secret    DOCKERHUB_USERNAME   Docker account that pushes; also signs in to dhi.io for the base image
 #   Secret    DOCKERHUB_TOKEN      Personal access token of that account, Read & Write
-#   Secret    SONAR_TOKEN          SonarQube Cloud token (My Account > Security)
-#   Variable  SONAR_ORGANIZATION   SonarQube Cloud organization key, e.g. aymanek24
-#   Variable  SONAR_PROJECT_KEY    SonarQube Cloud project key, e.g. AymaneK24_SRE-AI-Agent
 #   Variable  DOCKERHUB_IMAGE      Optional. Defaults to rootcauseconsole/root-cause-console
 #
-# In SonarQube Cloud, turn off "Automatic Analysis" for the project, since this workflow runs the analysis.
+# SonarQube Cloud needs no secret here: the project is bound to this repository, and the organization and project
+# key come from the sign-in step. Turn off "Automatic Analysis" for the project, since this workflow runs it.
 #
 # Every action is pinned to a full commit SHA, with the version in a comment. After the March 2026 Trivy
 # compromise, where release tags were moved to malicious commits, tags alone aren't trusted here.
@@ -23,8 +23,10 @@ name: Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
@@ -42,6 +44,9 @@ jobs:
   sonarqube:
     name: SonarQube analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # exchanged for a short-lived SonarQube Cloud token; no stored secret
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -53,14 +58,23 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Tests with coverage
         run: pytest -q --cov=app --cov-report=xml:coverage.xml
+      - name: Cache SonarQube packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+      - name: Sign in to SonarQube Cloud
+        id: sonar-auth
+        uses: SonarSource/sonarqube-auth-action@b372e2c2930aadfcc4f4399446da1e12772709ad # v1.2
+        with:
+          project-key: AymaneK24_SRE-AI-Agent
       - name: SonarQube Cloud scan
         uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
-            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ steps.sonar-auth.outputs.organization }}
+            -Dsonar.projectKey=${{ steps.sonar-auth.outputs.project-key }}
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
 
@@ -109,6 +123,8 @@ jobs:
   image:
     name: Build, scan, and publish the image
     needs: [sonarqube, trivy-repo]
+    # Pull requests stop after the analysis and scans; the push to their branch builds the image.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -194,6 +210,7 @@ jobs:
           if docker exec rcc sh -c true 2>/dev/null; then echo "The image must not contain a shell"; exit 1; fi
 
       - name: Publish to Docker Hub
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -207,6 +224,7 @@ jobs:
           cache-from: type=gha
 
       - name: Summary
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           {
             echo "### Published ${IMAGE}"

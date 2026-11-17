@@ -1,5 +1,5 @@
 // Projects: metric sources and Kubernetes namespaces behind one system, with status, recurring issues, patterns, and PDF reports.
-import { api, can, clear, closeDialog, confirmDialog, dateTime, dialogHead, h, icon, live, openDialog, timeAgo, toast, usd } from './core.js';
+import { api, background, can, clear, closeDialog, confirmDialog, dateTime, dialogHead, h, icon, live, openDialog, timeAgo, toast, usd } from './core.js';
 
 const HEALTH = {
   healthy: ['ok', 'Healthy'], attention: ['warning', 'Needs attention'], problems: ['critical', 'Problems now'],
@@ -133,7 +133,7 @@ export function mount(container, params) {
         const saved = project ? await api(`/api/projects/${project.id}`, { method: 'PUT', body: payload }) : await api('/api/projects', { method: 'POST', body: payload });
         closeDialog();
         toast('Project saved');
-        if (project) showProject(saved.id);
+        if (project) background(showProject(saved.id));
         else location.hash = `#/projects/${saved.id}`;
       } catch (error) { clear(result, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     } }, dialogHead(project ? 'Edit project' : 'New project'),
@@ -173,7 +173,7 @@ export function mount(container, params) {
       try {
         await api('/api/issues/verdict', { method: 'PUT', body: { title: issue.title, verdict: verdict || null, ...extra } });
         toast(verdict ? 'Verdict saved' : 'Verdict cleared');
-        showProject(projectId);
+        background(showProject(projectId));
       } catch (error) { toast(error.message); }
     }
 
@@ -203,7 +203,7 @@ export function mount(container, params) {
         if (value === null) { error.textContent = 'Choose between 1 hour and 365 days.'; error.hidden = false; return; }
         saved = true;
         closeDialog();
-        setVerdict(issue, verdict, { expires_hours: value, note: note.value.trim() });
+        background(setVerdict(issue, verdict, { expires_hours: value, note: note.value.trim() }));
       } },
         dialogHead(`Mark as ${VERDICTS[verdict].toLowerCase()}`),
         h('p', { class: 'body-text' }, h('b', {}, issue.title)),
@@ -213,14 +213,14 @@ export function mount(container, params) {
         h('div', { class: 'form-actions' },
           h('button', { class: 'button primary', type: 'submit' }, 'Save'),
           h('button', { class: 'button', type: 'button', onClick: closeDialog }, 'Cancel'))),
-      { onClose: () => { if (!saved) showProject(projectId); } });
+      { onClose: () => { if (!saved) background(showProject(projectId)); } });
     }
 
     async function renewVerdict(issue) {
       try {
         await api('/api/issues/verdict/renew', { method: 'POST', body: { title: issue.title } });
         toast('Label renewed');
-        showProject(projectId);
+        background(showProject(projectId));
       } catch (error) { toast(error.message); }
     }
 
@@ -247,7 +247,7 @@ export function mount(container, params) {
       try {
         await api(`/api/projects/${projectId}/reports/${report.id}/share`, { method: 'POST', body: { shared } });
         toast(shared ? 'Viewers can now download this report' : 'Report is for engineers only again');
-        showProject(projectId);
+        background(showProject(projectId));
       } catch (error) { toast(error.message); }
     }
     const recurring = view.issues.filter((issue) => issue.recurring);
@@ -262,20 +262,20 @@ export function mount(container, params) {
       try {
         const report = await api(`/api/projects/${projectId}/reports`, { method: 'POST', body: { days, ai_notes: includeAi.checked } });
         if (report.notes_status === 'failed') toast(`Report saved without AI notes. ${report.notes_error}`);
-        showProject(projectId);
+        background(showProject(projectId));
       } catch (error) { clear(reportStatus, h('p', { class: 'form-result bad', role: 'alert' }, error.message)); }
     }
 
     async function addNotes(report) {
       try {
         await api(`/api/projects/${projectId}/reports/${report.id}/notes`, { method: 'POST', body: {} });
-        showProject(projectId);
+        background(showProject(projectId));
       } catch (error) { toast(error.message); }
     }
 
     clearTimeout(notesTimer);
     if (reports.some((report) => report.notes_status === 'pending')) {
-      notesTimer = setTimeout(() => { if (!disposed) showProject(projectId); }, 4000);
+      notesTimer = setTimeout(() => { if (!disposed) background(showProject(projectId)); }, 4000);
     }
     const notesCell = (report) => {
       if (report.notes_status === 'pending') return h('span', { class: 'badge neutral' }, 'Writing AI notes');
@@ -286,7 +286,7 @@ export function mount(container, params) {
     async function removeReport(report) {
       await api(`/api/projects/${projectId}/reports/${report.id}`, { method: 'DELETE' });
       toast('Report deleted');
-      showProject(projectId);
+      background(showProject(projectId));
     }
 
     async function removeProject() {
@@ -307,7 +307,7 @@ export function mount(container, params) {
       h('p', { style: 'margin-top:8px' }, badge(HEALTH[view.health])),
 
       h('div', { class: 'filter-row', style: 'margin-top:18px' }, h('span', { class: 'muted small' }, 'Period'),
-        h('div', { class: 'segments', role: 'group', 'aria-label': 'Period' }, [7, 30, 90].map((value) => h('button', { type: 'button', 'aria-pressed': String(days === value), onClick: () => { days = value; showProject(projectId); } }, `${value} days`)))),
+        h('div', { class: 'segments', role: 'group', 'aria-label': 'Period' }, [7, 30, 90].map((value) => h('button', { type: 'button', 'aria-pressed': String(days === value), onClick: () => { days = value; background(showProject(projectId)); } }, `${value} days`)))),
       h('div', { class: 'stat-row' }, stat(reliability.incidents, 'Incidents'), stat(summary.occurrences, 'Problem occurrences'), stat(summary.recurring, 'Recurring issues'),
         stat(summary.active, 'Active now'),
         stat(reliability.mttr_minutes === null ? 'None' : duration(reliability.mttr_minutes), 'Average time to clear'),

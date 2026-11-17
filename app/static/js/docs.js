@@ -1,5 +1,5 @@
 // The documentation space: its own layout, separate from the platform. The logo, or going back, returns to it.
-import { h, clear } from './core.js';
+import { background, clear, h } from './core.js';
 
 const nav = document.getElementById('docs-nav');
 const article = document.getElementById('doc-article');
@@ -166,11 +166,11 @@ document.addEventListener('click', (event) => {
     return;
   }
   hideResults();
-  show(link.dataset.doc, { push: true, hash: hash ? `#${hash}` : '' });
+  background(show(link.dataset.doc, { push: true, hash: hash ? `#${hash}` : '' }));
 });
 window.addEventListener('popstate', () => {
   const slug = slugFromPath();
-  if (slug !== current) show(slug);
+  if (slug !== current) background(show(slug));
   else if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
 });
 
@@ -220,7 +220,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 // Start ----------------------------------------------------------------------
-(async () => {
+background((async () => {
   try {
     sections = (await get('/api/docs')).sections;
   } catch (error) {
@@ -228,5 +228,5 @@ document.addEventListener('keydown', (event) => {
     clear(article, h('p', { class: 'error-note' }, error.message));
     return;
   }
-  show(slugFromPath());
-})();
+  background(show(slugFromPath()));
+})());

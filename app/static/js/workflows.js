@@ -1,6 +1,6 @@
 // The runbook library: fixes the team wrote and reviewed, step by step with commands, linked to projects and servers.
 // Engineers write and follow them; viewers can study the reviewed ones. Nothing on this page runs anything.
-import { api, can, clear, closeDialog, dateTime, dialogHead, h, openDialog, statusBadge, timeAgo, toast } from './core.js';
+import { api, background, can, clear, closeDialog, dateTime, dialogHead, h, openDialog, statusBadge, timeAgo, toast } from './core.js';
 
 const STATE_TEXT = { done: 'Done', skipped: 'Skipped', pending: 'Waiting', current: 'Next', preview: '' };
 const OUTCOME_TEXT = { helped: 'It helped', partly: 'It partly helped', did_not_help: 'It didn’t help', abandoned: 'Abandoned' };
@@ -245,7 +245,7 @@ export function mount(container, params) {
       await api(`/api/workflows/${item.id}/status`, { method: 'POST', body: { status } });
       if (status === 'archived') selectedId = null;
       toast(status === 'approved' ? 'Marked as reviewed' : 'Archived');
-      load();
+      background(load());
     } catch (error) { toast(error.message); }
   }
 
@@ -292,7 +292,7 @@ export function mount(container, params) {
         focusIndex = null;
         closeDialog();
         toast('Workflow saved as a draft for review');
-        load();
+        background(load());
       } catch (error) { clear(result, h('p', { class: 'form-result bad' }, error.message)); }
     }
     openDialog(h('form', { class: 'stack', onSubmit: save }, dialogHead(item ? 'Edit workflow' : 'New workflow'),

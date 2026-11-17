@@ -71,8 +71,11 @@ spec:
             requests:
               cpu: 250m
               memory: 512Mi
+              ephemeral-storage: 256Mi
             limits:
               memory: 2Gi
+              # Includes the /data and /tmp emptyDir volumes: PDF reports and temporary files.
+              ephemeral-storage: 2Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

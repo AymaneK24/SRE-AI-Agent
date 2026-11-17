@@ -1,5 +1,5 @@
 // Connections: metric sources, logs and Kubernetes, alert channels, webhooks, and AI models.
-import { api, can, clear, confirmDialog, h, live, refreshAi, statusBadge, timeAgo, toast } from './core.js';
+import { api, background, can, clear, confirmDialog, h, live, refreshAi, statusBadge, timeAgo, toast } from './core.js';
 
 function field(label, control, hint, span = 'span-2', extra = '') {
   return h('label', { class: `field ${span} ${extra}` }, h('span', {}, label), control, hint ? h('small', {}, hint) : null);
@@ -48,7 +48,7 @@ export function mount(container) {
         try {
           await api('/api/org/heartbeat', { method: 'PUT', body: body() });
           toast('Heartbeat saved');
-          renderHeartbeat();
+          background(renderHeartbeat());
         } catch (error) { showResult(result, false, error.message); }
       } },
         h('label', { class: 'check' }, enabled, h('b', {}, 'Send a heartbeat while the console is watching')),
@@ -100,7 +100,7 @@ export function mount(container) {
   async function renderCollectors() {
     const collectors = await api('/api/collectors');
     clear(collectorsHost, collectors.map((item) => item.implemented
-      ? h('button', { class: 'collector', type: 'button', 'aria-pressed': String(kind === item.id), onClick: () => { kind = item.id; editing = null; renderCollectors(); renderForm(); } }, h('b', {}, item.name), h('span', {}, item.detail))
+      ? h('button', { class: 'collector', type: 'button', 'aria-pressed': String(kind === item.id), onClick: () => { kind = item.id; editing = null; background(renderCollectors()); renderForm(); } }, h('b', {}, item.name), h('span', {}, item.detail))
       : h('div', { class: 'collector is-off', 'aria-disabled': 'true' }, h('b', {}, item.name), h('span', {}, item.detail))));
   }
 
@@ -212,7 +212,7 @@ export function mount(container) {
         toast(`Connected to ${saved.name}`);
         editing = null;
         renderForm();
-        renderSources();
+        background(renderSources());
       } catch (error) { showResult(result, false, error.message); }
     }
     clear(formHost, h('form', { onSubmit: save, 'aria-label': 'Metric source' },
@@ -246,8 +246,8 @@ export function mount(container) {
           state?.error ? h('span', { class: 'small', style: 'display:block;overflow-wrap:anywhere' }, state.error) : null),
         editable ? h('span', { style: 'display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end' },
           rows.length > 1 && row.id !== mainId ? h('button', { class: 'button compact', type: 'button', title: 'The overview shows this source first, and investigations use it when no source is named.', onClick: () => makeMain('metrics', row, renderSources) }, 'Make main') : null,
-          h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/sources/${row.id}/enabled`, { method: 'POST', body: { enabled: !row.enabled } }); renderSources(); } }, row.enabled ? 'Pause' : 'Resume'),
-          h('button', { class: 'button compact', type: 'button', onClick: () => { kind = row.kind; editing = row; renderCollectors(); renderForm(); window.scrollTo({ top: collectorsHost.offsetTop - 80 }); } }, 'Edit'),
+          h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/sources/${row.id}/enabled`, { method: 'POST', body: { enabled: !row.enabled } }); background(renderSources()); } }, row.enabled ? 'Pause' : 'Resume'),
+          h('button', { class: 'button compact', type: 'button', onClick: () => { kind = row.kind; editing = row; background(renderCollectors()); renderForm(); window.scrollTo({ top: collectorsHost.offsetTop - 80 }); } }, 'Edit'),
           h('button', { class: 'button compact', type: 'button', onClick: () => removeSource(row) }, 'Remove')) : null);
     })));
   }
@@ -274,7 +274,7 @@ export function mount(container) {
       toast(`Removed ${row.name}`);
       editing = null;
       renderForm();
-      renderSources();
+      background(renderSources());
     } catch (error) { toast(error.message); }
   }
 
@@ -304,7 +304,7 @@ export function mount(container) {
       try {
         await api('/api/org/channels', { method: 'POST', body: { kind: channelKind.value, name: name.value.trim(), min_severity: severity.value, url: url.value.trim(), recipients: recipients.value.split(',').map((item) => item.trim()).filter(Boolean) } });
         toast('Channel added');
-        renderChannels();
+        background(renderChannels());
       } catch (error) { showResult(result, false, error.message); }
     }
     const autoCheck = h('input', { type: 'checkbox', checked: auto.enabled });
@@ -327,7 +327,7 @@ export function mount(container) {
             h('span', {}, h('span', { class: 'row-title' }, row.name), h('span', { class: 'small muted', style: 'display:block;overflow-wrap:anywhere' }, `${CHANNEL_LABEL[row.kind]}, ${row.min_severity === 'critical' ? 'critical only' : 'warning and critical'}${row.recipients.length ? `, ${row.recipients.join(', ')}` : ''}`)),
             h('span', { class: 'row-buttons' },
               h('button', { class: 'button compact', type: 'button', onClick: async () => { try { const out = await api(`/api/org/channels/${row.id}/test`, { method: 'POST', body: {} }); toast(out.status === 'sent' ? 'Test sent' : out.error); } catch (error) { toast(error.message); } } }, 'Send test'),
-              h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/org/channels/${row.id}`, { method: 'DELETE' }); renderChannels(); } }, 'Remove'))))) : h('p', { class: 'empty' }, 'No channels yet.'))),
+              h('button', { class: 'button compact', type: 'button', onClick: async () => { await api(`/api/org/channels/${row.id}`, { method: 'DELETE' }); background(renderChannels()); } }, 'Remove'))))) : h('p', { class: 'empty' }, 'No channels yet.'))),
       h('div', { class: 'form-actions' }, h('label', { class: 'check' }, autoCheck, 'Investigate critical alerts automatically, then email the findings with charts and a PDF'), h('label', { class: 'check' }, 'Most per hour', perHour)),
       h('p', { class: 'small muted', style: 'margin-top:6px' }, 'This uses your AI budget and license allowance.'));
   }
@@ -366,7 +366,7 @@ export function mount(container) {
           await api('/api/org/noise', { method: 'PUT', body: { grace_critical_s: Number(graceCritical.value), grace_warning_s: Number(graceWarning.value),
             group_window_s: Number(groupWindow.value), max_per_hour: Number(perHour.value), flapping: flapping.checked, respect_verdicts: verdicts.checked, label_days: Number(labelDays.value) } });
           toast('Noise control saved');
-          renderNoise();
+          background(renderNoise());
         } catch (error) { showResult(result, false, error.message); }
       } },
         h('ol', { class: 'savings-list noise-steps' },
@@ -434,7 +434,7 @@ export function mount(container) {
           await api('/api/ai/savings', { method: 'PUT', body: { prompt_caching: caching.checked, gather_evidence: gather.checked, answer_style: style,
             evidence_model: { claude: claudePick.value, gemini: geminiPick.value } } });
           toast('Cost savings saved');
-          renderSavings();
+          background(renderSavings());
         } catch (error) { showResult(result, false, error.message); }
       } },
         h('ul', { class: 'savings-list' },
@@ -500,7 +500,7 @@ export function mount(container) {
           const saved = await api('/api/integrations', { method: 'POST', body: body() });
           toast(`${saved.name} saved`);
           if (!row) addingKinds.delete(integrationKind);
-          renderIntegrations();
+          background(renderIntegrations());
         } catch (error) { showResult(result, false, error.message); }
       } },
       title ? h('h3', { class: 'connection-title' }, title, ' ', row ? statusBadge('active') : null, ofKind.length > 1 && row?.id === mainId ? h('span', { class: 'badge neutral main-badge' }, 'Main') : null) : null,
@@ -520,8 +520,8 @@ export function mount(container) {
           const ok = await confirmDialog({ title: `Remove ${row.name}?`, body: 'The console stops reading it. Past investigations stay.', action: 'Remove connection' });
           if (!ok) return;
           await api(`/api/integrations/${row.id}`, { method: 'DELETE' });
-          renderIntegrations();
-        } }, 'Remove') : h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.delete(integrationKind); renderIntegrations(); } }, ofKind.length ? 'Cancel' : 'Clear')) : null);
+          background(renderIntegrations());
+        } }, 'Remove') : h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.delete(integrationKind); background(renderIntegrations()); } }, ofKind.length ? 'Cancel' : 'Clear')) : null);
     };
     const group = (integrationKind, kindTitle, addLabel, ...rest) => {
       const ofKind = rows.filter((item) => item.kind === integrationKind);
@@ -530,7 +530,7 @@ export function mount(container) {
       if (!ofKind.length || adding.has(integrationKind)) forms.push(form(integrationKind, null, kindTitle, ...rest, ofKind, mainId));
       return h('div', { class: 'connection-group' },
         h('div', { class: 'connection-group-head' }, h('h3', {}, kindTitle, ofKind.length > 1 ? h('span', { class: 'muted' }, ` (${ofKind.length})`) : null),
-          editable && ofKind.length && !adding.has(integrationKind) ? h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.add(integrationKind); renderIntegrations(); } }, addLabel) : null),
+          editable && ofKind.length && !adding.has(integrationKind) ? h('button', { class: 'button compact', type: 'button', onClick: () => { addingKinds.add(integrationKind); background(renderIntegrations()); } }, addLabel) : null),
         h('div', { class: 'connection-forms' }, forms));
     };
     clear(integrationsHost, h('div', { class: 'two-col' },
@@ -642,7 +642,7 @@ export function mount(container) {
     async function removeKey(name) {
       await api(`/api/ai/${name}-key`, { method: 'DELETE' });
       toast('API key removed');
-      renderAi();
+      background(renderAi());
     }
     const toggleProviders = () => { ollamaHost.hidden = !providerOllama.checked; claudeHost.hidden = !providerClaude.checked; geminiHost.hidden = !providerGemini.checked; };
     providerOllama.addEventListener('change', toggleProviders);
